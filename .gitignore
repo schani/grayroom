@@ -4,3 +4,4 @@
 testdata/
 *.xcodeproj
 DerivedData/
+out/
