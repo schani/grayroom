@@ -27,6 +27,11 @@ let package = Package(
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .target(
+            name: "GrayroomUI",
+            dependencies: ["GrayroomCore"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .executableTarget(
             name: "grayroom",
             dependencies: [
@@ -35,9 +40,19 @@ let package = Package(
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .executableTarget(
+            name: "GrayroomApp",
+            dependencies: ["GrayroomCore", "GrayroomUI"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .testTarget(
             name: "GrayroomCoreTests",
             dependencies: ["GrayroomCore"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "GrayroomUITests",
+            dependencies: ["GrayroomUI", "GrayroomCore"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

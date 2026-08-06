@@ -82,6 +82,21 @@ struct MaskClarityUniforms {
     var invMaxAbs: Float
 }
 
+/// The B&W mixer's hue band centres, in degrees, in slider order
+/// (red, orange, yellow, green, aqua, blue, purple, magenta).
+///
+/// This is the Swift mirror of `kBandCenters` in `BWMix.metal`; the GUI's
+/// targeted adjustment tool needs the same band math the shader uses, so the
+/// numbers live in exactly one place per language and
+/// `GPUStageTests.testBandCentresMatchTheShader` pins them together.
+public enum BWMixBands {
+    public static let centers: [Double] = [0, 30, 60, 120, 180, 240, 280, 320]
+
+    /// Slider index order matching `EditState.BWMix.sliders`.
+    public static let names = ["Red", "Orange", "Yellow", "Green",
+                               "Aqua", "Blue", "Purple", "Magenta"]
+}
+
 enum StageConstants {
     /// B&W mix authority: ±100 slider -> ±0.8 gray gain at full saturation.
     static let bwGainPerUnit: Float = 0.008

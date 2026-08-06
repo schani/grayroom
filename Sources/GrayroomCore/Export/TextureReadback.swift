@@ -69,6 +69,36 @@ public enum TextureReadback {
         return FloatImage(width: w, height: h, pixels: floats)
     }
 
+    /// Reads a rectangular region of an `rgba16Float` texture.
+    ///
+    /// The GUI's targeted-adjustment tool needs the colour under the cursor from
+    /// a linear intermediate; copying the whole 3 MP texture back for a 9-pixel
+    /// average would be silly, so the region is clipped to the texture and only
+    /// that gets copied.
+    public static func readRegion(_ texture: MTLTexture,
+                                  x: Int, y: Int,
+                                  width: Int, height: Int) throws -> FloatImage {
+        guard texture.pixelFormat == .rgba16Float else {
+            throw ReadbackError.unsupportedPixelFormat(texture.pixelFormat)
+        }
+        guard texture.storageMode != .private else { throw ReadbackError.privateStorage }
+
+        let x0 = min(max(x, 0), max(texture.width - 1, 0))
+        let y0 = min(max(y, 0), max(texture.height - 1, 0))
+        let w = max(1, min(width, texture.width - x0))
+        let h = max(1, min(height, texture.height - y0))
+
+        let componentsPerRow = w * 4
+        var halfs = [Float16](repeating: 0, count: componentsPerRow * h)
+        halfs.withUnsafeMutableBytes { raw in
+            texture.getBytes(raw.baseAddress!,
+                             bytesPerRow: componentsPerRow * MemoryLayout<Float16>.size,
+                             from: MTLRegionMake2D(x0, y0, w, h),
+                             mipmapLevel: 0)
+        }
+        return FloatImage(width: w, height: h, pixels: halfs.map { Float($0) })
+    }
+
     /// Reads a single-channel texture (`r16Float` mask coverage / parameter
     /// maps, `r32Float` clarity pyramids) into `width * height` floats,
     /// row-major, top row first.

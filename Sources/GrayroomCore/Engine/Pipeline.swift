@@ -224,10 +224,23 @@ public final class Pipeline {
     public func maskCoverage(masks: [Mask],
                              width: Int, height: Int,
                              maskIndex: Int? = nil) throws -> [Float] {
+        let texture = try maskCoverageTexture(masks: masks, width: width, height: height,
+                                              maskIndex: maskIndex)
+        return try TextureReadback.readScalar(texture)
+    }
+
+    /// The same coverage, left on the GPU as an `r16Float` texture. The GUI
+    /// composites this as a translucent overlay on the canvas, so reading it
+    /// back to the CPU first would be pure waste.
+    ///
+    /// `maskIndex` selects one mask *whether or not it is enabled* (the overlay
+    /// shows what you are painting); `nil` unions every enabled mask.
+    public func maskCoverageTexture(masks: [Mask],
+                                    width: Int, height: Int,
+                                    maskIndex: Int? = nil) throws -> MTLTexture {
         let selected: [Mask]
         if let i = maskIndex {
-            guard i >= 0, i < masks.count else { return [Float](repeating: 0, count: width * height) }
-            selected = [masks[i]]
+            selected = (i >= 0 && i < masks.count) ? [masks[i]] : []
         } else {
             selected = masks.filter { $0.enabled }
         }
@@ -237,7 +250,7 @@ public final class Pipeline {
         cb.commit()
         cb.waitUntilCompleted()
         if let err = cb.error { throw err }
-        return try TextureReadback.readScalar(texture)
+        return texture
     }
 
     // MARK: - Tone

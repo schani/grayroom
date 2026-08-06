@@ -277,4 +277,77 @@ final class GPUStageTests: XCTestCase {
         XCTAssertFalse(h.asciiPlot(rows: 8).isEmpty)
         XCTAssertTrue(h.summary.contains("pixels=16"))
     }
+
+    // MARK: - Constants shared with the GUI
+
+    /// `BWMixBands.centers` is what the GUI's targeted-adjustment tool does its
+    /// band arithmetic with; if it ever drifts from `kBandCenters` in the shader
+    /// the tool would move the wrong slider. Compare against the shader text
+    /// itself rather than a second hand-written copy.
+    func testBandCentresMatchTheShader() throws {
+        let source = try MetalContext.combinedShaderSource()
+        let line = try XCTUnwrap(source
+            .split(separator: "\n")
+            .first { $0.contains("kBandCenters") && $0.contains("{") })
+        let numbers = line
+            .replacingOccurrences(of: "f", with: "")
+            .split(whereSeparator: { !"0123456789.".contains($0) })
+            .compactMap { Double($0) }
+        // The declaration also carries the array length (8).
+        XCTAssertEqual(numbers, [8] + BWMixBands.centers, "shader line: \(line)")
+    }
+
+    /// The GUI reads back a neighbourhood of a linear intermediate to find the
+    /// hue under the cursor; the region must line up with the full readback.
+    func testReadRegionMatchesTheFullReadback() throws {
+        let (ctx, _) = try TestGPU.require()
+        let texture = try ctx.makeTexture(width: 8, height: 6) { x, y in
+            (Float(x) / 8, Float(y) / 6, 0.25)
+        }
+        let full = try TextureReadback.read(texture)
+        let region = try TextureReadback.readRegion(texture, x: 3, y: 2, width: 3, height: 3)
+        XCTAssertEqual(region.width, 3)
+        XCTAssertEqual(region.height, 3)
+        for j in 0..<3 {
+            for i in 0..<3 {
+                let a = region.rgb(x: i, y: j)
+                let b = full.rgb(x: 3 + i, y: 2 + j)
+                XCTAssertEqual(a.0, b.0, accuracy: 1e-6)
+                XCTAssertEqual(a.1, b.1, accuracy: 1e-6)
+            }
+        }
+        // Clipped at the edges rather than trapping.
+        let clipped = try TextureReadback.readRegion(texture, x: 7, y: 5, width: 4, height: 4)
+        XCTAssertEqual(clipped.width, 1)
+        XCTAssertEqual(clipped.height, 1)
+        let negative = try TextureReadback.readRegion(texture, x: -5, y: -5, width: 2, height: 2)
+        XCTAssertEqual(negative.width, 2)
+    }
+
+    /// The mask overlay on the canvas draws this texture directly.
+    func testMaskCoverageTextureMatchesTheCPUReadbackPath() throws {
+        let (_, pipe) = try TestGPU.require()
+        let mask = Mask(name: "m",
+                        adjustments: MaskAdjustments(exposure: 1),
+                        strokes: [Stroke(brush: BrushParams(size: 0.4, feather: 50),
+                                         polyline: [(0.2, 0.5), (0.8, 0.5)])])
+        let w = 64, h = 48
+        let texture = try pipe.maskCoverageTexture(masks: [mask], width: w, height: h, maskIndex: 0)
+        XCTAssertEqual(texture.width, w)
+        XCTAssertEqual(texture.height, h)
+        let fromTexture = try TextureReadback.readScalar(texture)
+        let fromCPU = try pipe.maskCoverage(masks: [mask], width: w, height: h, maskIndex: 0)
+        XCTAssertEqual(fromTexture, fromCPU)
+        XCTAssertGreaterThan(fromTexture.max() ?? 0, 0.9)
+
+        // A disabled mask still shows its coverage when selected explicitly:
+        // the overlay must show what you are painting.
+        var disabled = mask
+        disabled.enabled = false
+        let selected = try pipe.maskCoverage(masks: [disabled], width: w, height: h, maskIndex: 0)
+        XCTAssertGreaterThan(selected.max() ?? 0, 0.9)
+        // ... but the "all enabled masks" union skips it.
+        let union = try pipe.maskCoverage(masks: [disabled], width: w, height: h, maskIndex: nil)
+        XCTAssertEqual(union.max() ?? 0, 0, accuracy: 1e-6)
+    }
 }

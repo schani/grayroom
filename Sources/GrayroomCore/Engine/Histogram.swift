@@ -7,6 +7,14 @@ public struct Histogram: Equatable, Sendable {
     public let shadowClippedPixels: Int
     public let highlightClippedPixels: Int
 
+    public init(bins: [UInt32], pixelCount: Int,
+                shadowClippedPixels: Int, highlightClippedPixels: Int) {
+        self.bins = bins
+        self.pixelCount = pixelCount
+        self.shadowClippedPixels = shadowClippedPixels
+        self.highlightClippedPixels = highlightClippedPixels
+    }
+
     public var shadowClippedFraction: Double {
         pixelCount > 0 ? Double(shadowClippedPixels) / Double(pixelCount) : 0
     }
