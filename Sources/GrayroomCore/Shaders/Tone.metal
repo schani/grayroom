@@ -1,8 +1,11 @@
-// Tone stage: exposure + contrast/highlights/shadows/whites/blacks.
+// Tone stage: baseline rendition + exposure + contrast/highlights/shadows/
+// whites/blacks + the display shoulder.
 //
 // All the *global* curve math happens on the CPU (ToneCurve.swift) and arrives
 // here as a 1-D LUT texture (r32Float, size x 1) over log2(Y/0.18) in
-// [minEV, maxEV].
+// [minEV, maxEV]. The baseline rendition curve, the always-on highlight
+// shoulder and the Blacks pedestal live only in that LUT — they are not
+// per-mask controls, so this kernel never evaluates them.
 //
 // M3 adds *local* (per-mask) deltas, which cannot go through a LUT: the mask
 // stage hands over a per-pixel (dEV, dContrast, dHighlights, dShadows) in an
@@ -23,12 +26,14 @@ struct ToneUniforms {
     uint  hasLocal;    // 1: `params` holds real per-pixel deltas
 };
 
-constant float kToneContrastGain  = 0.55f;
-constant float kToneContrastSigma = 2.5f;
-constant float kToneHighlightRange = 1.2f;
-constant float kToneShadowRange    = 1.2f;
-constant float kToneRampLo = 0.25f;
-constant float kToneRampHi = 4.0f;
+// These MUST stay identical to the constants in ToneCurve.swift — the two
+// implementations are compared by MaskTests.testGPUToneDeltaMatchesCPUReference.
+constant float kToneContrastGain  = 0.40f;
+constant float kToneContrastSigma = 1.2f;
+constant float kToneHighlightRange = 1.3f;
+constant float kToneShadowRange    = 1.3f;
+constant float kToneRampLo = -2.7f;
+constant float kToneRampHi = 5.3f;
 
 // Quintic smootherstep, clamped: 6t^5 - 15t^4 + 10t^3.
 inline float grSmootherstep(float e0, float e1, float x) {

@@ -30,26 +30,41 @@ final class GPUStageTests: XCTestCase {
 
     // MARK: - Tone
 
+    /// Exposure is still a pure EV shift, but it now sits on top of the baseline
+    /// rendition and below the always-on shoulder — so "+1 EV doubles" is a
+    /// statement about the *rendered* value, and only below the shoulder knee.
+    /// The red / blue / dark patches render below the knee; mid gray and near
+    /// white do not (they are covered by `testToneGPUMatchesCPUCurve`).
     func testExposurePlusOneEVDoublesLinearValues() throws {
+        let base = try run(EditState(), upTo: .tone)
         var edit = EditState()
         edit.tone.exposure = 1
         let out = try run(edit, upTo: .tone)
-        for idx in [P.midGray, P.red, P.blue, P.darkGray] {
+        for idx in [P.red, P.blue, P.darkGray] {
             let (r, g, b) = out.rgb(x: idx, y: 0)
-            let src = patches[idx]
-            XCTAssertEqual(Double(r), Double(src.0) * 2, accuracy: Double(src.0) * 0.02 + 1e-4)
-            XCTAssertEqual(Double(g), Double(src.1) * 2, accuracy: Double(src.1) * 0.02 + 1e-4)
-            XCTAssertEqual(Double(b), Double(src.2) * 2, accuracy: Double(src.2) * 0.02 + 1e-4)
+            let (br, bg, bb) = base.rgb(x: idx, y: 0)
+            XCTAssertEqual(Double(r), Double(br) * 2, accuracy: Double(br) * 0.02 + 1e-4)
+            XCTAssertEqual(Double(g), Double(bg) * 2, accuracy: Double(bg) * 0.02 + 1e-4)
+            XCTAssertEqual(Double(b), Double(bb) * 2, accuracy: Double(bb) * 0.02 + 1e-4)
         }
     }
 
-    func testToneIdentityAtDefaults() throws {
+    /// All sliders at zero is the **baseline rendition**, not the identity: the
+    /// pipeline now starts from a Lightroom-like default instead of scene-linear
+    /// (research/audit/decode-output.json deviation #0).
+    func testToneAtDefaultsIsTheBaselineRendition() throws {
         let out = try run(EditState(), upTo: .tone)
+        let zero = EditState.Tone()
         for idx in 0..<patches.count {
+            let src = patches[idx]
+            let y = 0.2126 * Double(src.0) + 0.7152 * Double(src.1) + 0.0722 * Double(src.2)
+            let gain = ToneCurve.evaluateLinear(y, zero) / y
             let (r, g, b) = out.rgb(x: idx, y: 0)
-            XCTAssertEqual(Double(r), Double(patches[idx].0), accuracy: 0.003)
-            XCTAssertEqual(Double(g), Double(patches[idx].1), accuracy: 0.003)
-            XCTAssertEqual(Double(b), Double(patches[idx].2), accuracy: 0.003)
+            XCTAssertEqual(Double(r), Double(src.0) * gain, accuracy: 0.004, "patch \(idx)")
+            XCTAssertEqual(Double(g), Double(src.1) * gain, accuracy: 0.004, "patch \(idx)")
+            XCTAssertEqual(Double(b), Double(src.2) * gain, accuracy: 0.004, "patch \(idx)")
+            // ... and it really is a rendition: mid gray comes out much brighter.
+            if idx == P.midGray { XCTAssertGreaterThan(gain, 1.5) }
         }
     }
 
@@ -213,7 +228,11 @@ final class GPUStageTests: XCTestCase {
             let (r, _, b) = img.rgb(x: idx, y: 0)
             return Double(r) / max(Double(b), 1e-6)
         }
-        XCTAssertLessThan(warmth(shifted, P.midGray), warmth(mid, P.midGray))
+        // Sampled on the dark patch: with the baseline rendition in place the
+        // mid-gray patch renders at ~0.35 linear, which is above the shadow
+        // crossover at either balance, so it is no longer a probe of it.
+        XCTAssertGreaterThan(warmth(mid, P.darkGray), 1.05)
+        XCTAssertLessThan(warmth(shifted, P.darkGray), warmth(mid, P.darkGray))
     }
 
     func testToningIdentityWhenSaturationsAreZero() throws {
@@ -234,17 +253,26 @@ final class GPUStageTests: XCTestCase {
         var edit = EditState()
         edit.bwMix.enabled = false          // keep colour so all channels are exercised
         let out = try run(edit, upTo: .output)
+        let zero = EditState.Tone()
         for idx in 0..<patches.count {
+            let src = patches[idx]
+            // The tone stage is no longer the identity at zero, so the reference
+            // is "baseline rendition, then sRGB encode".
+            let y = 0.2126 * Double(src.0) + 0.7152 * Double(src.1) + 0.0722 * Double(src.2)
+            let gain = ToneCurve.evaluateLinear(y, zero) / y
             let (r, g, b) = out.rgb(x: idx, y: 0)
-            XCTAssertEqual(Double(r), sRGBEncodeReference(Double(patches[idx].0)), accuracy: 0.002)
-            XCTAssertEqual(Double(g), sRGBEncodeReference(Double(patches[idx].1)), accuracy: 0.002)
-            XCTAssertEqual(Double(b), sRGBEncodeReference(Double(patches[idx].2)), accuracy: 0.002)
+            XCTAssertEqual(Double(r), sRGBEncodeReference(Double(src.0) * gain), accuracy: 0.003)
+            XCTAssertEqual(Double(g), sRGBEncodeReference(Double(src.1) * gain), accuracy: 0.003)
+            XCTAssertEqual(Double(b), sRGBEncodeReference(Double(src.2) * gain), accuracy: 0.003)
         }
     }
 
     func testOutputClampsOutOfRangeValues() throws {
         let (ctx, pipe) = try TestGPU.require()
-        let input = try ctx.makePatchTexture([(-0.5, -0.5, -0.5), (8, 8, 8)])
+        // 64 is above the LUT domain (+8 EV), where the endpoint gain applies —
+        // the only route to a genuine clip now that the tone curve carries a
+        // shoulder that asymptotes at linear 1.0.
+        let input = try ctx.makePatchTexture([(-0.5, -0.5, -0.5), (64, 64, 64)])
         var edit = EditState()
         edit.bwMix.enabled = false
         let result = try pipe.render(input: input, edit: edit, upTo: .output)
@@ -253,12 +281,33 @@ final class GPUStageTests: XCTestCase {
         XCTAssertEqual(Double(out.rgb(x: 1, y: 0).0), 1, accuracy: 1e-3)
     }
 
+    /// The shoulder means the tone stage rolls off toward display white instead
+    /// of cutting off at it. Before wave 1, Exposure +2 mapped everything above
+    /// linear 0.25 to pure white (audit tone.json deviation #0).
+    func testToneRollsOffInsteadOfClipping() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        let input = try ctx.makePatchTexture([(0.5, 0.5, 0.5), (2, 2, 2)])
+        var edit = EditState()
+        edit.bwMix.enabled = false
+        edit.tone = .init(exposure: 2, contrast: 100, whites: 100)
+        let out = try TextureReadback.read(
+            pipe.render(input: input, edit: edit, upTo: .tone).texture)
+        let a = Double(out.rgb(x: 0, y: 0).0)
+        let b = Double(out.rgb(x: 1, y: 0).0)
+        XCTAssertLessThan(a, 0.999, "0.5 clipped at exposure +2")
+        XCTAssertLessThan(b, 0.999, "2.0 clipped at exposure +2")
+        // Still ordered: the shoulder compresses, it does not flatten.
+        XCTAssertGreaterThan(b, a)
+    }
+
     // MARK: - Histogram
 
     func testHistogramCountsAndClipping() throws {
         let (ctx, pipe) = try TestGPU.require()
-        // 4 columns x 4 rows: black, mid, white, white
-        let input = try ctx.makePatchTexture([(0, 0, 0), (0.18, 0.18, 0.18), (2, 2, 2), (2, 2, 2)],
+        // 4 columns x 4 rows: black, mid, white, white. The white patches are
+        // above the LUT domain so they still clip now that the tone curve has a
+        // shoulder (see testToneRollsOffInsteadOfClipping).
+        let input = try ctx.makePatchTexture([(0, 0, 0), (0.18, 0.18, 0.18), (64, 64, 64), (64, 64, 64)],
                                              height: 4)
         var edit = EditState()
         edit.bwMix.enabled = false
@@ -271,8 +320,10 @@ final class GPUStageTests: XCTestCase {
         XCTAssertEqual(h.highlightClippedPixels, 8)
         XCTAssertEqual(h.bins[0], 4)
         XCTAssertEqual(h.bins[255], 8)
-        // 0.18 linear -> ~0.4626 sRGB -> bin 118
-        XCTAssertEqual(h.bins[118] + h.bins[117] + h.bins[119], 4)
+        // Scene 0.18 renders through the baseline curve, not through identity.
+        let midBin = Int((sRGBEncodeReference(
+            ToneCurve.evaluateLinear(0.18, EditState.Tone())) * 255).rounded())
+        XCTAssertEqual(h.bins[midBin - 1] + h.bins[midBin] + h.bins[midBin + 1], 4)
 
         XCTAssertFalse(h.asciiPlot(rows: 8).isEmpty)
         XCTAssertTrue(h.summary.contains("pixels=16"))

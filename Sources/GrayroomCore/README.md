@@ -43,6 +43,10 @@ WithoutEffectiveMasks` asserts that on a full-pipeline render.
 
 ## Tone curve
 
+Retuned in **Lightroom-parity wave 1** (`research/audit/tone.json` deviations
+#0–#4 plus `research/audit/decode-output.json` deviation #0). What changed, and
+why, is at the bottom of this section.
+
 ### Why EV space
 
 The curve is defined on **log2 luminance relative to middle gray**:
@@ -53,69 +57,168 @@ y  = g(x)                    the curve
 Y' = 0.18 * 2^y              output, linear
 ```
 
-Three things fall out of this choice:
+with the pipeline
 
-* **Identity is `g(x) = x`.** Every control is an additive offset, so "all
-  sliders zero" is exactly the identity map, with no floating-point drift.
-* **Exposure is a shift.** `g(x) = x + EV` gives `Y' = Y * 2^EV` exactly. All
-  the other controls are evaluated on `x + EV`, i.e. on the *exposed* image,
-  which matches Lightroom's ordering.
-* **Monotonicity is a slope bound.** `dY'/dY > 0` iff `dy/dx > 0`, and since
-  `g(x) = x + Σ Δ_i(x)`, it suffices that `Σ |dΔ_i/dx| < 1` — a condition on
-  five bounded bumps, which can be checked by hand and is asserted by the tests.
+```
+x_r = baseline(x0)                    fixed rendition curve ("the profile")
+x   = x_r + exposure                  exposure is a pure EV shift
+y   = x + Δ_c + Δ_h + Δ_s + Δ_w       zone controls, evaluated on x
+y   = shoulder(y)                     always-on soft highlight rolloff
+Y'  = blackPedestal(0.18 · 2^y)       Blacks, in the linear output domain
+```
+
+Three things fall out of the EV-space choice:
+
+* **Exposure is a shift.** Because it is applied *after* the baseline and
+  *before* the shoulder, `Y' = Y_rendered · 2^EV` holds exactly for every tone
+  that stays below the shoulder knee (scene luminance up to ~0.125 at the
+  default rendition). Above the knee the shoulder compresses, by design.
+* All the other controls are evaluated on `x`, i.e. on the *exposed, rendered*
+  image — which is also the space Lightroom's histogram zones are defined in.
+* **Monotonicity is a slope bound.** `dY'/dY > 0` iff `dy/dx > 0`. The baseline's
+  derivative is `≥ 0` everywhere and the shoulder's is in `(0, 1]`, so it
+  suffices that the additive zone sum satisfies `Σ |dΔ_i/dx| < 1` — a condition
+  on four bounded bumps, checked by the tests.
+
+### Baseline rendition — what "all sliders zero" means
+
+**The all-zero curve is not the identity.** Lightroom's zero is not linear
+either: opening a raw applies a camera profile whose baseline tone curve
+"brightens essentially all pixel values while increasing shadow contrast and
+decreasing highlight contrast". Grayroom's decode is deliberately neutralised
+(`RawDecoder.neutralize()` zeroes Apple's boost), so before wave 1 the pipeline
+started from scene-linear and every frame looked ~1 stop dark and ~1.7 stops
+flat.
+
+Rather than re-enabling Apple's opaque boost, the rendition is an explicit,
+inspectable curve in the tone stage — part of the fixed pipeline, not a sidecar
+field, so `bwMix.enabled=false` passthrough still shows it:
+
+```
+baseline(x) = x − 1.0 + 2.0 · smootherstep(−6.0, +0.8, x)          [EV]
+```
+
+i.e. deep shadows are pushed down 1 EV, everything from ~+0.8 EV up is lifted
+1 EV, and the crossover is at −2.6 EV. Its constants were fitted to the measured
+neutralized→Apple-default transfer on `testdata/L1000003.DNG`, which gives four
+genuine points on that curve (percentiles map monotonically):
+
+| percentile | scene linear | Apple default | ours |
+|---|---|---|---|
+| p05 | 0.0108 | 21/255 | 21/255 |
+| p50 | 0.0848 | 105/255 | 105/255 |
+| p95 | 0.264 | 191/255 | 191/255 |
+| p99 | 0.312 | 203/255 | 203/255 |
+
+Peak added slope is `1.875/6.8 × 2.0 = 0.55`, i.e. the steepest part of the
+rendition runs at slope 1.55 — a "medium contrast" S-curve. Because that slope
+is never negative it can only *help* monotonicity.
+
+### The display shoulder
+
+The last thing the EV curve does is roll off toward display white
+(`W = log2(1/0.18) = 2.4739 EV`):
+
+```
+shoulder(y) = y                                            y ≤ k
+            = k + (W − k)·(1 − exp(−(y − k)/(W − k)))      y > k     k = 1.4 EV
+```
+
+C¹ at the knee (slope 1 on both sides), strictly increasing, and asymptotic to
+linear 1.0 — so **nothing tone-driven ever hard-clips**. Before wave 1, Exposure
++1 sent everything above linear 0.5 to pure white and Contrast +100 blew out
+every tone above sRGB 79.5%; now both roll off instead.
+
+The one route to a genuine clip that remains is the LUT's out-of-domain gain:
+above `+8 EV` of *scene* luminance the endpoint gain is extrapolated
+multiplicatively and the output clamp takes over.
 
 ### The five controls
 
-All slider values below are normalised to −1…1 (slider/100).
+All slider values below are normalised to −1…1 (slider/100), and `x` is the
+**rendered** EV (post-baseline, post-exposure).
 
 **Contrast** — an odd bump centred on the pivot:
 
 ```
-Δ_c(x) = c * A * x * exp(-x² / 2σ²)          A = 0.55, σ = 2.5 EV
+Δ_c(x) = c * A * x * exp(-x² / 2σ²)          A = 0.40, σ = 1.2 EV
 ```
 
-This adds slope `c·A` at middle gray and decays to zero at the extremes, so
-contrast steepens the midtones without moving black or white. Its derivative is
-`c·A·(1 − x²/σ²)·exp(−x²/2σ²)`, which lies in `c·A·[−0.446, 1]`.
+Peak displacement now sits at `±σ = ±1.2 EV`, i.e. squarely in the midtones as
+Adobe documents ("mainly affecting midtones"), instead of at ±2.5 EV — which was
+*above* display white, so the old bump was still climbing when it ran out of
+range. Slope at the pivot is `1 + c·A`, so ±100 gives 1.40 / 0.60. Its derivative
+is `c·A·(1 − x²/σ²)·exp(−x²/2σ²)`, which lies in `c·A·[−0.446, 1]`.
 
-**Highlights / Shadows** — one-sided quintic smootherstep ramps that saturate to
-a constant EV offset inside their zone:
-
-```
-Δ_h(x) = h * 1.2 EV * smootherstep(0.25,  4.0,  x)
-Δ_s(x) = s * 1.2 EV * smootherstep(0.25,  4.0, -x)
-```
-
-Positive brightens (Lightroom sign convention). Smootherstep (`6t⁵−15t⁴+10t³`)
-has zero first *and* second derivative at both ends, so the controls fade in
-without a slope break; its peak slope is `1.875/width`.
-
-**Whites / Blacks** — the same shape, but reaching further out and with more
-authority, so they act on the endpoints rather than the shoulder:
+**Highlights / Shadows** — one-sided quintic smootherstep ramps:
 
 ```
-Δ_w(x) = w * 1.5 EV * smootherstep(1.0, 7.5,  x)
-Δ_b(x) = b * 1.5 EV * smootherstep(1.0, 7.5, -x)
+Δ_h(x) = h * 1.3 EV * smootherstep(−2.7, 5.3,  x)
+Δ_s(x) = s * 1.3 EV * smootherstep(−2.7, 5.3, −x)
 ```
 
-These are *soft* endpoint controls: they never clip, they only compress or
-expand the far ends. That differs from Lightroom, where extreme blacks genuinely
-crush to zero. Deliberate for v1 — it keeps the curve invertible and monotone.
+The 50% point of each ramp lands at ±1.3 EV — Lightroom's measured
+Highlights/Shadows histogram zone centres — and the ramps are wide enough that
+**both weights are still ~22% at middle gray**. That is the LR taper ("greatest
+effect on the darkest shadows, tapering off to a minimal effect on the
+highlights"), not the old dead band, which was exactly zero for `|x| < 0.25 EV`
+and only reached 50% at ±2.1 EV, inside LR's Whites/Blacks territory.
+
+Measured authority at ±100: 0.28 EV at middle gray, 0.65 EV at the zone centres,
+0.95 EV at display white. Highlights −100 + Shadows +100 cancel exactly at
+middle gray but cut the local slope there to 0.53, which is what actually
+flattens a picture — on `L1000003.DNG` it moves the sky bands down 9–31 levels
+and the foreground bands up 7–19, against ≤2 levels before.
+
+**Whites** — the same shape, placed on Lightroom's Whites zone:
+
+```
+Δ_w(x) = w * 0.6 EV * smootherstep(0.8, 3.4, x)
+```
+
+50% weight at +2.1 EV (LR's Whites zone centre) instead of +4.25 EV, which was
+1.8 stops above anything the output transform could display. At ±100 an sRGB 85%
+gray now moves +0.14 / −0.19 EV (it moved ±0.04 EV before). Whites still cannot
+*create* clipping, because the shoulder is always on — see "Known limitations".
+
+**Blacks** — a pedestal in the **output linear** domain, not an EV offset:
+
+```
+p = 0.02 · |blacks|/100
+Y'' = max(0, Y' − p) / (1 − p)        blacks < 0   (crush)
+Y'' = Y' · (1 − p) + p                blacks > 0   (lift)
+```
+
+Adobe: "Blacks — adjusts black clipping. Drag to the left to increase black
+clipping (map more shadows to pure black)." A bounded EV offset can never reach
+zero, so Blacks left the additive sum. At −100 the black point lands at 2% of
+white (−3.17 EV, inside LR's Blacks zone) and everything at or below it is
+genuinely 0, which is what makes the shadow-clip counter and a Zone-system black
+placement possible at all. Blacks is not maskable, so `Tone.metal` is unaffected.
 
 ### Monotonicity
 
-The tuning constants were picked so the worst-case total derivative stays
-positive. The tightest spot is the positive side around `x ≈ 2.1`, where the
-highlight ramp is steepest and negative contrast subtracts the most:
+The curve is monotone **non-decreasing**, and strictly increasing everywhere
+above the black point. The carve-out is deliberate: Blacks < 0 saturates a toe of
+the domain to exactly 0 (that *is* the control), so "strictly increasing
+everywhere" and "min slope > 0.05" are no longer the right statements. Neither is
+a global slope floor: the shoulder's slope decays to 0 as the input runs away, by
+construction.
+
+What the tuning constants are actually chosen for is the **additive zone sum**
+`x + Δ_c + Δ_h + Δ_s + Δ_w`. Its worst case over all slider corners is
 
 ```
-dy/dx  ≥  1 − 0.60 (highlights) − 0.14 (whites) − 0.11 (contrast)  ≈  0.15
+dy/dx ≥ 1 − 0.43 (whites) − 0.29 (highlights) − 0.18 (contrast) − 0.02 (shadows)
+      ≈ 0.08     at x ≈ +2.0 EV
 ```
 
-The negative side mirrors it. `ToneCurveTests` verifies this two ways: 400
-seeded random slider combinations and all 3⁵ slider corners, each sampled every
-0.02 EV over the full −14…+8 EV domain, asserting a strictly increasing curve
-and a minimum slope above 0.05.
+with the middle-gray case (contrast −100, highlights −100, shadows +100) closing
+at `1 − 0.40 − 0.24 − 0.24 = 0.12`. `ToneCurveTests` verifies all of this three
+ways: `testZoneSumSlopeStaysPositive` over the 81 zone corners, and
+`testMonotonicUnderRandomCombos` / `testMonotonicAtAllSliderCorners` over 400
+seeded slider combinations and all 3⁶ corners (exposure included), each sampled
+every 0.02 EV over the full −14…+8 EV domain.
 
 `makeLUT` additionally forces the sampled curve non-decreasing with a running
 max. With the constants above that pass is a no-op; it exists so that retuning
@@ -184,13 +287,72 @@ Two consequences worth being explicit about:
   vector rather than round-tripping through `log2`/`exp2`. That is what makes an
   unmasked pixel byte-identical to a pre-M3 render.
 
+The baseline rendition, the shoulder and the black pedestal are **not** part of
+the local path: they are properties of the global curve and are already baked
+into `Y'` by the time the delta runs. In particular the local path does not
+re-apply the shoulder (that would compress twice), so a large local Δexposure
+can push a masked highlight past display white and into the output clamp.
+
 Whites and blacks are deliberately not maskable (PLAN.md's per-mask set is
 exposure/contrast/highlights/shadows/clarity), so `grToneDeltaEV` implements
-three components, not five. `MaskTests.testGPUToneDeltaMatchesCPUReference`
-compares the GPU against the CPU components over a grid of 40 luminances × 14
-delta vectors (worst relative error 5·10⁻⁴, i.e. the `rgba16Float` round trip),
-and `testToneDeltaIsMonotoneInLuminance` checks 200 seeded random delta vectors
-over −14…+8 EV.
+three components, not five. Its constants live in two places —
+`ToneCurve.swift`'s `contrastGain/contrastSigma/highlightRange/shadowRange/
+zoneRamp` and `Tone.metal`'s `kTone*` — and **must be changed together**:
+`MaskTests.testGPUToneDeltaMatchesCPUReference` compares the GPU against the CPU
+components over a grid of 40 luminances × 14 delta vectors (worst relative error
+5·10⁻⁴, i.e. the `rgba16Float` round trip), and
+`testToneDeltaIsMonotoneInLuminance` checks 200 seeded random delta vectors over
+−14…+8 EV.
+
+### Lightroom parity — what wave 1 implemented, and what it did not
+
+Implemented (`research/audit/tone.json`):
+
+| # | Deviation | Fix |
+|---|---|---|
+| 0 | Exposure has no rolloff, hard-clips | always-on display shoulder, knee 1.4 EV |
+| 1 | Contrast σ = 2.5 EV blows the whites | σ 2.5 → 1.2 EV, gain 0.55 → 0.40 |
+| 2 | Highlights/Shadows dead band, ~1 EV too far out | ramp (0.25, 4.0) → (−2.7, 5.3), range 1.2 → 1.3 EV |
+| 3 | Whites inert (50% weight 1.8 stops above display white) | ramp (1.0, 7.5) → (0.8, 3.4), range 1.5 → 0.6 EV |
+| 4 | Blacks cannot reach zero | out of the EV sum, into a linear output-domain pedestal |
+
+Plus `research/audit/decode-output.json` #0 (baseline rendition), above.
+
+Deferred, deliberately:
+
+* **#5 — highlight recovery does not desaturate.** The tone kernel is exactly
+  ratio-preserving; LR's recovery converges toward neutral. Needs a change to the
+  kernel's colour behaviour and would retire
+  `testTonePreservesRatiosNoHueShift`.
+* **#6 — Highlights/Shadows are a global 1-D curve; LR's are edge-aware.**
+  Architectural (L): would drive the zone weights from the clarity stage's
+  Gaussian pyramid instead of the pixel luminance.
+* **#7 — Whites/Blacks are not available per mask.** Blocked on a second
+  `rgba16Float` parameter texture, and now also on the fact that Whites and
+  Blacks are no longer additive-EV shapes, so the per-pixel version would have to
+  be designed from scratch.
+* **#8 — the curve is not image-adaptive.** A deterministic curve is the better
+  design for this tool; recorded here rather than "fixed".
+
+Deviations from the audit's *proposed* constants, and why:
+
+* Highlights/Shadows: the audit proposed `smootherstep(−1.0, 3.5)` × 1.8 EV. That
+  ramp is too steep — at middle gray it contributes 0.36 of slope *per side*, so
+  contrast −100 + highlights −100 + shadows +100 lands at
+  `1 − 0.40 − 0.72 = −0.12` and the curve folds over. (The audit only checked the
+  budget at x ≈ 1.25, where the shadow ramp contributes nothing.) The wider,
+  lower ramp used here keeps the same 50% points, gives *more* middle-gray reach
+  than the proposal (0.28 EV vs 0.135, against the 0.25 EV requirement) and
+  closes the budget at 0.12.
+* Whites: the audit's first choice was a white-point rescale `Y ← Y/whitePoint`
+  before the curve. With an always-on shoulder that is just a second Exposure —
+  the mechanism it relies on (clipping against the output clamp) no longer
+  exists. The audit's fallback (a ramp on LR's Whites zone) is what shipped.
+* Shoulder knee 1.4 EV rather than the audit's 1.2: 1.4 is what makes the
+  baseline hit all four measured Apple-default percentiles exactly.
+* Blacks pedestal is applied in the **output** linear domain, not the input one:
+  after the baseline the curve is display-referred, which is the space Adobe's
+  "map more shadows to pure black" is a statement about.
 
 ## Clarity — fast local Laplacian filter
 
@@ -523,5 +685,19 @@ pass.
   of using a persistent pool.
 * White balance is applied at decode time, so changing temp/tint forces a
   re-decode. Decode results are not cached yet.
-* Whites/blacks never hard-clip; see above.
+* The tone curve is never the identity: "all sliders zero" is the baseline
+  rendition (see above). That invariant was retired on purpose in parity wave 1,
+  and with it the "exposure +1 doubles linear luminance" statement above the
+  shoulder knee.
+* Whites cannot *create* highlight clipping, because the shoulder is always on
+  and asymptotes below display white. Adobe documents Whites as a clipping
+  control; an Option-drag threshold view built on this curve would show an empty
+  frame at Whites +100. Blacks *can* clip (that side is a pedestal).
+* Above +8 EV of scene luminance the LUT's endpoint gain is extrapolated
+  multiplicatively, which bypasses the shoulder — the one path by which the tone
+  stage can still hand the output clamp a value above 1.0.
+* Highlights/Shadows are a global 1-D curve, so lifting the shadows flattens the
+  local contrast inside them; Lightroom's are edge-aware (audit tone.json #6).
+* Highlight recovery is exactly ratio-preserving and therefore does not
+  desaturate the way Lightroom's does (audit tone.json #5).
 * No dithering yet — 8-bit exports of smooth gradients can band.
