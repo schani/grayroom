@@ -36,7 +36,7 @@ public final class MetalContext {
 
     /// `Common.metal` is prepended to every stage source; the whole thing is
     /// compiled as one translation unit.
-    static let shaderFiles = ["Common", "Tone", "BWMix", "Toning", "Output", "Histogram"]
+    static let shaderFiles = ["Common", "Tone", "BWMix", "Clarity", "Toning", "Output", "Histogram"]
 
     private var pipelineCache: [String: MTLComputePipelineState] = [:]
     private let cacheLock = NSLock()
@@ -90,6 +90,31 @@ public final class MetalContext {
         let d = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba16Float, width: max(width, 1), height: max(height, 1), mipmapped: false)
         d.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        d.storageMode = .shared
+        guard let t = device.makeTexture(descriptor: d) else { throw MetalError.textureAllocationFailed }
+        return t
+    }
+
+    /// A single-channel `r32Float` scratch texture (clarity pyramids). Full
+    /// float32: the clarity stage works on log2 luminance, where half-float
+    /// steps of ~0.008 stops in the deep shadows would band visibly.
+    /// `read_write` access needs `.shaderRead + .shaderWrite`, which r32Float
+    /// supports on every Apple GPU.
+    public func makeScalarTexture(width: Int, height: Int) throws -> MTLTexture {
+        let d = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r32Float, width: max(width, 1), height: max(height, 1), mipmapped: false)
+        d.usage = [.shaderRead, .shaderWrite]
+        d.storageMode = .shared
+        guard let t = device.makeTexture(descriptor: d) else { throw MetalError.textureAllocationFailed }
+        return t
+    }
+
+    /// An `r16Float` per-pixel amount map (1x1 for a global amount today, full
+    /// size once M3 masks drive it).
+    public func makeAmountTexture(width: Int, height: Int) throws -> MTLTexture {
+        let d = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r16Float, width: max(width, 1), height: max(height, 1), mipmapped: false)
+        d.usage = [.shaderRead, .shaderWrite]
         d.storageMode = .shared
         guard let t = device.makeTexture(descriptor: d) else { throw MetalError.textureAllocationFailed }
         return t

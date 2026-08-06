@@ -1,16 +1,17 @@
 import Foundation
 import Metal
 
-/// Fixed-order global pipeline for M1.
+/// Fixed-order global pipeline for M1 + M2.
 ///
 ///   input (linear, WB applied at decode)
 ///     -> tone       (exposure + 5 tone controls, ratio-preserving)
+///     -> clarity    (fast local Laplacian on log2 luminance) [skipped at 0]
 ///     -> bwMix      (8 hue bands -> gray)          [skipped when disabled]
 ///     -> toning     (split tone, luminance-neutral) [skipped when identity]
 ///     -> output     (linear -> sRGB)
 ///     -> histogram tap
 ///
-/// Clarity (M2) and masks (M3) slot in between tone and bwMix.
+/// Masks (M3) feed per-pixel parameter maps into tone and clarity.
 public final class Pipeline {
     public let context: MetalContext
 
@@ -19,6 +20,7 @@ public final class Pipeline {
     private let toningPipeline: MTLComputePipelineState
     private let outputPipeline: MTLComputePipelineState
     private let histogramPipeline: MTLComputePipelineState
+    private let clarityStage: ClarityStage
 
     public init(context: MetalContext) throws {
         self.context = context
@@ -27,12 +29,13 @@ public final class Pipeline {
         toningPipeline = try context.computePipeline("toningKernel")
         outputPipeline = try context.computePipeline("outputKernel")
         histogramPipeline = try context.computePipeline("histogramKernel")
+        clarityStage = try ClarityStage(context: context)
     }
 
     /// Stage boundaries, in pipeline order. Useful for golden tests that need to
     /// inspect an intermediate (still linear) result.
     public enum Stage: Int, CaseIterable, Sendable {
-        case tone, bwMix, toning, output
+        case tone, clarity, bwMix, toning, output
     }
 
     public struct Result {
@@ -82,6 +85,15 @@ public final class Pipeline {
         }
         latest = dst
         advance()
+
+        // --- clarity ---------------------------------------------------------
+        // Skipped entirely at 0, so the default edit is bit-for-bit unchanged.
+        if runs(.clarity), edit.clarity != 0 {
+            try clarityStage.encode(commandBuffer, source: src, destination: dst,
+                                    clarity: edit.clarity)
+            latest = dst
+            advance()
+        }
 
         // --- B&W mix --------------------------------------------------------
         if runs(.bwMix), edit.bwMix.enabled {

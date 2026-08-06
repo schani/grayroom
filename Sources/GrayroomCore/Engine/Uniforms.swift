@@ -26,6 +26,23 @@ struct ToningUniforms {
     var strength: Float
 }
 
+/// Mirrors `ClarityUniforms` in `Clarity.metal`. Scalar-only, 4-byte aligned
+/// throughout, so the Swift and MSL layouts agree.
+struct ClarityUniforms {
+    var sigmaR: Float
+    var lift: Float
+    var gamma0: Float
+    var gammaStep: Float
+    var center: Float
+    var levelIndex: UInt32
+    var levelCount: UInt32
+    var remapFine: UInt32
+}
+
+struct ClarityApplyUniforms {
+    var maxStops: Float
+}
+
 enum StageConstants {
     /// B&W mix authority: ±100 slider -> ±0.8 gray gain at full saturation.
     static let bwGainPerUnit: Float = 0.008
