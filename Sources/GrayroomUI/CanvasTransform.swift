@@ -7,8 +7,9 @@ import Foundation
 /// # Units
 ///
 /// Everything here is in **device pixels**, not points. The canvas view
-/// converts AppKit's point coordinates with `convertToBacking` before it talks
-/// to this type. The payoff is that `zoom` reads directly as the familiar
+/// scales AppKit's point coordinates by `backingScaleFactor` before it talks
+/// to this type (NOT via `convertToBacking(_ point:)`, which negates y in a
+/// flipped view). The payoff is that `zoom` reads directly as the familiar
 /// magnification number: `zoom == 1` is one image pixel per screen pixel, i.e.
 /// Lightroom's "1:1" / 100 %.
 ///
