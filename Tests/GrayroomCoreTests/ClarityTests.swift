@@ -15,9 +15,10 @@ final class ClarityTests: XCTestCase {
     func testClarityMappingIsIdentityAtZero() {
         let p = ClarityMapping.parameters(for: 0)
         XCTAssertEqual(p.gain, 0)
-        XCTAssertEqual(p.alpha, 1)
         XCTAssertEqual(p.amount, 0)
+        XCTAssertEqual(p.lift, 0)
         XCTAssertTrue(p.isIdentity)
+        XCTAssertEqual(p.detailSlope, 1)
         // gain = 0 makes the remap the identity for every value and centre.
         for g in ClarityMapping.gammaLevels {
             for v in stride(from: -14.0, through: 4.0, by: 0.25) {
@@ -28,26 +29,29 @@ final class ClarityTests: XCTestCase {
 
     func testClarityMappingIsMonotoneInMagnitude() {
         var previousGain = -1.0
-        var previousAlpha = 2.0
         for c in stride(from: 0.0, through: 100.0, by: 5) {
             let p = ClarityMapping.parameters(for: c)
             let n = ClarityMapping.parameters(for: -c)
             // Symmetric structure: the same gain and amount on both sides, the
-            // sign only picks which way alpha moves away from 1.
+            // sign only picks which side of 1 alpha sits on.
             XCTAssertEqual(p.gain, n.gain)
             XCTAssertEqual(p.amount, n.amount)
             XCTAssertFalse(p.isSmoothing)
             XCTAssertEqual(n.isSmoothing, c > 0)
 
             XCTAssertGreaterThan(p.gain, previousGain)
-            XCTAssertLessThan(p.alpha, previousAlpha)     // boost: alpha falls below 1
-            XCTAssertGreaterThanOrEqual(n.alpha, 1)       // smooth: alpha rises above 1
+            // Wave 3: alpha is pinned at its endpoint value and `gain` does all
+            // the interpolating, which is what makes `lift` linear. (At c = 0
+            // both signs take the boost branch, and `gain = 0` makes the choice
+            // moot — the remap is the identity either way.)
+            XCTAssertEqual(p.alpha, 1 - ClarityMapping.alphaBoostRange, accuracy: 1e-12)
+            if c > 0 {
+                XCTAssertEqual(n.alpha, 1 + ClarityMapping.alphaSmoothRange, accuracy: 1e-12)
+            }
             previousGain = p.gain
-            previousAlpha = p.alpha
         }
         XCTAssertEqual(ClarityMapping.parameters(for: 100).gain, 1)
-        XCTAssertEqual(ClarityMapping.parameters(for: 100).alpha,
-                       1 - ClarityMapping.alphaBoostRange, accuracy: 1e-12)
+        XCTAssertEqual(ClarityMapping.parameters(for: 100).amount, 1)
         // Monotone in |clarity| all the way through to the remap's detail slope.
         var previousSlope = 1.0
         for c in stride(from: 5.0, through: 100.0, by: 5) {
@@ -56,11 +60,42 @@ final class ClarityTests: XCTestCase {
             previousSlope = s
             XCTAssertLessThan(ClarityMapping.parameters(for: -c).detailSlope, 1)
         }
-        XCTAssertEqual(ClarityMapping.parameters(for: -100).alpha,
-                       1 + ClarityMapping.alphaSmoothRange, accuracy: 1e-12)
         // Out-of-range sliders clamp rather than extrapolate.
         XCTAssertEqual(ClarityMapping.parameters(for: 250), ClarityMapping.parameters(for: 100))
         XCTAssertEqual(ClarityMapping.parameters(for: -250), ClarityMapping.parameters(for: -100))
+    }
+
+    /// The whole slider does work, not just its top third (audit
+    /// `clarity-local` #0). `lift` is linear in the slider with the endpoints
+    /// unchanged, so the detail slope is 1.15 at +10 and 1.375 at +25 where it
+    /// used to be 1.006 and 1.044.
+    func testClarityResponseIsLinearInTheSlider() {
+        let expected: [Double: Double] = [10: 1.15, 25: 1.375, 50: 1.75, 75: 2.125, 100: 2.5]
+        for (c, slope) in expected {
+            XCTAssertEqual(ClarityMapping.parameters(for: c).detailSlope, slope, accuracy: 1e-12,
+                           "clarity +\(c)")
+        }
+        let negative: [Double: Double] = [10: 0.9333333333333333, 25: 0.8333333333333334,
+                                          50: 0.6666666666666667, 100: 1.0 / 3.0]
+        for (c, slope) in negative {
+            XCTAssertEqual(ClarityMapping.parameters(for: -c).detailSlope, slope, accuracy: 1e-12,
+                           "clarity -\(c)")
+        }
+        // Exactly linear: lift(c) = c/100 · lift(100) on both sides.
+        for c in stride(from: -100.0, through: 100.0, by: 2.5) {
+            let reference = ClarityMapping.referenceLift(sign: c < 0 ? -1 : 1)
+            XCTAssertEqual(ClarityMapping.parameters(for: c).lift,
+                           abs(c) / 100 * reference, accuracy: 1e-12)
+        }
+        // …which is exactly what makes the mask amount map (|c|/100 against a
+        // fixed full-scale pyramid) reproduce each pixel's own strength.
+        XCTAssertEqual(ClarityMapping.referenceLift(sign: 1), 1.5, accuracy: 1e-12)
+        XCTAssertEqual(ClarityMapping.referenceLift(sign: -1), -2.0 / 3.0, accuracy: 1e-12)
+        XCTAssertLessThan(abs(ClarityMapping.referenceLift(sign: 1)), ClarityMapping.maxLift)
+        // Still exactly the identity at 0, which is the invariant everything
+        // else rests on.
+        XCTAssertEqual(ClarityMapping.parameters(for: 0).lift, 0)
+        XCTAssertEqual(ClarityMapping.parameters(for: 0).amount, 0)
     }
 
     func testClarityRemapIsMonotoneOddAndFadesOut() {
@@ -142,16 +177,35 @@ final class ClarityTests: XCTestCase {
 
     // MARK: - GPU support
 
-    /// 4-stop step edge at x = 128 plus a fine (period 4) multiplicative ripple.
+    /// 4-stop step edge at x = 128 plus a multiplicative ripple of a chosen
+    /// spatial period.
+    ///
+    /// The period matters since wave 3: clarity is a mid/large-radius control
+    /// and deliberately does **not** lift the pixel-scale band (that band is
+    /// sensor noise, and Lightroom's Clarity does not amplify it either — see
+    /// `ClarityMapping.levelGains`). Period 4 is the pixel-scale band, period 16
+    /// is texture.
+    ///
+    /// The two plateaus straddle middle gray (±2 EV) rather than sitting 4 and 1
+    /// stops *under* it as they used to. That is deliberate too: since wave 3 the
+    /// lift is midtone-weighted, so a test image parked in the deep shadows
+    /// measures the tone weight as much as the filter.
     private static let edgeX = 128
-    private static let darkY: Float = 0.0225
-    private static let brightY: Float = 0.36
+    private static let darkY: Float = 0.045
+    private static let brightY: Float = 0.72
     private static let rippleAmplitude: Float = 0.12
+    private static let texturePeriod = 16.0
+    private static let noisePeriod = 4.0
 
     private func syntheticPixel(_ x: Int, _ y: Int) -> (Float, Float, Float) {
+        ripplePixel(x, y, period: Self.texturePeriod)
+    }
+
+    private func ripplePixel(_ x: Int, _ y: Int, period: Double) -> (Float, Float, Float) {
         let base = x < Self.edgeX ? Self.darkY : Self.brightY
-        let sx = Float(sin(Double(x) * .pi / 2))
-        let sy = Float(sin(Double(y) * .pi / 2))
+        let w = 2 * Double.pi / period
+        let sx = Float(sin(Double(x) * w))
+        let sy = Float(sin(Double(y) * w))
         let v = base * (1 + Self.rippleAmplitude * 0.5 * (sx + sy))
         return (v, v, v)
     }
@@ -191,11 +245,12 @@ final class ClarityTests: XCTestCase {
     }
 
     // Far-from-edge texture patch and the two near-edge flat patches. All widths
-    // are multiples of the ripple period (4) so the ripple cancels in the means.
+    // are multiples of both ripple periods (4 and 16) so the ripple cancels in
+    // the means.
     private let farXs = 40..<88
     private let farYs = 40..<216
-    private let nearLeftXs = 104..<124
-    private let nearRightXs = 132..<152
+    private let nearLeftXs = 108..<124
+    private let nearRightXs = 132..<148
 
     // MARK: - GPU: identity
 
@@ -226,14 +281,17 @@ final class ClarityTests: XCTestCase {
 
         let farBefore = stats(before, width: w, farXs, farYs)
         let farAfter = stats(after, width: w, farXs, farYs)
+        print("[clarity +80] texture RMS \(farBefore.std) -> \(farAfter.std) "
+              + "(x\(farAfter.std / farBefore.std))")
         XCTAssertGreaterThan(farAfter.std, farBefore.std * 1.3,
-                             "clarity +80 should clearly raise fine-texture local contrast")
+                             "clarity +80 should clearly raise texture local contrast")
 
         // Halo suppression: the flat regions either side of the step must barely
         // move. Bound is in stops; 0.03 stops is ~2% in linear luminance.
         for xs in [nearLeftXs, nearRightXs] {
             let b = stats(before, width: w, xs, farYs)
             let a = stats(after, width: w, xs, farYs)
+            print("[clarity +80] near-edge \(xs) mean shift \(a.mean - b.mean) stops")
             XCTAssertLessThan(abs(a.mean - b.mean), 0.03,
                               "near-edge mean shifted by \(a.mean - b.mean) stops")
         }
@@ -246,20 +304,23 @@ final class ClarityTests: XCTestCase {
                            - stats(before, width: w, nearLeftXs, farYs).mean)
         let unsharpShift = abs(stats(unsharp, width: w, nearLeftXs, farYs).mean
                                - stats(before, width: w, nearLeftXs, farYs).mean)
+        print("[clarity +80] near-edge shift: local Laplacian \(llfShift) vs unsharp "
+              + "\(unsharpShift) stops (gain \(gain))")
         XCTAssertGreaterThan(unsharpShift, 3 * llfShift,
                              "unsharp \(unsharpShift) vs local Laplacian \(llfShift) stops")
     }
 
     /// Unsharp mask on the same synthetic image, in log2 luminance, with a
-    /// sigma-4 Gaussian. The ripple (period 4) is annihilated by that blur, so
-    /// the fine-texture gain is exactly `1 + amount`.
+    /// sigma-8 Gaussian — twice the ripple period, so the ripple is essentially
+    /// annihilated by the blur and the texture gain is close to `1 + amount`.
+    /// The comparison only needs the *halo* it produces at the step edge.
     private func unsharpReference(amount: Double) -> [Double] {
         let w = 256, h = 256
         var base = [Double](repeating: 0, count: w * h)
         for y in 0..<h {
             for x in 0..<w { base[y * w + x] = log2(Double(syntheticPixel(x, y).0)) }
         }
-        let sigma = 4.0, radius = 12
+        let sigma = 8.0, radius = 24
         var kernel = (-radius...radius).map { exp(-Double($0 * $0) / (2 * sigma * sigma)) }
         let ksum = kernel.reduce(0, +)
         kernel = kernel.map { $0 / ksum }
@@ -287,6 +348,84 @@ final class ClarityTests: XCTestCase {
         return (0..<(w * h)).map { base[$0] + amount * (base[$0] - blur[$0]) }
     }
 
+    /// Clarity is the mid/large-radius local-contrast control: it lifts texture
+    /// and leaves the pixel-scale band — which on a real capture is sensor noise
+    /// — essentially where it was (audit `clarity-local` #2).
+    ///
+    /// Two runs of the same test image with only the ripple period changed, so
+    /// the amplitude, the tone and the step edge are identical and the only
+    /// variable is spatial frequency.
+    func testClarityLiftsTextureButNotThePixelScaleBand() throws {
+        let w = 256
+        func gain(period: Double) throws -> Double {
+            let pixel = { (x: Int, y: Int) in self.ripplePixel(x, y, period: period) }
+            let before = logLuminance(try runClarity(0, pixel: pixel))
+            let after = logLuminance(try runClarity(80, pixel: pixel))
+            let b = stats(before, width: w, farXs, farYs).std
+            let a = stats(after, width: w, farXs, farYs).std
+            return a / b
+        }
+        let texture = try gain(period: Self.texturePeriod)
+        let noise = try gain(period: Self.noisePeriod)
+        print("[clarity band] +80 gain: period-16 texture x\(texture), "
+              + "period-4 pixel scale x\(noise)")
+
+        XCTAssertGreaterThan(texture, 1.3, "texture must be lifted")
+        // Level 0 is passed through with gain 0 and level 1 with 0.4, and a
+        // period-4 ripple lives almost entirely in level 0.
+        XCTAssertLessThan(noise, 1.10, "pixel-scale detail must be nearly untouched")
+        XCTAssertGreaterThan(texture, 3 * (noise - 1) + 1,
+                             "the band separation is the point: \(texture) vs \(noise)")
+    }
+
+    /// Clarity is a **midtone** control: the same texture gets less of the lift
+    /// in the deep shadows and up in the highlights, which is why a heavy
+    /// clarity push does not blow speculars or crush blacks (audit #1).
+    func testClarityIsWeightedTowardTheMidtones() throws {
+        // CPU mapping first: a Gaussian in stops around 0.18 with a floor.
+        XCTAssertEqual(ClarityMapping.toneWeight(logLuminance: log2(0.18)), 1, accuracy: 1e-12)
+        XCTAssertEqual(ClarityMapping.toneWeight(logLuminance: log2(0.18) + 3),
+                       exp(-0.5), accuracy: 1e-12)
+        XCTAssertEqual(ClarityMapping.toneWeight(logLuminance: log2(0.18) - 3),
+                       exp(-0.5), accuracy: 1e-12)
+        XCTAssertEqual(ClarityMapping.toneWeight(logLuminance: log2(0.18) + 9),
+                       ClarityMapping.toneWeightFloor, accuracy: 1e-12)
+        // Symmetric, monotone away from the peak, never zero.
+        for ev in stride(from: 0.0, through: 8.0, by: 0.25) {
+            let up = ClarityMapping.toneWeight(logLuminance: log2(0.18) + ev)
+            let down = ClarityMapping.toneWeight(logLuminance: log2(0.18) - ev)
+            XCTAssertEqual(up, down, accuracy: 1e-12)
+            XCTAssertGreaterThanOrEqual(up, ClarityMapping.toneWeightFloor)
+            XCTAssertLessThanOrEqual(up, 1)
+        }
+
+        // And the GPU honours it: the same ripple at three tone levels. 256²
+        // so the pyramid actually has the levels clarity works on (a 64 px short
+        // side would bottom out at two levels, i.e. level 0 only, which the band
+        // weighting passes straight through).
+        let w = 256, h = 256
+        func gain(atEV ev: Double) throws -> Double {
+            let base = 0.18 * exp2(ev)
+            let pixel = { (x: Int, _: Int) -> (Float, Float, Float) in
+                let v = Float(base * (1 + 0.12 * sin(Double(x) * 2 * .pi / Self.texturePeriod)))
+                return (v, v, v)
+            }
+            let before = logLuminance(try runClarity(0, width: w, height: h, pixel: pixel))
+            let after = logLuminance(try runClarity(80, width: w, height: h, pixel: pixel))
+            let xs = 64..<192, ys = 64..<192
+            return stats(after, width: w, xs, ys).std / stats(before, width: w, xs, ys).std
+        }
+        let mid = try gain(atEV: 0)
+        let shadow = try gain(atEV: -5)
+        let highlight = try gain(atEV: 2.5)
+        print("[clarity midtone] gain at -5 EV \(shadow), 0 EV \(mid), +2.5 EV \(highlight)")
+        XCTAssertGreaterThan(mid, shadow, "midtones must get more clarity than deep shadows")
+        XCTAssertGreaterThan(mid, highlight, "midtones must get more clarity than highlights")
+        // Attenuated, not switched off.
+        XCTAssertGreaterThan(shadow, 1.05)
+        XCTAssertGreaterThan(highlight, 1.05)
+    }
+
     // MARK: - GPU: negative clarity
 
     func testNegativeClaritySmoothsTextureAndKeepsTheStep() throws {
@@ -296,8 +435,10 @@ final class ClarityTests: XCTestCase {
 
         let farBefore = stats(before, width: w, farXs, farYs)
         let farAfter = stats(after, width: w, farXs, farYs)
-        XCTAssertLessThan(farAfter.std, farBefore.std * 0.7,
-                          "clarity -80 should smooth the fine texture")
+        print("[clarity -80] texture RMS \(farBefore.std) -> \(farAfter.std) "
+              + "(x\(farAfter.std / farBefore.std))")
+        XCTAssertLessThan(farAfter.std, farBefore.std * 0.8,
+                          "clarity -80 should smooth the texture")
 
         // The step itself survives: the plateau means either side stay put and
         // their difference is still (close to) the 4 stops we put in.
@@ -370,23 +511,48 @@ final class ClarityTests: XCTestCase {
             renderer.pipeline.render(input: decoded.texture, edit: plain, upTo: .clarity).texture)
         let b = try TextureReadback.read(
             renderer.pipeline.render(input: decoded.texture, edit: edit, upTo: .clarity).texture)
-        XCTAssertGreaterThan(highFrequencyEnergy(b), highFrequencyEnergy(a) * 1.2)
+        // The band profile is the interesting part on a real photograph: the
+        // gain has to *grow* with scale, because clarity is the coarse
+        // local-contrast control and the pixel-scale band (sensor noise, plus
+        // resampling detail on this 1024 px preview) is meant to come through
+        // untouched. Measured here at clarity +60, span 1 → 16:
+        // 1.00, 1.02, 1.08, 1.16, 1.24.
+        var previous = 0.0
+        for s in [1, 2, 4, 8, 16] {
+            let ratio = bandEnergy(b, span: s) / bandEnergy(a, span: s)
+            print("[clarity e2e] band span \(s): \(bandEnergy(a, span: s)) -> "
+                  + "\(bandEnergy(b, span: s)) (x\(ratio))")
+            XCTAssertGreaterThan(ratio, previous, "band gain must grow with scale (span \(s))")
+            previous = ratio
+        }
+        XCTAssertGreaterThan(bandEnergy(b, span: 16), bandEnergy(a, span: 16) * 1.15,
+                             "clarity +60 must clearly raise coarse local contrast")
+        XCTAssertLessThan(pixelScaleEnergy(b), pixelScaleEnergy(a) * 1.02,
+                          "the pixel-scale band must be left alone")
         XCTAssertEqual(b.meanLuminance, a.meanLuminance, accuracy: a.meanLuminance * 0.1)
     }
 
-    /// Mean squared horizontal first difference of log2 luminance — a crude but
-    /// robust local-contrast measure.
-    private func highFrequencyEnergy(_ img: FloatImage) -> Double {
+    /// Mean squared horizontal *second* difference of log2 luminance at scale
+    /// `span` — a crude but robust band-pass. It rejects both DC and a linear
+    /// ramp, so unlike a first difference it is not diluted by the large-scale
+    /// structure of a real photograph, and its passband is centred near period
+    /// `4·span`. `span = 1` is the pixel-scale (noise) band; `span = 4` is the
+    /// band clarity is supposed to work in.
+    private func bandEnergy(_ img: FloatImage, span: Int) -> Double {
         let v = logLuminance(img)
         var acc = 0.0
         var n = 0.0
         for y in 0..<img.height {
-            for x in 1..<img.width {
-                let d = v[y * img.width + x] - v[y * img.width + x - 1]
+            for x in span..<(img.width - span) {
+                let d = v[y * img.width + x - span] - 2 * v[y * img.width + x]
+                    + v[y * img.width + x + span]
                 acc += d * d
                 n += 1
             }
         }
         return acc / n
     }
+
+    private func localContrastEnergy(_ img: FloatImage) -> Double { bandEnergy(img, span: 4) }
+    private func pixelScaleEnergy(_ img: FloatImage) -> Double { bandEnergy(img, span: 1) }
 }

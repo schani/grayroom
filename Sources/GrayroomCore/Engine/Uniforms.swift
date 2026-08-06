@@ -52,6 +52,14 @@ struct ClarityUniforms {
 
 struct ClarityApplyUniforms {
     var maxStops: Float
+    /// Midtone weight: peak, width and floor. See `ClarityMapping.toneWeight`.
+    var toneCenter: Float
+    var toneSigma: Float
+    var toneFloor: Float
+}
+
+struct ClarityLevelGainUniforms {
+    var levelGain: Float
 }
 
 // MARK: - Masks (M3)
@@ -87,7 +95,8 @@ struct MaskClampUniforms {
 struct MaskClarityUniforms {
     var globalClarity: Float
     var dominantSign: Float
-    var invMaxAbs: Float
+    /// 1 / 100 — the **fixed** full-scale reference, not the frame's maximum.
+    var invReference: Float
 }
 
 /// The B&W mixer's hue band centres, in degrees, in slider order

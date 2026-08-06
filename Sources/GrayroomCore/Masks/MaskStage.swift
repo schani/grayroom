@@ -155,16 +155,25 @@ final class MaskStage {
     }
 
     /// Builds the clarity stage's per-pixel amount map from `paramsB`.
+    ///
+    /// Normalised against the **fixed** full-scale clarity (100), which is also
+    /// what `ClarityStage` builds its pyramid at. Before wave 3 this divided by
+    /// the frame's largest |clarity|, so adding a local clarity mask changed the
+    /// effective global clarity everywhere else in the frame (audit
+    /// `clarity-local` #6): global 25 with a +20 mask gave amount 25/45 of a
+    /// strength-45 rendition, which under the old convex slider response was an
+    /// effective clarity of ~35 outside the mask, and two disjoint +50 masks each
+    /// rendered at strength 100 · 0.5. With a fixed reference and a lift that is
+    /// linear in the slider, `amount·L_llf(100)` *is* `L_llf(c)` exactly.
     func encodeClarityAmount(_ cb: MTLCommandBuffer,
                              paramsB: MTLTexture,
                              globalClarity: Double,
                              dominantSign: Double,
-                             maxAbs: Double,
                              width: Int, height: Int) throws -> MTLTexture {
         let amount = try context.makeAmountTexture(width: width, height: height)
         var u = MaskClarityUniforms(globalClarity: Float(globalClarity),
                                     dominantSign: Float(dominantSign),
-                                    invMaxAbs: Float(maxAbs > 0 ? 1 / maxAbs : 0))
+                                    invReference: 1.0 / 100.0)
         try encodePass(cb, clarityAmountPipeline, width, height) { e in
             e.setTexture(paramsB, index: 0)
             e.setTexture(amount, index: 1)

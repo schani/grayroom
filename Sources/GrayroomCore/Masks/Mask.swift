@@ -168,10 +168,13 @@ public struct BrushParams: Codable, Equatable, Sendable {
     /// 0…100. `hardness = 1 − feather/100`: the fraction of the radius that is
     /// at full opacity before the falloff starts.
     public var feather: Double
-    /// 0…100. Per-*stamp* alpha; overlapping stamps build up.
+    /// 0…100. The **rate** of application: one pass over an area deposits this
+    /// much coverage, and further passes build up over it (0.2 → 0.36 → 0.49 …)
+    /// toward `density`. Overlapping stamps *within* one stroke do not build up.
     public var flow: Double
-    /// 0…100. Per-*stroke* ceiling: the stroke's own buffer is clamped here
-    /// before it is merged, so one stroke never exceeds it where it self-overlaps.
+    /// 0…100. Absolute ceiling on the mask in the painted area: no number of
+    /// strokes can push coverage past it. Painting at a density *below* the
+    /// coverage already there leaves that coverage alone.
     public var density: Double
 
     public init(size: Double = 0.05, feather: Double = 50, flow: Double = 100, density: Double = 100) {
@@ -195,7 +198,7 @@ public struct BrushParams: Codable, Equatable, Sendable {
     public var hardness: Double { 1 - min(max(feather, 0), 100) / 100 }
     /// Per-stamp alpha, 0…1.
     public var flowAlpha: Double { min(max(flow, 0), 100) / 100 }
-    /// Per-stroke ceiling, 0…1.
+    /// Absolute coverage ceiling, 0…1.
     public var densityCeiling: Double { min(max(density, 0), 100) / 100 }
 }
 

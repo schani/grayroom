@@ -89,7 +89,11 @@ public final class RawDecoder {
     }
 
     /// Zeroes Apple's look so the output is linear scene-referred.
-    private static func neutralize(_ f: CIRAWFilter) {
+    ///
+    /// Internal rather than private so `DecodeOutputTests` can assert the
+    /// resulting settings directly: the preview/export agreement this buys is a
+    /// property of *these parameters*, not of any one rendition.
+    static func neutralize(_ f: CIRAWFilter) {
         f.baselineExposure = 0
         f.shadowBias = 0
         f.boostAmount = 0
@@ -98,7 +102,22 @@ public final class RawDecoder {
         f.isGamutMappingEnabled = false
         f.exposure = 0
         f.extendedDynamicRangeAmount = 0
-        // Lens correction stays on; NR / sharpening keep their per-camera defaults.
+        // Capture sharpening OFF (wave 3, audit `decode-output` #3).
+        //
+        // Apple's per-camera default is `sharpnessAmount = 0.9` on these Leica
+        // DNGs — measured: +83 % Laplacian-of-log-luminance RMS on a full-res
+        // centre crop. But CIRAWFilter silently *disables* sharpening whenever
+        // `scaleFactor < 1`, and the GUI previews at 2560 px while export runs
+        // at full resolution. So the on-screen image had no capture sharpening
+        // and the exported file had a strong, uncontrollable one, with clarity
+        // running downstream of it amplifying halos that were never visible
+        // while editing. Pinning it to a fixed non-zero value would not fix
+        // that — it is a no-op below full res either way — so the only value
+        // that makes preview and export agree is 0. A real
+        // Amount/Radius/Detail/Masking stage is deferred (M5).
+        f.sharpnessAmount = 0
+        // Lens correction stays on; NR keeps its per-camera defaults (measured
+        // scale-invariant, so it does not break preview/export agreement).
     }
 
     // MARK: - Probe

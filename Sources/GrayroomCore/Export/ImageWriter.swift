@@ -118,12 +118,15 @@ public enum ImageWriter {
         var bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue)
 
         if bitsPerComponent == 8 {
+            // 8-bit is the only path that dithers: 16-bit has ~2.5 orders of
+            // magnitude more codes than any tone gradient needs. See `Dither`.
             bytesPerRow = w * componentsPerPixel
             var bytes = [UInt8](repeating: 0, count: bytesPerRow * h)
             for p in 0..<(w * h) {
+                let x = p % w, y = p / w
                 for c in 0..<3 {
-                    let v = image.pixels[p * 4 + c]
-                    bytes[p * 3 + c] = UInt8(clamping: Int((min(max(v, 0), 1) * 255).rounded()))
+                    bytes[p * 3 + c] = Dither.quantize8(image.pixels[p * 4 + c],
+                                                        x: x, y: y, channel: c)
                 }
             }
             data = Data(bytes) as CFData

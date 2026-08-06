@@ -20,12 +20,34 @@ import Foundation
 /// alpha(d) = flow · (1 − smoothstep(inner, radius, d))
 /// ```
 ///
-/// Stamps composite into a per-**stroke** buffer with standard over-compositing
-/// (`a ← a + s·(1 − a)`), so flow builds up sub-linearly: two passes at flow 20
-/// give 0.36, not 0.4. That buffer is then clamped at `density` and merged into
-/// the mask — `max(mask, stroke)` for a normal stroke, `mask·(1 − stroke)` for
-/// an erase stroke. The two-buffer scheme is what makes "one stroke never
-/// exceeds its density even where it crosses itself" work.
+/// ## Flow, density and the composite rules (wave 3)
+///
+/// Stamps composite into a per-**stroke** buffer with `max`, and that buffer is
+/// over-composited into the mask, capped at `density`:
+///
+/// ```
+/// stroke:  s ← max(s, alpha(d))                       (within one stroke)
+/// paint:   m ← min(m + s·(1 − m), max(m, density))     (merge)
+/// erase:   m ← m · (1 − min(s, density))
+/// ```
+///
+/// This is the standard non-incremental paint model, and it is what makes Flow
+/// mean what Lightroom means by it: **a rate that accumulates across strokes**.
+/// One pass deposits ~flow (0.2 at flow 20), a second takes it to 0.36, a third
+/// to 0.49 … asymptotically to the density ceiling. That is the dodge-and-burn
+/// mechanic — repeated light passes sculpt coverage.
+///
+/// Before wave 3 the rules were the other way round (over-composite *within* a
+/// stroke, `max` merge *across* strokes), which made flow a one-shot opacity:
+/// ~7 stamps overlap on the centreline at 15 % spacing, so a single flow-20
+/// stroke already reached 0.67, and repainting it added nothing at all because
+/// `max(x, x) = x`. Audit `clarity-local` #7/#8.
+///
+/// `density` is now an **absolute ceiling on the mask**, not a per-stroke one:
+/// `max(m, density)` also means painting at density 40 over an area already at
+/// 0.8 leaves it at 0.8 rather than pulling it down, matching Lightroom's "no
+/// matter how many times you stroke it". The eraser keeps its own density as a
+/// cap on how much one stroke can remove.
 ///
 /// Position and pressure are interpolated **linearly** between authored points.
 /// Catmull-Rom interpolation (smoother for sparse, fast strokes) is future work;
@@ -148,7 +170,7 @@ public enum MaskRasterizer {
                         let a = s.alpha * profile(distance: d, inner: s.innerRadius, outer: s.radius)
                         if a <= 0 { continue }
                         let i = y * width + x
-                        strokeBuf[i] = strokeBuf[i] + a * (1 - strokeBuf[i])
+                        strokeBuf[i] = max(strokeBuf[i], a)
                     }
                 }
             }
@@ -160,7 +182,8 @@ public enum MaskRasterizer {
                 }
             } else {
                 for i in 0..<coverage.count {
-                    coverage[i] = max(coverage[i], min(strokeBuf[i], ceiling))
+                    let m = coverage[i]
+                    coverage[i] = min(m + strokeBuf[i] * (1 - m), max(m, ceiling))
                 }
             }
         }
@@ -235,9 +258,11 @@ public enum MaskRasterizer {
     /// The clarity variant the frame is rendered with, per the README's M3
     /// contract.
     ///
-    /// `L_llf` is computed once, at full strength, for the largest |clarity|
-    /// present in the frame; the per-pixel amount is `|clarity(x)| /
-    /// |clarity_max|`. When global and local clarity have **conflicting signs**
+    /// `L_llf` is computed once at the **full-scale** lift for one sign; the
+    /// per-pixel amount is `|clarity(x)| / 100`. Only this function's *sign* is
+    /// used for that (its magnitude is still what decides which sign wins, and
+    /// `clarity == 0` still means "skip the stage"). When global and local
+    /// clarity have **conflicting signs**
     /// the v1 rule is: render the variant of the *dominant* sign (the end of the
     /// range with the larger magnitude) and clamp the other side's amount to 0 —
     /// i.e. a small opposite-sign region is left untouched rather than being

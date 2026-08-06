@@ -178,6 +178,44 @@ final class CanvasDisplayInputTests: XCTestCase {
         try assertDisplayAgreesWithInput("fit")
     }
 
+    /// The drawable is tagged sRGB so the window server colour-matches it to the
+    /// display profile (wave 3, audit `decode-output` #9). Untagged, the
+    /// pipeline's sRGB-encoded values were interpreted in the *display's* space,
+    /// so on a P3 panel every toned image was drawn more saturated than the
+    /// exported sRGB file — the split-toning sliders lied. Neutral B&W looks the
+    /// same either way, which is exactly why this went unnoticed.
+    func testDrawableIsTaggedSRGB() throws {
+        let layer = try XCTUnwrap(h.canvas.layer as? CAMetalLayer)
+        let space = try XCTUnwrap(layer.colorspace)
+        XCTAssertEqual(space.name, CGColorSpace.sRGB)
+        XCTAssertEqual(h.canvas.colorPixelFormat, .bgra8Unorm)
+    }
+
+    /// The canvas dithers to 8 bits with the exporter's rule, so a smooth
+    /// gradient does not band on screen either. It must stay within one code of
+    /// the undithered value — a dither that shifted the picture would break
+    /// every "what you see is the PNG" claim in this suite.
+    func testCanvasDitherLeavesExactCodesAlone() throws {
+        // Inside a quadrant every filter tap is the same 0/255 marker colour, so
+        // the fragment value is exactly on a code and the dither must be a
+        // no-op. (The 0.09 backdrop is *not* on a code and is expected to
+        // alternate between 22 and 23 — that is the dither working.)
+        let frame = try render()
+        let t = h.canvas.transform
+        var checked = 0, offCode = 0
+        for py in stride(from: 5, to: frame.height, by: 11) {
+            for px in stride(from: 5, to: frame.width, by: 11) {
+                let view = CGPoint(x: CGFloat(px) + 0.5, y: CGFloat(py) + 0.5)
+                guard quadrant(ofImagePoint: t.imagePoint(fromView: view)) != nil else { continue }
+                checked += 1
+                let (r, g, b) = frame.rgb(x: px, y: py)
+                if ![r, g, b].allSatisfy({ $0 == 0 || $0 == 255 }) { offCode += 1 }
+            }
+        }
+        XCTAssertGreaterThan(checked, 100)
+        XCTAssertEqual(offCode, 0, "\(offCode)/\(checked) image pixels moved off their exact code")
+    }
+
     func testDisplayAgreesWithInputAtActualSize() throws {
         h.canvas.zoomToActualSize()
         XCTAssertClose(CGFloat(h.canvas.transform.zoom), 1, 1e-9)

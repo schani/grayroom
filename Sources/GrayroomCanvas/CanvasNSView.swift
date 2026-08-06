@@ -102,6 +102,15 @@ public final class CanvasNSView: MTKView {
         self.commandQueue = commandQueue
         super.init(frame: .zero, device: device)
         colorPixelFormat = .bgra8Unorm
+        // Tag the drawable sRGB so the window server colour-matches it to the
+        // display profile (wave 3, audit `decode-output` #9). Without this the
+        // pipeline's sRGB-encoded values were handed to the display raw and
+        // interpreted in *its* space: on a P3 or wider panel every toned image
+        // was drawn noticeably more saturated than the exported sRGB file, so
+        // the split-toning sliders lied about the result. A neutral B&W frame is
+        // unaffected either way (R = G = B is the same neutral in any RGB
+        // space). This is also the hook to change for EDR previews later.
+        (layer as? CAMetalLayer)?.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         framebufferOnly = true
         isPaused = true
         enableSetNeedsDisplay = true

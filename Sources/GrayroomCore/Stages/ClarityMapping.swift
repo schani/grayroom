@@ -51,8 +51,33 @@ public enum ClarityMapping {
     /// alpha at clarity = +100 is `1 − alphaBoostRange`, at −100 it is
     /// `1 + alphaSmoothRange`. The remap's fine-detail slope is `1/alpha`, so
     /// ±100 means "fine detail ×2.5" and "fine detail ×1/3".
+    ///
+    /// These are **endpoint** definitions: alpha no longer slides with the
+    /// slider (see `parameters(for:)`), it is pinned here and `gain` does the
+    /// interpolating, which is what makes the response linear.
     public static let alphaBoostRange: Double = 0.6
     public static let alphaSmoothRange: Double = 2.0
+
+    /// Midtone weighting of the applied lift (wave 3, audit `clarity-local` #1).
+    ///
+    /// Lightroom's Clarity is a *midtone* local-contrast control: highlights and
+    /// deep shadows are protected, which is why a heavy clarity push does not
+    /// blow specular highlights or crush blacks. Ours used to apply the same
+    /// lift at every level of the gamma grid.
+    ///
+    /// The weight is a Gaussian in stops around middle gray with a floor, so
+    /// extremes are *attenuated* rather than switched off (a hard zero would put
+    /// a visible strength edge across a smooth gradient):
+    ///
+    /// ```
+    /// w(L) = max(toneWeightFloor, exp(−½·((L − log2 0.18) / toneWeightSigmaEV)²))
+    /// ```
+    ///
+    /// σ = 3 EV keeps the whole diffuse range (−2…+2 EV, w ≥ 0.80) near full
+    /// strength and only rolls off into the deep shadows and the highlight
+    /// shoulder; the floor is reached at ±5.4 EV.
+    public static let toneWeightSigmaEV: Double = 3.0
+    public static let toneWeightFloor: Double = 0.2
 
     /// `lift` must stay below this or the remap stops being monotone: the
     /// minimum of `(1−y²)·exp(−y²/2)` is −0.4463 at y = √3.
@@ -70,6 +95,25 @@ public enum ClarityMapping {
     public static let minPyramidDimension = 32
     public static let maxPyramidLevels = 8
 
+    /// Per-pyramid-level scale on the lift (wave 3, audit `clarity-local` #2).
+    ///
+    /// Clarity in Lightroom is the *mid/large-radius* local-contrast control —
+    /// Texture is the mid-frequency one and was explicitly engineered to spare
+    /// the finest high-frequency content so it does not amplify noise, and
+    /// Clarity sits coarser still. Ours lifted every Laplacian level with the
+    /// same slope, level 0 included, so at +100 sensor grain was multiplied by
+    /// 2.5× exactly like real texture.
+    ///
+    /// Level 0 is pixel scale (period ≲ 4 px) — that band is now passed through
+    /// untouched, level 1 gets 40 %, and everything coarser gets the full lift.
+    /// The complementary weights are what a future Texture slider would use.
+    public static let levelGains: [Double] = [0.0, 0.4]
+
+    /// The lift scale for pyramid level `l` (1.0 past the end of `levelGains`).
+    public static func levelGain(_ l: Int) -> Double {
+        l < levelGains.count ? levelGains[l] : 1.0
+    }
+
     // MARK: - Slider mapping
 
     /// What the clarity slider means to the remap function.
@@ -81,8 +125,10 @@ public enum ClarityMapping {
     ///   *exactly* the identity for any alpha.
     /// * The sign of clarity picks which variant is built; the magnitude drives
     ///   both alpha and gain, so strength is monotone in |clarity|.
-    /// * `amount` is the final `mix(L, L_llf, amount)` weight. It is 1 for a
-    ///   global clarity; M3 masks replace it with a per-pixel texture.
+    /// * `amount` is the final `mix(L, L_llf, amount)` weight. Since wave 3 the
+    ///   pyramid is *always* built at the full-scale lift (see `referenceLift`),
+    ///   so the global amount is `|clarity|/100`; M3 masks replace it with a
+    ///   per-pixel texture carrying the same quantity.
     public struct Parameters: Equatable, Sendable {
         public var alpha: Double
         public var gain: Double
@@ -107,20 +153,54 @@ public enum ClarityMapping {
     ///
     /// ```
     /// gain  = a                                   (0 at 0, 1 at ±100)
-    /// alpha = 1 − alphaBoostRange · a   (clarity > 0)
-    ///       = 1 + alphaSmoothRange · a  (clarity < 0)
+    /// alpha = 1 − alphaBoostRange     (clarity > 0)   = 0.4, fixed
+    ///       = 1 + alphaSmoothRange    (clarity < 0)   = 3.0, fixed
+    /// lift  = gain · (1/alpha − 1)                 = ±1.5 · a / −0.667 · a
     /// ```
     ///
-    /// The structure is symmetric — `gain(+c) == gain(−c)` and `alpha` departs
-    /// from 1 monotonically on both sides — but deliberately *not* mirror
-    /// symmetric in strength, because the detail slope is `1/alpha`: reaching
-    /// "detail ×1/3" needs alpha = 3 while "detail ×2.5" needs only alpha = 0.4.
-    /// The excursions are chosen so ±100 are comparably strong.
+    /// **Wave 3 (audit `clarity-local` #0).** `alpha` used to slide with the
+    /// slider as well, which made `lift = a·(1/(1 − 0.6a) − 1)` strongly convex:
+    /// the detail slope was 1.006 at +10, 1.044 at +25 and 1.214 at +50, i.e.
+    /// the first half of the slider did nothing and the whole perceptual range
+    /// lived in +60…+100. Lightroom's working range is +10…+25 and Adobe's own
+    /// instruction ("increase until you see halos, then back off") only makes
+    /// sense if small values already do visible work. Pinning `alpha` at its
+    /// endpoint value and letting `gain` interpolate makes `lift` **linear** in
+    /// the slider while keeping both endpoints exactly where they were (detail
+    /// ×2.5 at +100, ×1/3 at −100). New slope table: 1.15 at +10, 1.375 at +25,
+    /// 1.75 at +50, 2.5 at +100; 0.933 / 0.833 / 0.667 / 0.333 negative.
+    ///
+    /// Linearity is not just cosmetic: the whole filter is exactly affine in
+    /// `lift` (the pyramid operators and the hat weights are linear and the
+    /// weights use the *unremapped* Gaussian pyramid), so a linear slider
+    /// response makes `amount = |c|/100` reproduce each pixel's own strength
+    /// exactly — which is what fixes the mask-normalisation bug (audit #6).
+    ///
+    /// The two endpoint excursions stay asymmetric because the slope is
+    /// `1/alpha`: "detail ×1/3" needs alpha = 3 while "×2.5" needs only 0.4.
     public static func parameters(for clarity: Double) -> Parameters {
         let c = min(max(clarity, -100), 100) / 100
         let a = abs(c)
-        let alpha = c >= 0 ? 1 - alphaBoostRange * a : 1 + alphaSmoothRange * a
-        return Parameters(alpha: alpha, gain: a, amount: a == 0 ? 0 : 1, isSmoothing: c < 0)
+        let alpha = c >= 0 ? 1 - alphaBoostRange : 1 + alphaSmoothRange
+        return Parameters(alpha: alpha, gain: a, amount: a, isSmoothing: c < 0)
+    }
+
+    /// The lift the local-Laplacian pyramid is **always** built with, for a
+    /// given sign. `parameters(for:).amount` then scales the result per pixel.
+    ///
+    /// Building at full scale and scaling down afterwards is exactly equivalent
+    /// (the filter is affine in `lift`) and it makes the rendition independent
+    /// of *which other* clarity values happen to be present in the frame — see
+    /// `MaskStage.encodeClarityAmount`.
+    public static func referenceLift(sign: Double) -> Double {
+        parameters(for: sign < 0 ? -100 : 100).lift
+    }
+
+    /// Midtone weight of the applied lift at log2 luminance `l`. CPU reference
+    /// for `grClarityToneWeight` in `Clarity.metal`.
+    public static func toneWeight(logLuminance l: Double) -> Double {
+        let y = (l - log2(0.18)) / toneWeightSigmaEV
+        return max(toneWeightFloor, exp(-0.5 * y * y))
     }
 
     // MARK: - Remap

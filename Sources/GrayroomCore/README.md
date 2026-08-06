@@ -449,6 +449,9 @@ r_g(v) = v + lift · d · exp(−d² / 2σ_r²),    d = v − g
 | `epsLuminance` | 2⁻¹⁴ | luminance floor before the log |
 | `maxAppliedStops` | 6 | safety clamp on `2^(L_out−L)` |
 | pyramid | ≥ 32 px short side, ≤ 8 levels | |
+| `levelGains` | 0, 0.4, then 1 | pixel-scale band passed through (wave 3) |
+| `toneWeightSigmaEV` | 3 EV | midtone weighting, Gaussian around 0.18 (wave 3) |
+| `toneWeightFloor` | 0.2 | extremes attenuated, never switched off |
 
 Outside the working range the weights clamp onto the end levels, where the remap
 is essentially the identity — clarity fades out instead of misbehaving.
@@ -459,21 +462,79 @@ is essentially the identity — clarity fades out instead of misbehaving.
 
 ```
 gain  = a
-alpha = 1 − 0.6·a   (clarity > 0, boost)      detail slope = 1 + gain·(1/alpha − 1)
-      = 1 + 2.0·a   (clarity < 0, smooth)
+alpha = 0.4   (clarity > 0, boost)     lift = gain·(1/alpha − 1) = ±1.5·a
+      = 3.0   (clarity < 0, smooth)                              = −0.667·a
+                                       detail slope = 1 + lift
 ```
 
 `gain` blends the remap with the identity, so **clarity = 0 is exactly the
-identity** for any alpha — and the stage is skipped outright anyway, so a
-default edit is bit-for-bit what it was before M2. `alpha` keeps its usual
-reading: `1/alpha` is the fine-detail gain, `<1` boosts, `>1` smooths. The two
-excursions are asymmetric because the slope is `1/alpha`: ±100 give detail
-×2.5 and ×1/3.
+identity** — and the stage is skipped outright anyway, so a default edit is
+bit-for-bit what it was before M2. `alpha` keeps its usual reading: `1/alpha` is
+the fine-detail gain at full scale, `<1` boosts, `>1` smooths. The two endpoint
+values are asymmetric because the slope is `1/alpha`: ±100 give detail ×2.5 and
+×1/3.
 
-Measured on the synthetic step-plus-ripple test image at clarity +80: fine
-texture 0.087 → 0.143 stops RMS (×1.65), while the flat region 4 px from a
-4-stop edge moves by 0.0006 stops. An unsharp mask tuned to the same texture
-gain moves it by 0.042 stops — 65× more.
+**Wave 3 (audit `clarity-local` #0) linearised this.** `alpha` used to slide with
+the slider too (`1 − 0.6a`), which made `lift` strongly convex — detail slope
+1.006 at +10, 1.044 at +25, 1.214 at +50 — so the first half of the slider was
+dead and the whole perceptual range lived in +60…+100. Lightroom's documented
+working range is +10…+25. Pinning `alpha` at its endpoint and letting `gain`
+interpolate keeps both endpoints exactly where they were and makes everything
+between them linear: **1.15 at +10, 1.375 at +25, 1.75 at +50, 2.5 at +100**.
+Measured on the M2 reference frame (1067×1600, span-16 local-contrast RMS,
+relative to clarity 0): +10 went from +0.25 % to +2.2 %, +25 from +1.8 % to
++5.7 %, +60 unchanged at +14 %.
+
+Linearity is also structural, not cosmetic. The pyramid operators and the hat
+weights are linear and the weights read the *unremapped* Gaussian pyramid, so
+the whole filter is exactly affine in `lift`:
+
+```
+L_llf(lift) = L + lift · R,      R independent of lift
+```
+
+That is what lets the per-pixel amount map be exact — see below.
+
+### Band weighting
+
+`Lap_out[l] ← Lap[L][l] + g_l · (Lap_out[l] − Lap[L][l])` with
+`g = (0, 0.4, 1, 1, …)`, one pass per level after the k loop
+(`clarityLevelGainKernel`). The identity above is what makes that one pass
+instead of an extra pyramid: the unlifted part of the accumulated Laplacian is
+just `Lap[L][l]`, which is `G[l] − up(G[l+1])`.
+
+Level 0 is pixel scale, i.e. sensor noise. Lightroom's Clarity is the
+mid/large-radius local-contrast control — Texture is the mid-frequency one and
+was explicitly engineered to spare the finest content so it does not amplify
+noise, and Clarity sits coarser still. Ours lifted every level equally, so at
++100 grain was multiplied by 2.5× exactly like real texture (audit #2). Measured
+on the reference frame, pixel-scale (span-1) RMS at clarity +60: **+9.7 % before,
+−0.1 % now**, while the coarse band is unchanged. On the synthetic image a
+period-16 ripple gains ×1.52 at +80 where a period-4 ripple gains ×1.00.
+
+The complementary weights are what a future Texture slider would use.
+
+### Midtone weighting
+
+`amount(x) ← amount(x) · w(L)` in the apply kernel, with
+
+```
+w(L) = max(0.2, exp(−½·((L − log2 0.18) / 3)²))
+```
+
+Clarity in Lightroom is a midtone control: highlights and deep shadows are
+protected, which is why a heavy push does not blow speculars or crush blacks
+(audit #1). σ = 3 EV keeps the diffuse range (±2 EV, w ≥ 0.80) near full strength
+and rolls off into the shadows and the highlight shoulder; the floor means the
+extremes are attenuated rather than switched off, so there is no strength edge
+across a smooth gradient. Measured at +80 on a flat ripple: ×1.13 at −5 EV,
+×1.61 at 0 EV, ×1.52 at +2.5 EV. It multiplies the amount, so **clarity 0 is
+still exactly the identity** and the M3 mask contract is untouched.
+
+Measured on the synthetic step-plus-ripple test image at clarity +80: texture
+0.132 → 0.200 stops RMS (×1.52), while the flat region 4 px from a 4-stop edge
+moves by 0.0023 stops. An unsharp mask tuned to the same texture gain moves it by
+0.52 stops — 230× more.
 
 ### Per-pixel amount (the M3 contract, now implemented)
 
@@ -486,19 +547,30 @@ L_out = mix(L, L_llf, amountTex(x))
 with `amountTex` clamped-sampled, so a **1×1 texture is the global case** and no
 shader change was needed for M3. What M3 actually put in it:
 
-* `L_llf` is computed **once**, at full strength for the largest |clarity|
-  present in the frame (global slider or accumulated mask delta), and
+* `L_llf` is computed **once**, at the **fixed full-scale lift** for the dominant
+  sign, and
 
   ```
   c(x)      = clamp(clarity_global + Δclarity(x), −100, 100)
-  amount(x) = clamp(sign_dominant · c(x), 0, |c_max|) / |c_max|
+  amount(x) = clamp(sign_dominant · c(x), 0, 100) / 100
   ```
 
-  scales it per pixel (`maskClarityAmountKernel`). Blending within one sign is
-  linear, which is exactly what a coverage mask wants.
-* `c_max` is the end of the range `[global + Σ min(Δ,0), global + Σ max(Δ,0)]`
-  with the larger magnitude — a bound, since every coverage is ≤ 1, so
-  `amount ≤ 1` always.
+  scales it per pixel (`maskClarityAmountKernel`). Since the filter is affine in
+  `lift` and `lift` is linear in the slider, `amount · (L_llf(100) − L)` **is**
+  `L_llf(c(x)) − L`, exactly.
+* **Wave 3 fixed a real bug here (audit #6).** The reference used to be the
+  frame's largest |clarity|, so global 25 with a +20 mask built the pyramid at
+  strength 45 and blended it at 25/45 *everywhere outside the mask* — and under
+  the old convex response that linear blend was not the strength-25 rendition
+  but roughly a strength-35 one, a 40 % error in slider terms. Two disjoint +50
+  masks summed to `c_max = 100`, so each region rendered at strength 100 × 0.5.
+  With a fixed reference an unmasked pixel takes an arithmetically identical
+  path whether or not masks exist, so the invariant is now **bit** equality:
+  `MaskTests.testAClarityMaskDoesNotChangeTheRenditionOutsideIt` renders global
+  25 with and without a small +20 dab and asserts zero differing pixels outside
+  it. (The old code passed any tolerance-based version of that test — the README
+  measured its error at 0.1 % on a low-detail frame — which is exactly why the
+  test asserts equality.)
 * **Sign conflict rule (v1, chosen deliberately):** when the range straddles
   zero, only the **dominant** sign's variant is rendered and the opposite side
   is clamped to amount 0 — those pixels are left untouched rather than getting a
@@ -506,13 +578,9 @@ shader change was needed for M3. What M3 actually put in it:
   exists"; that would double the cost of the most expensive stage in the
   pipeline for a case (a smoothing mask under a boosting global, or vice versa)
   that is rare and whose failure mode is benign. `MaskTests.-
-  testClarityVariantPicksTheDominantSign` pins the rule.
-* The price of the single-variant model: with global 25 and a +20 mask the frame
-  is rendered as clarity 45 at amount 25/45 outside the mask, which is a *linear
-  blend* toward the strength-45 result rather than the exact strength-25 result.
-  Measured on the M3 reference render that is a 0.1 % luminance shift in the
-  unmasked bottom third — visible in no way, but it is not bit-identity, and the
-  end-to-end test asserts 0.5 % rather than equality.
+  testClarityVariantPicksTheDominantSign` pins the rule. It is the one thing the
+  single-variant model still costs; the amount-map normalisation no longer costs
+  anything.
 
 ## Masks — brush-painted local adjustments
 
@@ -543,7 +611,9 @@ StrokePoint      x, y, pressure
 * **`size` is the brush *diameter* as a fraction of the image long edge**
   (`max(w, h)`), so masks are resolution-independent and the brush stays round
   on non-square images. Everything else is unitless: `feather`, `flow` and
-  `density` are 0…100, `pressure` is 0…1.
+  `density` are 0…100, `pressure` is 0…1. `flow` is the **rate** one pass
+  deposits and `density` the **absolute ceiling** the passes build toward — see
+  the stamp model below.
 * `pressure` scales the stamp **radius**, not its alpha.
 
 ### The stamp model
@@ -566,14 +636,35 @@ alpha(d) = flow/100 · (1 − smoothstep(inner, radius, d))
   at GUI event rates the input points are dense enough not to care.
 * `inner = radius − 1` at `feather = 0` is the **1 px antialias minimum**: a
   "hard" brush still gets one pixel of ramp instead of a jaggy disc.
-* Stamps composite into a per-**stroke** buffer with over-compositing,
-  `a ← a + s·(1 − a)`, so flow builds up sub-linearly: two passes at flow 20 give
-  0.36, not 0.4. That buffer is clamped at `density/100` **before** merging,
-  which is what makes "one stroke never exceeds its density where it crosses
-  itself" work. On the GPU the stroke buffer never exists as a texture: each
-  thread walks the stroke's stamps in order in a register.
-* Strokes merge into the mask in order: `mask = max(mask, stroke)` normally,
-  `mask = mask·(1 − stroke)` for an eraser. Erase is scoped to its own mask.
+* Stamps composite into a per-**stroke** buffer with `max`, and the buffer is
+  over-composited into the mask, capped at `density/100`:
+
+  ```
+  within a stroke:  s ← max(s, alpha(d))
+  paint merge:      m ← min(m + s·(1 − m), max(m, density))
+  erase merge:      m ← m · (1 − min(s, density))
+  ```
+
+  On the GPU the stroke buffer never exists as a texture: each thread walks the
+  stroke's stamps in order in a register. Erase is scoped to its own mask.
+
+  This is the standard non-incremental paint model, and it is what makes **Flow
+  a rate that accumulates across strokes**, as in Lightroom: one pass over an
+  area deposits ~flow (0.2 at flow 20), a second takes it to 0.36, a third to
+  0.49, asymptotically to the ceiling. That is the dodge-and-burn mechanic.
+  **Density is an absolute ceiling on the mask**, not a per-stroke one — no
+  number of strokes gets past it — and `max(m, density)` means painting at a low
+  density over denser coverage leaves that coverage alone rather than pulling it
+  down.
+
+  Wave 3 swapped the two rules round (audit `clarity-local` #7/#8). Before, the
+  build-up was *within* a stroke and the merge was `max(mask, stroke)`: with 15 %
+  spacing about 7 stamps overlap on the centreline, so a single flow-20 stroke
+  already reached 0.67, and repainting it added exactly nothing because
+  `max(x, x) = x`. Flow was a compressed one-shot opacity control, not a rate.
+  Re-rendering the M3 reference mask with the new rules moved its mean coverage
+  0.378 → 0.363: the core of a flow-100 stroke is unchanged, the feathered rim is
+  genuinely soft again instead of being hardened by stamp accumulation.
 
 One compute dispatch per stroke, brute force over the stamp list per pixel with
 a bounding-box reject. That is O(pixels × stamps) and is fine at v1 sizes (the
@@ -784,6 +875,16 @@ engineering of the slider-to-gain law, the band centres or the tonal weighting
 curve exists. The direction and rough magnitude are solid; the exact numbers are
 ours.
 
+### Wave 3
+
+`research/audit/clarity-local.json` #0, 1, 2, 6, 7, 8 and
+`research/audit/decode-output.json` #1, 3, 8, 9 — the clarity response curve,
+midtone weighting and band weighting; the mask amount normalisation; the brush
+flow/density model; the clip threshold, capture sharpening, 8-bit dither and
+canvas colour management. Each is written up in its own section above.
+**`DEVIATIONS.md` in the repo root is the living record** of where every audit
+item across all four files stands.
+
 ## Output transform
 
 Plain IEC 61966-2-1 sRGB encoding with a 0…1 clamp. Files are tagged sRGB and
@@ -792,15 +893,88 @@ written without alpha (8-bit PNG/JPEG, 16-bit PNG/TIFF).
 The histogram tap runs on this output-referred image: 256 luminance bins plus
 per-pixel shadow (`min channel ≤ 0.5/255`) and highlight (`max channel ≥
 254.5/255`) clip counters, accumulated with `atomic_fetch_add` in one compute
-pass.
+pass. The UI lights its clipping triangles at **32 clipped pixels**, an absolute
+count rather than a fraction of the frame (`HistogramModel.clipWarningPixels`,
+wave 3, audit `decode-output` #1). A fraction — it was 0.1 % — meant ~3 000
+pixels on the preview and ~24 000 on a 24 MP export, so a blown light source
+never lit it *and* the preview and the export disagreed about the same edit.
+Lightroom's triangles light on essentially any clipped pixel, which is what makes
+"push Whites until the triangle just lights" usable.
+
+### 8-bit dithering
+
+`Export/Dither.swift`. Both 8-bit output points — `ImageWriter.makeCGImage`'s
+8-bit branch and the canvas fragment shader — quantise by **stochastic
+rounding**: the value picks between the two codes bracketing it, with probability
+equal to its fractional part, from a hash of `(x, y, channel)`.
+
+```
+s = clamp(v,0,1)·255;   out = floor(s) + (hash(x,y,c) < frac(s) ? 1 : 0)
+```
+
+It bites harder in a monochrome app than in a colour one: a grey sky has no
+chroma noise to break up the contours and the tone/clarity stages are smooth
+analytic functions, so a gradient spanning five codes over a thousand pixels came
+out as five hard bands. Measured on that ramp: **6 codes / max run 201 / 5
+transitions → 7 codes / max run 47 / 329 transitions**, mean preserved to 0.03 of
+a code. `out/k-dither-ramp.png` is the side-by-side (top half undithered).
+
+Not the textbook ±1 LSB triangular dither, deliberately: TPDF moves an *exactly
+representable* value to a neighbouring code with probability 1/8 regardless, so
+pure black would speckle to 1 and a clipped highlight to 254 — a worse artefact
+than the banding, and one that clamping to the bracketing pair does not fix.
+Stochastic rounding preserves the mean exactly, never leaves the bracketing
+codes, and degenerates to "do nothing" as the fractional part goes to zero. Its
+cost is signal-dependent noise power (`frac·(1−frac)`), which is precisely the
+behaviour wanted at the ends of the scale.
+
+Not applied in `outputKernel` — the histogram tap reads that texture and the clip
+counters must not see noise — and not in `writeGray`, which writes data. 16-bit
+export is undithered.
+
+### Canvas colour management
+
+The canvas drawable is `bgra8Unorm` with `CAMetalLayer.colorspace` set to sRGB
+(wave 3, audit `decode-output` #9), so the window server colour-matches it to the
+display profile. Untagged, the pipeline's sRGB-encoded values were handed to the
+display raw and interpreted in *its* space: on a P3 or wider panel every toned
+image was drawn noticeably more saturated than the exported sRGB file, so the
+split-toning sliders lied about the result. A neutral B&W frame is unaffected
+either way (R = G = B is the same neutral in any RGB space), which is why it went
+unnoticed. This is also the hook to change for EDR previews.
+
+### Capture sharpening
+
+`RawDecoder.neutralize` sets `sharpnessAmount = 0` (wave 3, audit `decode-output`
+#3). Apple's per-camera default for the test Leicas is 0.9 — measured +83 %
+Laplacian-of-log-luminance RMS on a full-res centre crop — but CIRAWFilter
+silently disables sharpening whenever `scaleFactor < 1`, and the GUI previews at
+2560 px while export runs at full resolution. The on-screen image therefore had
+no capture sharpening and the exported file had a strong, uncontrollable one,
+with clarity running downstream amplifying halos that were never visible while
+editing. Pinning it to a fixed non-zero value cannot fix that (it is a no-op
+below full res either way), so 0 is the only value that makes the two agree. A
+real Amount/Radius/Detail/Masking stage is deferred (M5). NR keeps its per-camera
+defaults — measured scale-invariant, so it does not break the agreement.
 
 ## Known limitations (M1 + M2 + M3)
 
 * Local tone deltas compose *after* the global curve rather than being folded
   into one curve, so global and local sliders are not additive (see above).
-* One clarity variant per frame: opposite-sign clarity is dropped, and the
-  single-variant linear blend is an approximation for pixels whose |clarity|
-  is below the frame maximum.
+* One clarity variant per frame: opposite-sign clarity is dropped (a smoothing
+  brush under a boosting global slider leaves the skin merely *excluded* from
+  the global clarity rather than softened — audit `clarity-local` #5). The
+  amount-map approximation that used to come with the single-variant model is
+  gone: it is exact now, and bit-exact outside a mask.
+* Negative clarity is still the mirror of the positive remap — detail
+  attenuation, not Lightroom's glow/bloom with its midtone lift (audit #4) — and
+  there is no non-edge-aware halo component, so high positive clarity gains
+  micro-texture but never the broad edge gradients LR gives (audit #3).
+* Clarity's band weighting is defined on *pyramid* levels, so "pixel scale"
+  means pixel scale of the rendition being computed: a 1024 px preview and a
+  full-resolution export exclude different real-world detail sizes. Measured at
+  clarity +60 on the reference frame, the coarse-band gain is the same either
+  way; what changes is how much resampled detail counts as level 0.
 * Mask rasterisation is brute force per stamp, at full pipeline resolution, and
   re-runs whenever the strokes or the size change (one-entry cache). No
   half-resolution mask, no guided-filter edge snapping.
@@ -808,9 +982,6 @@ pass.
   visibly straight segments.
 * Only drawn masks exist: no gradients, no radial shapes, no parametric or range
   masks, no per-mask invert/intersect, no reuse of one mask by several stages.
-* Clarity amplifies noise along with texture — there is no noise floor in the
-  remap, so ±100 on a high-ISO frame is grainy. A detail-magnitude threshold (or
-  running the stage on a denoised guide) is a v2 question.
 * Clarity's gamma grid is fixed, not fitted to the image histogram, and its
   effective strength still varies by ~19% with tone across the grid.
 * The clarity stage allocates its pyramids per render (~280 MB at 24 MP) instead
@@ -832,9 +1003,12 @@ pass.
   local contrast inside them; Lightroom's are edge-aware (audit tone.json #6).
 * Highlight recovery is exactly ratio-preserving and therefore does not
   desaturate the way Lightroom's does (audit tone.json #5).
-* No dithering yet — 8-bit exports of smooth gradients can band. The mixer's
-  ±3 EV authority does not make that worse (measured above), but nothing in the
-  pipeline dithers, so the floor is whatever `round(255·x)` gives.
+* Export is always sRGB, 3 channels, no output-sharpening choice; there is no
+  in-image clipping overlay (LR's `J`), no Option-drag threshold view on
+  Whites/Blacks, no pixel readout, no WB presets or eyedropper, and the
+  histogram is luminance-only and measured on the preview rather than on what
+  gets exported (audit `decode-output` #2, 4, 5, 7, 10–13 — all deferred, see
+  `DEVIATIONS.md`).
 * Toning strength still depends strongly on hue: the tint is built from a fully
   saturated primary, so saturation 100 is much more forceful for blue than for
   yellow (audit bwmix-toning.json #3, deferred — it needs an opponent-space

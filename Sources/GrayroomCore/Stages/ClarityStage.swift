@@ -30,6 +30,7 @@ final class ClarityStage {
     private let remapDownsample: MTLComputePipelineState
     private let clear: MTLComputePipelineState
     private let accumulate: MTLComputePipelineState
+    private let levelGain: MTLComputePipelineState
     private let collapse: MTLComputePipelineState
     private let apply: MTLComputePipelineState
 
@@ -40,6 +41,7 @@ final class ClarityStage {
         remapDownsample = try context.computePipeline("clarityRemapDownsampleKernel")
         clear = try context.computePipeline("clarityClearKernel")
         accumulate = try context.computePipeline("clarityAccumulateKernel")
+        levelGain = try context.computePipeline("clarityLevelGainKernel")
         collapse = try context.computePipeline("clarityCollapseKernel")
         apply = try context.computePipeline("clarityApplyKernel")
     }
@@ -49,12 +51,19 @@ final class ClarityStage {
     /// here and released when the command buffer completes.
     ///
     /// `amount` defaults to the global scalar; passing a texture is the M3 hook.
+    ///
+    /// The pyramid is always built at the **full-scale** lift for `clarity`'s
+    /// sign and scaled down by the amount, never at the requested strength: the
+    /// filter is exactly affine in `lift`, so the two are equivalent, and the
+    /// fixed reference makes the rendition independent of what other clarity
+    /// values are present in the frame (see `MaskStage.encodeClarityAmount`).
     func encode(_ cb: MTLCommandBuffer,
                 source: MTLTexture,
                 destination: MTLTexture,
                 clarity: Double,
                 amountTexture explicitAmount: MTLTexture? = nil) throws {
         let params = ClarityMapping.parameters(for: clarity)
+        let lift = ClarityMapping.referenceLift(sign: params.isSmoothing ? -1 : 1)
         let w = source.width, h = source.height
 
         // --- L = log2(max(Y, eps)); this is also G[0]. -----------------------
@@ -101,7 +110,7 @@ final class ClarityStage {
             for k in 0..<ClarityMapping.gammaLevelCount {
                 var u = ClarityUniforms(
                     sigmaR: Float(ClarityMapping.sigmaR),
-                    lift: Float(params.lift),
+                    lift: Float(lift),
                     gamma0: Float(ClarityMapping.gamma0),
                     gammaStep: Float(ClarityMapping.gammaStep),
                     center: Float(ClarityMapping.gammaLevels[k]),
@@ -135,6 +144,17 @@ final class ClarityStage {
                 }
             }
 
+            // --- band weighting: level 0 (pixel scale) is not clarity's band --
+            for l in 0..<(levels - 1) where ClarityMapping.levelGain(l) != 1 {
+                var g = ClarityLevelGainUniforms(levelGain: Float(ClarityMapping.levelGain(l)))
+                try encodePass(cb, levelGain, gauss[l].width, gauss[l].height) { e in
+                    e.setTexture(gauss[l], index: 0)
+                    e.setTexture(gauss[l + 1], index: 1)
+                    e.setTexture(accum[l], index: 2)
+                    e.setBytes(&g, length: MemoryLayout<ClarityLevelGainUniforms>.stride, index: 0)
+                }
+            }
+
             // --- collapse: the residual is the *original* coarsest Gaussian --
             for l in stride(from: levels - 2, through: 0, by: -1) {
                 let coarse = (l == levels - 2) ? gauss[levels - 1] : accum[l + 1]
@@ -162,7 +182,10 @@ final class ClarityStage {
                              logIn: MTLTexture,
                              logOut: MTLTexture,
                              amount: MTLTexture) throws {
-        var u = ClarityApplyUniforms(maxStops: Float(ClarityMapping.maxAppliedStops))
+        var u = ClarityApplyUniforms(maxStops: Float(ClarityMapping.maxAppliedStops),
+                                     toneCenter: Float(log2(0.18)),
+                                     toneSigma: Float(ClarityMapping.toneWeightSigmaEV),
+                                     toneFloor: Float(ClarityMapping.toneWeightFloor))
         try encodePass(cb, apply, destination.width, destination.height) { e in
             e.setTexture(source, index: 0)
             e.setTexture(logIn, index: 1)

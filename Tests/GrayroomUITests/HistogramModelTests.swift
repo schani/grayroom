@@ -34,15 +34,30 @@ final class HistogramModelTests: XCTestCase {
         XCTAssertEqual(m.heights[255], 1, accuracy: 1e-12)
     }
 
-    func testClipWarningsFireAboveATenthOfAPercent() {
+    /// The gate is an absolute pixel count, not a fraction: Lightroom's triangles
+    /// light on essentially any clipped pixel, and a fraction would make the
+    /// preview and the full-resolution export disagree about the same edit.
+    func testClipWarningsFireOnAHandfulOfPixels() {
         let bins = [UInt32](repeating: 100, count: 256)   // 25 600 pixels
-        let quiet = HistogramModel(makeHistogram(bins: bins, shadow: 20, highlight: 20))
+        XCTAssertEqual(HistogramModel.clipWarningPixels, 32)
+
+        let quiet = HistogramModel(makeHistogram(bins: bins, shadow: 31, highlight: 0))
         XCTAssertFalse(quiet.shadowClipping)
         XCTAssertFalse(quiet.highlightClipping)
 
-        let loud = HistogramModel(makeHistogram(bins: bins, shadow: 40, highlight: 0))
-        XCTAssertTrue(loud.shadowClipping)          // 40/25600 = 0.16 %
-        XCTAssertFalse(loud.highlightClipping)
+        // 32 pixels = 0.125 % of this frame, and 0.00013 % of a 24 MP one: both
+        // light the triangle.
+        let loud = HistogramModel(makeHistogram(bins: bins, shadow: 32, highlight: 40))
+        XCTAssertTrue(loud.shadowClipping)
+        XCTAssertTrue(loud.highlightClipping)
+
+        // Resolution independence: the same absolute count on a 100× bigger
+        // frame still fires, where the old 0.1 % gate would not have.
+        let big = Histogram(bins: [UInt32](repeating: 10_000, count: 256),
+                            pixelCount: 2_560_000,
+                            shadowClippedPixels: 40, highlightClippedPixels: 0)
+        XCTAssertTrue(HistogramModel(big).shadowClipping)
+        XCTAssertLessThan(HistogramModel(big).shadowClippedFraction, 0.001)
     }
 
     func testEmptyHistogramIsSafe() {

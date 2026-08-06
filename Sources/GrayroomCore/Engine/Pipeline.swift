@@ -100,8 +100,8 @@ public final class Pipeline {
         let localClarity = maps != nil && masks.contains { $0.adjustments.clarity != 0 }
         if runs(.clarity), edit.clarity != 0 || localClarity {
             if localClarity {
-                // One variant for the whole frame, at the largest |clarity|
-                // present; the amount map scales it per pixel and zeroes any
+                // One variant for the whole frame — full-scale for the dominant
+                // *sign*; the amount map scales it per pixel and zeroes any
                 // pixel whose clarity has the opposite sign (see
                 // MaskRasterizer.clarityVariant).
                 let variant = MaskRasterizer.clarityVariant(global: edit.clarity, masks: masks)
@@ -111,7 +111,6 @@ public final class Pipeline {
                         paramsB: maps!.paramsB,
                         globalClarity: edit.clarity,
                         dominantSign: variant.sign,
-                        maxAbs: abs(variant.clarity),
                         width: w, height: h)
                     try clarityStage.encode(commandBuffer, source: src, destination: dst,
                                             clarity: variant.clarity, amountTexture: amount)

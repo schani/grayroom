@@ -94,32 +94,49 @@ final class MaskTests: XCTestCase {
 
     // MARK: - CPU rasterizer: flow, density, erase
 
-    /// Flow accumulates by **over**-compositing, not by adding: two stamps at
-    /// flow 20 give 0.2 + 0.2·0.8 = 0.36, not 0.4.
-    func testFlowBuildsUpByOverCompositing() {
+    /// Flow is a **rate that builds up across strokes**, the Lightroom
+    /// dodge-and-burn mechanic: one pass at flow 20 deposits 0.2 however many
+    /// stamps overlap within it, a second pass takes it to 0.2 + 0.2·0.8 = 0.36,
+    /// a third to 0.488.
+    func testFlowBuildsUpAcrossStrokesNotWithinOne() {
         let w = 64, h = 64
-        // Two stamps: one on the first point, one 4.8 px down the 6 px segment.
-        let stroke = Stroke(brush: BrushParams(size: 0.5, feather: 0, flow: 20, density: 100),
-                            polyline: [(0.5, 0.5), (0.5, 0.5 + 6.0 / 64.0)])
+        // Two stamps in ONE stroke: one on the first point, one 4.8 px down the
+        // 6 px segment. (32, 34) is inside both stamps' full-opacity discs.
+        let brush = BrushParams(size: 0.5, feather: 0, flow: 20, density: 100)
+        let stroke = Stroke(brush: brush, polyline: [(0.5, 0.5), (0.5, 0.5 + 6.0 / 64.0)])
         XCTAssertEqual(MaskRasterizer.stamps(for: stroke, width: w, height: h).count, 2)
-        let c = MaskRasterizer.rasterize(Mask(strokes: [stroke]), width: w, height: h)
-        // (32, 34) is inside both stamps' full-opacity discs.
-        XCTAssertEqual(Double(c[34 * w + 32]), 0.36, accuracy: 1e-6)
-        // A single stamp at the same flow is just 0.2.
-        let one = Stroke(brush: BrushParams(size: 0.5, feather: 0, flow: 20),
-                         polyline: [(0.5, 0.5)])
-        let c1 = MaskRasterizer.rasterize(Mask(strokes: [one]), width: w, height: h)
+        let one = MaskRasterizer.rasterize(Mask(strokes: [stroke]), width: w, height: h)
+        XCTAssertEqual(Double(one[34 * w + 32]), 0.2, accuracy: 1e-6,
+                       "overlapping stamps inside one stroke must not build up")
+
+        // Repeat the same stroke: now it builds, sub-linearly.
+        for (passes, expected) in [(2, 0.36), (3, 0.488), (4, 0.5904)] {
+            let c = MaskRasterizer.rasterize(
+                Mask(strokes: [Stroke](repeating: stroke, count: passes)), width: w, height: h)
+            XCTAssertEqual(Double(c[34 * w + 32]), expected, accuracy: 1e-6,
+                           "\(passes) passes at flow 20")
+        }
+
+        // A single dab is still exactly the flow.
+        let dab = Stroke(brush: brush, polyline: [(0.5, 0.5)])
+        let c1 = MaskRasterizer.rasterize(Mask(strokes: [dab]), width: w, height: h)
         XCTAssertEqual(Double(c1[32 * w + 32]), 0.2, accuracy: 1e-6)
     }
 
-    /// Density is a per-stroke ceiling applied to the stroke's own buffer, so a
-    /// stroke that crosses itself never exceeds it.
-    func testDensityClampsTheStroke() {
+    /// Density is an **absolute ceiling** on the mask: no number of strokes gets
+    /// past it, and painting at a low density never pulls existing coverage down.
+    func testDensityIsAnAbsoluteCeiling() {
         let w = 64, h = 64
         let brush = BrushParams(size: 0.5, feather: 0, flow: 20, density: 30)
         let stroke = Stroke(brush: brush, polyline: [(0.5, 0.5), (0.5, 0.5 + 6.0 / 64.0)])
-        let c = MaskRasterizer.rasterize(Mask(strokes: [stroke]), width: w, height: h)
-        XCTAssertEqual(Double(c[34 * w + 32]), 0.30, accuracy: 1e-6)   // 0.36 clamped
+
+        // 0.2, 0.36 → capped at 0.30, and it stays there however many passes.
+        for passes in 1...6 {
+            let c = MaskRasterizer.rasterize(
+                Mask(strokes: [Stroke](repeating: stroke, count: passes)), width: w, height: h)
+            XCTAssertEqual(Double(c[34 * w + 32]), min(1 - pow(0.8, Double(passes)), 0.30),
+                           accuracy: 1e-6, "\(passes) passes at flow 20 / density 30")
+        }
 
         // Below the ceiling nothing changes.
         var loose = brush
@@ -127,6 +144,19 @@ final class MaskTests: XCTestCase {
         let unclamped = MaskRasterizer.rasterize(
             Mask(strokes: [Stroke(brush: loose, polyline: [(0.5, 0.5)])]), width: w, height: h)
         XCTAssertEqual(Double(unclamped[32 * w + 32]), 0.2, accuracy: 1e-6)
+
+        // A low-density brush over an area that is already denser leaves it
+        // alone — the ceiling caps build-up, it does not erase.
+        var full = brush
+        full.density = 100
+        full.flow = 100
+        var weak = brush
+        weak.density = 40
+        weak.flow = 100
+        let over = MaskRasterizer.rasterize(
+            Mask(strokes: [Stroke(brush: full, polyline: [(0.5, 0.5)]),
+                           Stroke(brush: weak, polyline: [(0.5, 0.5)])]), width: w, height: h)
+        XCTAssertEqual(Double(over[32 * w + 32]), 1.0, accuracy: 1e-9)
     }
 
     /// Normal strokes merge with `max`, erase strokes with `mask·(1 − stroke)`.
@@ -398,10 +428,14 @@ final class MaskTests: XCTestCase {
     func testLocalClarityAffectsOnlyTheMaskedRegion() throws {
         let (ctx, pipe) = try TestGPU.require()
         let w = 256, h = 256
-        // Flat base with a period-4 multiplicative ripple: the same fine
-        // texture ClarityTests uses, without the step edge.
+        // Flat base at middle gray with a period-16 multiplicative ripple: the
+        // same texture ClarityTests uses, without the step edge. Period 16, not
+        // 4, because since wave 3 the pixel-scale band is deliberately spared
+        // (`ClarityMapping.levelGains`) — a period-4 ripple would measure the
+        // band weighting rather than the mask.
         let input = try ctx.makeTexture(width: w, height: h) { x, y in
-            let sx = sin(Double(x) * .pi / 2), sy = sin(Double(y) * .pi / 2)
+            let w0 = 2 * Double.pi / 16
+            let sx = sin(Double(x) * w0), sy = sin(Double(y) * w0)
             let v = Float(0.18 * (1 + 0.12 * 0.5 * (sx + sy)))
             return (v, v, v)
         }
@@ -446,6 +480,76 @@ final class MaskTests: XCTestCase {
                 XCTAssertEqual(out.pixels[i], plain.pixels[i], "at (\(x), \(y))")
             }
         }
+    }
+
+    /// Adding a local clarity mask must not change how the *global* clarity
+    /// renders anywhere else in the frame (audit `clarity-local` #6).
+    ///
+    /// This was a real bug and it is worth stating precisely what it was. The
+    /// per-pixel amount used to be normalised against the frame's largest
+    /// |clarity|: global 25 with a +20 mask built the pyramid at strength 45 and
+    /// blended it at 25/45 everywhere outside the mask. Because the slider
+    /// response was strongly convex, that linear blend of a strength-45
+    /// rendition was *not* the strength-25 rendition — it came out at an
+    /// effective clarity of ~35, a 40 % error in slider terms, and two disjoint
+    /// +50 masks made every masked region render at strength 100 · 0.5.
+    ///
+    /// Two changes make it exact rather than merely close: the lift is now
+    /// linear in the slider, and the pyramid is always built at the *fixed*
+    /// full-scale lift with `amount = |c(x)|/100`. Since the filter is affine in
+    /// lift, an unmasked pixel then takes an arithmetically identical path in
+    /// both renders — so the assertion here is **bit** equality, not a
+    /// tolerance. A tolerance would have passed on the old code too (the README
+    /// measured the old error at 0.1 % on a low-detail frame).
+    func testAClarityMaskDoesNotChangeTheRenditionOutsideIt() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        let w = 256, h = 256
+        // Detail at several scales so the level weighting has something to work
+        // on at every pyramid level.
+        let input = try ctx.makeTexture(width: w, height: h) { x, y in
+            let fine = sin(Double(x) * .pi / 2) + sin(Double(y) * .pi / 2)
+            let mid = sin(Double(x) * .pi / 8) * sin(Double(y) * .pi / 6)
+            let v = Float(0.18 * exp2(0.6 * Double(x) / Double(w))
+                          * (1 + 0.06 * fine + 0.25 * mid))
+            return (v, v, v)
+        }
+        // A small dab in the top-left corner, nowhere near the sampled region.
+        let mask = Mask(name: "clarity dab",
+                        adjustments: MaskAdjustments(clarity: 20),
+                        strokes: [Stroke(brush: BrushParams(size: 0.12, feather: 50,
+                                                            flow: 100, density: 100),
+                                         polyline: [(0.08, 0.08)])])
+        var global = EditState()
+        global.clarity = 25
+        var masked = global
+        masked.masks = [mask]
+
+        let a = try TextureReadback.read(pipe.render(input: input, edit: global,
+                                                     upTo: .clarity).texture)
+        let b = try TextureReadback.read(pipe.render(input: input, edit: masked,
+                                                     upTo: .clarity).texture)
+
+        // Sanity: the mask does do something where it covers.
+        let coverage = try pipe.maskCoverage(masks: masked.masks, width: w, height: h)
+        XCTAssertGreaterThan(Double(coverage[Int(0.08 * 256) * w + Int(0.08 * 256)]), 0.9)
+        var movedInside = false
+        for y in 10..<32 where !movedInside {
+            for x in 10..<32 where a.pixels[(y * w + x) * 4] != b.pixels[(y * w + x) * 4] {
+                movedInside = true
+            }
+        }
+        XCTAssertTrue(movedInside, "the mask must change the pixels it covers")
+
+        // Far outside the mask (the stamp reaches x, y < 46): bit identity.
+        var differing = 0
+        for y in 96..<h {
+            for x in 96..<w {
+                let i = (y * w + x) * 4
+                if a.pixels[i] != b.pixels[i] { differing += 1 }
+            }
+        }
+        XCTAssertEqual(differing, 0,
+                       "\(differing) pixels outside the mask changed when the mask was added")
     }
 
     /// The documented conflict rule: with signs in conflict, only the dominant
@@ -590,12 +694,20 @@ final class MaskTests: XCTestCase {
         let bottomPlain = bandMean(a, (a.height * 2 / 3)..<a.height)
         let bottomMasked = bandMean(b, (b.height * 2 / 3)..<b.height)
         XCTAssertLessThan(topMasked, topPlain * 0.95, "the mask should darken the top")
-        // The bottom is outside the mask. It is not bit-identical because the
-        // frame's clarity variant is the *largest* |clarity| present (25 + 20 =
-        // 45) with amount 25/45 outside the mask — the documented linear-blend
-        // contract, an approximation of a clarity-25 pass. It must not move
-        // visibly, though.
-        XCTAssertEqual(bottomMasked, bottomPlain, accuracy: bottomPlain * 0.005,
-                       "the bottom is outside the mask and must barely move")
+        // The bottom is outside the mask, so since wave 3 it is *bit* identical
+        // — the amount map is normalised against a fixed full-scale reference
+        // rather than the frame's largest |clarity|, so adding the mask cannot
+        // change the rendition elsewhere. (It used to be a 25/45 blend of a
+        // strength-45 pass, for which this assertion had to be a 0.5 %
+        // tolerance.) The synthetic version of this is
+        // `testAClarityMaskDoesNotChangeTheRenditionOutsideIt`.
+        XCTAssertEqual(bottomMasked, bottomPlain, accuracy: bottomPlain * 1e-9,
+                       "the bottom is outside the mask and must not move at all")
+        for y in (b.height * 3 / 4)..<b.height {
+            for x in 0..<b.width {
+                XCTAssertEqual(a.pixels[(y * b.width + x) * 4], b.pixels[(y * b.width + x) * 4],
+                               "at (\(x), \(y))")
+            }
+        }
     }
 }

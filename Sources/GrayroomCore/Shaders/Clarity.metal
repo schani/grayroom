@@ -33,6 +33,13 @@ struct ClarityUniforms {
 
 struct ClarityApplyUniforms {
     float maxStops;        // safety clamp on the applied log2 ratio
+    float toneCenter;      // log2(0.18): where the midtone weight peaks
+    float toneSigma;       // width of the midtone weight, in stops
+    float toneFloor;       // the weight never falls below this
+};
+
+struct ClarityLevelGainUniforms {
+    float levelGain;       // scale on this level's lifted Laplacian, 0..1
 };
 
 constant float kClarityTap[5] = { 1.0f / 16.0f, 4.0f / 16.0f, 6.0f / 16.0f,
@@ -179,6 +186,32 @@ kernel void clarityAccumulateKernel(texture2d<float, access::read>       fine   
     accum.write(float4(accum.read(gid).r + w * lap, 0.0f, 0.0f, 0.0f), gid);
 }
 
+// Per-level band weighting (audit clarity-local #2).
+//
+// After the k loop, accum[l] holds Sum_k w_k * Lap[r_k(L)][l]. Because the
+// pyramid operators are linear and r_k(v) = v + lift*f_k(v),
+//
+//   Sum_k w_k * Lap[r_k(L)] = Lap[L] + lift * Sum_k w_k * Lap[f_k(L)]
+//
+// (the hat weights are a partition of unity, so the unlifted part comes through
+// with weight 1). Scaling only the *lifted* part by g_l is therefore
+//
+//   accum[l] <- lapBase + g_l * (accum[l] - lapBase),   lapBase = G[l] - up(G[l+1])
+//
+// which is one pass per level instead of an extra pyramid, and needs no change
+// to the k loop. g_l = 0 leaves that band exactly as the input had it.
+kernel void clarityLevelGainKernel(texture2d<float, access::read>       gauss     [[texture(0)]],
+                                   texture2d<float, access::read>       gaussNext [[texture(1)]],
+                                   texture2d<float, access::read_write> accum     [[texture(2)]],
+                                   constant ClarityLevelGainUniforms &u           [[buffer(0)]],
+                                   uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= accum.get_width() || gid.y >= accum.get_height()) return;
+    float lapBase = gauss.read(gid).r - grClarityUpsample(gaussNext, gid);
+    float lifted = accum.read(gid).r;
+    accum.write(float4(lapBase + u.levelGain * (lifted - lapBase), 0.0f, 0.0f, 0.0f), gid);
+}
+
 // One collapse step: fine = fine + upsample(coarse).
 kernel void clarityCollapseKernel(texture2d<float, access::read>       coarse [[texture(0)]],
                                   texture2d<float, access::read_write> fine   [[texture(1)]],
@@ -188,14 +221,23 @@ kernel void clarityCollapseKernel(texture2d<float, access::read>       coarse [[
     fine.write(float4(fine.read(gid).r + grClarityUpsample(coarse, gid), 0.0f, 0.0f, 0.0f), gid);
 }
 
+// Midtone weight: a Gaussian in stops around middle gray, floored so the
+// extremes are attenuated rather than switched off. See ClarityMapping.
+inline float grClarityToneWeight(float l, constant ClarityApplyUniforms &u) {
+    float y = (l - u.toneCenter) / u.toneSigma;
+    return max(u.toneFloor, exp(-0.5f * y * y));
+}
+
 // Final application, hue-preserving:
 //
-//   L_out = mix(L, L_llf, amount(x))
+//   L_out = mix(L, L_llf, amount(x) * w(L))
 //   rgb'  = rgb * 2^(L_out - L)
 //
 // `amount` is a texture so that M3 masks can drive it per pixel; a 1x1 texture
 // holding the global amount is the degenerate case used today (coordinates are
-// clamped to the amount texture's extent).
+// clamped to the amount texture's extent). `w` is the midtone weight, which
+// makes clarity a midtone control as in Lightroom; it multiplies the amount, so
+// amount = 0 is still exactly the identity.
 kernel void clarityApplyKernel(texture2d<float, access::read>  src    [[texture(0)]],
                                texture2d<float, access::read>  logIn  [[texture(1)]],
                                texture2d<float, access::read>  logOut [[texture(2)]],
@@ -210,7 +252,7 @@ kernel void clarityApplyKernel(texture2d<float, access::read>  src    [[texture(
     float l1 = logOut.read(gid).r;
     uint2 ac = uint2(min(gid.x, amount.get_width() - 1u),
                      min(gid.y, amount.get_height() - 1u));
-    float a = clamp(amount.read(ac).r, 0.0f, 1.0f);
+    float a = clamp(amount.read(ac).r, 0.0f, 1.0f) * grClarityToneWeight(l0, u);
     float dL = clamp(a * (l1 - l0), -u.maxStops, u.maxStops);
     dst.write(float4(max(s.rgb, 0.0f) * exp2(dL), s.a), gid);
 }

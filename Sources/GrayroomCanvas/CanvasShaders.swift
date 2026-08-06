@@ -1,4 +1,5 @@
 import Foundation
+import GrayroomCore
 
 /// The canvas display shader.
 ///
@@ -14,13 +15,18 @@ import Foundation
 /// nothing and the drawable is always exactly window-sized.
 ///
 /// The image texture holds **output-referred, sRGB-encoded** values (the
-/// pipeline's `output` stage did that), and the drawable is a plain
-/// `bgra8Unorm` in the display's colour space, so the values are written through
-/// unchanged — what you see is what `ImageWriter` would put in a PNG.
+/// pipeline's `output` stage did that) and the drawable is a `bgra8Unorm` whose
+/// layer is tagged **sRGB** (`CanvasNSView.init`), so the window server colour-
+/// matches it to the display profile — what you see is what `ImageWriter` would
+/// put in a PNG, on a wide-gamut display too. The fragment shader dithers to
+/// 8 bits with exactly the same rule the exporter uses, so smooth gradients do
+/// not band on screen either.
 enum CanvasShaders {
     static let source = """
     #include <metal_stdlib>
     using namespace metal;
+
+    \(Dither.metalSource)
 
     struct CanvasUniforms {
         float2 viewSize;      // device pixels
@@ -90,6 +96,12 @@ enum CanvasShaders {
             }
         }
 
+        // Dither at the 8-bit drawable's quantisation step, per channel, keyed
+        // on the device pixel — the same rule ImageWriter applies on export.
+        uint2 p = uint2(v);
+        rgb = float3(grDither8(rgb.r, p.x, p.y, 0u),
+                     grDither8(rgb.g, p.x, p.y, 1u),
+                     grDither8(rgb.b, p.x, p.y, 2u));
         return float4(rgb, 1.0);
     }
     """

@@ -8,22 +8,44 @@ public struct HistogramModel: Equatable {
     public let heights: [Double]
     public let shadowClippedFraction: Double
     public let highlightClippedFraction: Double
+    public let shadowClippedPixels: Int
+    public let highlightClippedPixels: Int
 
-    /// Lightroom lights its clipping triangles at "a few pixels"; 0.1 % of the
-    /// frame is a defensible reading of that and is what PLAN.md asked for.
-    public static let clipWarningFraction: Double = 0.001
+    /// Lightroom's triangles light as soon as the image *contains* clipped
+    /// pixels — Adobe documents the indicator's colour states but no percentage,
+    /// and in practice a handful of blown pixels lights it. That is what makes
+    /// "push Whites until the triangle just lights" a usable white-point
+    /// procedure.
+    ///
+    /// Wave 3 (audit `decode-output` #1) replaced a 0.1 %-of-frame gate with an
+    /// absolute count. The fraction was both far too high — ~3 000 clipped
+    /// pixels on the 2560 px preview, ~24 000 on a 24 MP export, so a small
+    /// blown sky patch or a blown light source never lit it — and
+    /// resolution-*dependent*, which meant the preview and the export disagreed
+    /// about whether the same edit clipped. 32 pixels is "more than a stuck
+    /// pixel or a decode artefact, less than anything a photographer would call
+    /// clean".
+    public static let clipWarningPixels = 32
 
-    public var shadowClipping: Bool { shadowClippedFraction > HistogramModel.clipWarningFraction }
-    public var highlightClipping: Bool { highlightClippedFraction > HistogramModel.clipWarningFraction }
+    public var shadowClipping: Bool { shadowClippedPixels >= HistogramModel.clipWarningPixels }
+    public var highlightClipping: Bool { highlightClippedPixels >= HistogramModel.clipWarningPixels }
 
     public static let empty = HistogramModel(heights: [Double](repeating: 0, count: 256),
                                              shadowClippedFraction: 0,
-                                             highlightClippedFraction: 0)
+                                             highlightClippedFraction: 0,
+                                             shadowClippedPixels: 0,
+                                             highlightClippedPixels: 0)
 
-    public init(heights: [Double], shadowClippedFraction: Double, highlightClippedFraction: Double) {
+    public init(heights: [Double],
+                shadowClippedFraction: Double,
+                highlightClippedFraction: Double,
+                shadowClippedPixels: Int = 0,
+                highlightClippedPixels: Int = 0) {
         self.heights = heights
         self.shadowClippedFraction = shadowClippedFraction
         self.highlightClippedFraction = highlightClippedFraction
+        self.shadowClippedPixels = shadowClippedPixels
+        self.highlightClippedPixels = highlightClippedPixels
     }
 
     /// Linear heights normalised against the **98th percentile** of bins 1…254,
@@ -45,5 +67,7 @@ public struct HistogramModel: Equatable {
         heights = bins.map { min(Double($0) / reference, 1.0) }
         shadowClippedFraction = h.shadowClippedFraction
         highlightClippedFraction = h.highlightClippedFraction
+        shadowClippedPixels = h.shadowClippedPixels
+        highlightClippedPixels = h.highlightClippedPixels
     }
 }
