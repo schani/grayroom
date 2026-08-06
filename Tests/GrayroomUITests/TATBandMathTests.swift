@@ -23,11 +23,25 @@ final class TATBandMathTests: XCTestCase {
         }
     }
 
-    func testTheWrapFrom320To0GoesToMagentaAndRed() {
-        let s = TATBandMath.split(hueDegrees: 340)
+    func testTheWrapFrom300To0GoesToMagentaAndRed() {
+        let s = TATBandMath.split(hueDegrees: 330)
         XCTAssertEqual(s.lowerIndex, 7)      // magenta
         XCTAssertEqual(s.upperIndex, 0)      // red
         XCTAssertEqual(s.upperWeight, 0.5, accuracy: 1e-12)   // smoothstep(0.5) = 0.5
+    }
+
+    /// Wave 2 moved Purple 280 -> 270 and Magenta 320 -> 300 so every primary
+    /// and secondary sits on its exact HSV angle (audit `bwmix-toning.json` #5).
+    /// The symptom that fixes: a pure magenta pixel used to drag Purple as hard
+    /// as Magenta.
+    func testPureMagentaDragsOnlyTheMagentaSlider() {
+        let s = TATBandMath.split(hueDegrees: 300)
+        XCTAssertEqual(s.lowerIndex, 7)
+        XCTAssertEqual(s.upperWeight, 0, accuracy: 1e-12)
+        let out = TATBandMath.applying(delta: 25, hueDegrees: 300,
+                                       to: [Double](repeating: 0, count: 8))
+        XCTAssertEqual(out[7], 25, accuracy: 1e-12)
+        XCTAssertEqual(out[6], 0, accuracy: 1e-12)
     }
 
     func testHueNormalisation() {

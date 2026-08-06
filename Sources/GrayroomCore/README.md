@@ -620,37 +620,169 @@ a picture. With no `--mask` it shows the union of every enabled mask.
 
 ## B&W mix
 
-`gray = Y · (1 + Σ_bands w_band(hue) · slider_band · sat)`.
+Retuned in **Lightroom-parity wave 2** (`research/audit/bwmix-toning.json`
+deviations #0 and #5); the audit table is at the end of the Toning section.
+
+```
+gray = Y · 2^(maxEV · (mix/100) · w(sat))
+mix  = Σ_bands w_band(hue) · slider_band          −100 … 100
+w(s) = s^0.6,  linearised below s = 0.02
+```
 
 Hue and saturation come from an HSV decomposition of the **gamma-encoded**
-(1/2.2) linear RGB; encoding first keeps hue stable in the deep shadows. The 8
-band centres are `0, 30, 60, 120, 180, 240, 280, 320` degrees — the conventional
-approximation of Adobe's mixer channels; Adobe does not publish the real ones.
+(1/2.2) linear RGB; encoding first keeps hue stable in the deep shadows.
+
+**Authority.** The law is exponential and symmetric in stops: ±100 on a band
+moves a fully saturated pixel of that band by ∓/±3 stops — ×1/8 to ×8. That is
+the reach Lightroom's mixer has (the "red filter" sky effect: Blue/Aqua at −100
+renders an ordinary sky nearly black, and Adobe shipped PV6 specifically to
+reduce banding from large Color/B&W Mixer moves). The pre-wave-2 law was linear,
+`1 + mix·0.008·sat`, i.e. ×0.2 … ×1.8 — asymmetric at −2.3 EV / +0.85 EV, and it
+could never brighten a colour by a full stop.
+
+**Saturation weighting.** The exponent is sub-linear because the 1/2.2 encode
+*lowers* HSV saturation (`sat_enc = 1 − (mn/mx)^(1/2.2) < 1 − mn/mx`), so a
+linear weight left ordinary subjects nearly inert. Worked numbers on the patches
+the tests use:
+
+| patch | `sat_enc` | old gain at −100 | new gain at −100 |
+|---|---|---|---|
+| `(0.40, 0.00, 0.00)` pure red | 1.000 | ×0.200 (−2.32 EV) | ×0.125 (−3.00 EV) |
+| `(0.40, 0.02, 0.02)` | 0.744 | ×0.405 (−1.30 EV) | ×0.175 (−2.51 EV) |
+| clear blue sky `(0.25, 0.45, 1.0)` | 0.467 | ×0.626 (−0.68 EV) | ×0.268 (−1.90 EV) |
+
+(The sky sits at hue 218°, so it is Blue *and* Aqua that have to move; Blue alone
+at −100 gives ×0.388, −1.37 EV, measured.)
+
+`w(0) = 0` exactly either way, so a neutral pixel is bit-identical regardless of
+the sliders (`testNeutralPatchInvariantForAnySlider`). `s^0.6` has an *unbounded*
+derivative at `s = 0`, though, which turns the half-float quantisation of a
+near-neutral gradient into jitter; below `saturationKnee = 0.02` the weight
+follows the straight line through `(knee, knee^0.6)` instead, capping the slope
+at 4.79. Measured on a 512-px gradient with a 0.4 % cast at slider ±100: max step
+2 codes with the knee and without it, but 1-code reversals drop from 21 to 9. No
+plateaus in either case — `testMixerDoesNotBandANearNeutralGradient` pins step
+≤ 2 codes, ≥ 85 % of the 8-bit levels used, and no reversal larger than 1 code.
+
+**Band centres** are `0, 30, 60, 120, 180, 240, 270, 300` degrees: the three
+primaries and the three secondaries on their exact HSV angles, Orange and Purple
+at the midpoints of the two 60° gaps. Wave 2 moved Purple 280 → 270 and Magenta
+320 → 300, because with Magenta at 320 a *pure* magenta pixel (HSV 300°) got a
+50/50 blend of Purple and Magenta instead of landing on Magenta — visible as
+"the wrong slider moves" under the targeted adjustment tool. Adobe does not
+publish the real centres and no credible measurement exists, so this is an
+approximation, not a fact; the audit gives the LrC procedure to measure them.
 
 Interpolation is a smoothstep between the two bracketing centres, which makes
 the implied band weights a C¹ partition of unity: a pixel exactly on a centre
 gets that band's slider and nothing else, and the blend is continuous across the
-320° → 0° wrap.
+300° → 0° wrap.
 
-Saturation multiplies the whole term, so a neutral pixel (`sat = 0`) is
-bit-identical regardless of the sliders. `±100` maps to `±0.8` gray gain at full
-saturation (`StageConstants.bwGainPerUnit = 0.008`).
+Constants live in `BWMixBands` (`Engine/Uniforms.swift`) and reach the kernel as
+uniforms, except the centres, which are duplicated as `kBandCenters` in
+`BWMix.metal` and pinned to the Swift array by
+`GPUStageTests.testBandCentresMatchTheShader`. `BWMixBands.gain` and
+`.saturationWeight` are the Swift mirror of the law, pinned by
+`testMixerGainMatchesTheDocumentedLaw`; `GrayroomUI/TATBandMath.swift` reads the
+centres from the same array so the drag tool cannot drift from the shader.
 
 ## Toning
 
-Split toning on the gray image. Tonal position is `t = sqrt(clamp(Y, 0, 1))` —
-a cheap monotone stand-in for perceptual lightness, so "shadows" means what it
-looks like rather than what it measures linearly.
+Split toning on the gray image, rewritten in **wave 2**
+(`research/audit/bwmix-toning.json` #1 and #2). Tonal position is
+`t = sqrt(clamp(Y, 0, 1))` — a cheap monotone stand-in for perceptual lightness,
+so "shadows" means what it looks like rather than what it measures linearly.
 
-`balance` moves the crossover: `pivot = clamp(0.5 − 0.35·balance, 0.08, 0.92)`.
-Shadow weight is `1 − smoothstep(0, pivot, t)`, highlight weight
-`smoothstep(pivot, 1, t)`; both are faded out at the very ends so pure black and
-pure white stay neutral.
+### Crossover
 
-Each hue is converted to a fully saturated RGB and **normalised to luminance 1**
-before mixing, and the product of the two factors is renormalised, so
-`dot(factor, kLuma) == 1` and the stage changes chroma only. `strength = 0.75`
-scales saturation 0…100 to a 0…0.75 mix toward the pure hue.
+```
+pivot = clamp(0.5 − 0.35·balance, 0.08, 0.92)
+w_h   = smootherstep(pivot − 0.35, pivot + 0.35, t)
+w_s   = 1 − w_h
+fade  = smoothstep(0, 0.08, t) · (1 − smoothstep(0.92, 1, t))     (both weights)
+```
+
+The two weights are **complementary**, so `w_s + w_h == 1` through the whole
+midrange. Before wave 2 they were two independent smoothsteps —
+`1 − smoothstep(0, pivot, t)` and `smoothstep(pivot, 1, t)` — which are *both*
+zero at the pivot: everything between roughly 33 % and 73 % grey came out
+essentially untinted and mid-grey was exactly neutral, so setting both wheels to
+the same sepia gave tinted ends around a grey middle. Lightroom's crossover
+overlaps through the midtones (the amount is its Blending slider, default 50);
+only the extreme shadows and highlights stay black and white, which is what the
+`fade` term does. The half-width 0.35 is the fixed stand-in for Blending = 50.
+
+`ToningWeights` (`Engine/Uniforms.swift`) is the Swift mirror, pinned to the
+kernel by `GPUStageTests.testToningWeightsMatchTheShader`.
+
+### Tint and luminance
+
+```
+tint(h) = 3 · hueRGB(h) / Σ hueRGB(h)                    equal RGB energy
+factor  = 1 + w_s·a_s·(tint(h_s) − 1) + w_h·a_h·(tint(h_h) − 1)
+factor /= dot(factor, kLuma)^lumaPreserve                lumaPreserve = 0.5
+```
+
+with `a = saturation/100 · strength`, `strength = 0.75`. Two consequences.
+
+Combining the tints **by weight** rather than by multiplying two independent
+factors means equal hue and saturation on both wheels collapse to one uniform
+tint by construction — `testEqualWheelsGiveAUniformTintWithNoNeutralMidtones`
+asserts the chroma varies by under 15 % across the whole ramp.
+
+And the stage is **no longer exactly luminance-preserving**. Lightroom's toning
+moves lightness — Adobe's own guidance is to pull the per-range Luminance slider
+back down when "adding a particular color to the shadows … brightens the image"
+— and that lift is a large part of why LR toning reads as a toned print rather
+than a hue overlay. Getting it required dropping the old per-hue normalisation
+to luminance 1: with it, `dot(factor, kLuma)` is identically 1 under the new
+weight-blend and the partial renormalisation is a no-op. Equal-RGB-energy
+normalisation instead leaves the sign of the excursion to where the hue sits
+relative to the Rec.709 weights, so warm and green hues lift and blue/magenta
+darken, and `lumaPreserve = 0.5` keeps half of it. Measured at mid grey,
+saturation 100, both wheels on one hue:
+
+| hue | ΔEV |
+|---|---|
+| 120 (green) | +0.447 |
+| 60 (yellow) | +0.186 |
+| 40 (sepia) | +0.119 |
+| 180 (aqua) | +0.091 |
+| 210 | −0.081 |
+| 0 (red) | −0.229 |
+| 300 (magenta) | −0.405 |
+| 240 (blue) | −0.639 ← worst case over the circle |
+
+At ordinary settings it is small: the sepia preset below moves every tone by
++0.031 … +0.038 EV. `lumaPreserve = 1` restores the old exactly-chroma-only
+behaviour in one constant.
+
+Equal-energy normalisation also, as a side effect, takes most of the sting out of
+the hue-dependent strength the audit flags separately as #3: a saturation-100
+blue tint used to multiply the blue channel by ~10.7, and now multiplies it by
+3.9. That item is *not* implemented — the opponent-space rewrite it asks for is
+still open, and strength still varies with hue.
+
+### Audit status
+
+`research/audit/bwmix-toning.json`, after wave 2:
+
+| # | item | status |
+|---|---|---|
+| 0 | mixer authority + saturation weighting | **done** — exponential ±3 EV law, `s^0.6` weight |
+| 1 | split-tone crossover dead zone | **done** — complementary weights, tints blended by weight |
+| 2 | luminance preservation vs LR | **done** — `lumaPreserve = 0.5` on an equal-energy tint |
+| 5 | band centres (purple/magenta) | **done** — 270 / 300, documented as an approximation |
+| 3 | hue-dependent toning strength | deferred — needs the opponent-space tint |
+| 4 | Auto B&W Mix | deferred |
+| 6 | base grey conversion is Rec.709 luma, not a monochrome profile | deferred — belongs with camera profiles |
+| 7 | Color Grading: midtones/global wheels, Blending, per-range Luminance | deferred — additive once the crossover is fixed |
+
+Constants #0 and #2 are the audit's own tuning targets, not measurements: Adobe
+publishes behaviour, not math, for both panels, and no credible reverse
+engineering of the slider-to-gain law, the band centres or the tonal weighting
+curve exists. The direction and rough magnitude are solid; the exact numbers are
+ours.
 
 ## Output transform
 
@@ -700,4 +832,17 @@ pass.
   local contrast inside them; Lightroom's are edge-aware (audit tone.json #6).
 * Highlight recovery is exactly ratio-preserving and therefore does not
   desaturate the way Lightroom's does (audit tone.json #5).
-* No dithering yet — 8-bit exports of smooth gradients can band.
+* No dithering yet — 8-bit exports of smooth gradients can band. The mixer's
+  ±3 EV authority does not make that worse (measured above), but nothing in the
+  pipeline dithers, so the floor is whatever `round(255·x)` gives.
+* Toning strength still depends strongly on hue: the tint is built from a fully
+  saturated primary, so saturation 100 is much more forceful for blue than for
+  yellow (audit bwmix-toning.json #3, deferred — it needs an opponent-space
+  tint). Extreme tints can still push a channel above 1.0 and get clipped by the
+  output transform, which is the one path by which toning loses luminance.
+* No Auto B&W Mix (audit #4), and the base conversion is Rec.709 luma rather
+  than a monochrome camera profile, so foliage renders lighter and deep blues
+  darker than a Lightroom default conversion of the same file (audit #6).
+* Toning has two wheels, not Lightroom's four: no Midtones, no Global, no
+  per-range Luminance, and Blending is a hard-coded crossover half-width of 0.35
+  rather than a slider (audit #7).

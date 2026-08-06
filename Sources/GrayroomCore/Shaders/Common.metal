@@ -17,6 +17,15 @@ inline float grLuminance(float3 rgb) {
     return dot(rgb, kLuma);
 }
 
+// Quintic smootherstep, clamped: 6t^5 - 15t^4 + 10t^3. C2 at both ends, which
+// matters wherever the result modulates a whole tonal range (the tone curve's
+// zone ramps, the toning crossover) — a smoothstep's curvature jump shows up as
+// a faint contour on a clean gradient.
+inline float grSmootherstep(float e0, float e1, float x) {
+    float t = clamp((x - e0) / max(e1 - e0, 1e-6f), 0.0f, 1.0f);
+    return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+}
+
 // Linear -> sRGB transfer function (IEC 61966-2-1).
 inline float grSRGBEncode(float c) {
     c = clamp(c, 0.0f, 1.0f);

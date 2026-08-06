@@ -1,24 +1,37 @@
 // 8-channel B&W mix.
 //
-//   gray = Y * (1 + sum_bands w_band(hue) * slider_band * satWeight)
+//   gray = Y * 2^(maxEV * (mix/100) * w(sat))
+//   mix  = sum_bands w_band(hue) * slider_band          (-100 .. 100)
+//   w(s) = s^satExponent, linearised below satKnee
+//
+// The law is exponential and symmetric in stops: +-100 on a band moves a fully
+// saturated pixel of that band by +-maxEV stops (3, i.e. x1/8 .. x8), which is
+// the reach Lightroom's mixer has -- Blue/Aqua at -100 renders an ordinary sky
+// nearly black. Before wave 2 the law was the linear `1 + mix * 0.008 * sat`,
+// giving x0.2 .. x1.8 (-2.3 EV / +0.85 EV) and, because the saturation weight
+// was linear in an already gamma-compressed saturation, only ~0.7 EV on a real
+// blue sky. See research/audit/bwmix-toning.json deviation #0.
 //
 // Hue and saturation come from an HSV decomposition of the *gamma-encoded*
 // linear RGB (encoding first keeps the hue of very dark pixels stable; a proper
-// perceptual space is a possible v2 refinement).
+// perceptual space is a possible v2 refinement). That encode is what makes the
+// sub-linear saturation exponent necessary rather than cosmetic.
 //
-// The band centres approximate Adobe's Lightroom mixer channels. Adobe does not
-// publish the exact centres; these are the conventional values and give a good
-// match in practice.
-constant float kBandCenters[8] = { 0.0f, 30.0f, 60.0f, 120.0f, 180.0f, 240.0f, 280.0f, 320.0f };
+// The band centres approximate Adobe's Lightroom mixer channels: primaries and
+// secondaries on their exact HSV angles, Orange and Purple at the midpoints of
+// the two 60-degree gaps. Adobe does not publish the real centres.
+constant float kBandCenters[8] = { 0.0f, 30.0f, 60.0f, 120.0f, 180.0f, 240.0f, 270.0f, 300.0f };
 
 struct BWMixUniforms {
-    float gainPerUnit;   // slider unit -> gray gain (0.008 => +-0.8 at +-100)
+    float maxEV;         // stops of gain at +-100 on a fully saturated pixel
+    float satExponent;   // saturation weighting exponent (< 1)
+    float satKnee;       // linearise the weight below this saturation
 };
 
 // Cyclic C1 interpolation between the 8 band sliders. Because we interpolate
 // between the two bracketing centres with a smoothstep, the implied band
 // weights form a partition of unity: a pure band centre gets exactly its own
-// slider, and the blend is smooth across the 320 deg -> 0 deg wrap.
+// slider, and the blend is smooth across the 300 deg -> 0 deg wrap.
 inline float grBandMix(float hueDeg, constant float *sliders) {
     float h = fmod(fmod(hueDeg, 360.0f) + 360.0f, 360.0f);
     int j = 7;
@@ -30,6 +43,17 @@ inline float grBandMix(float hueDeg, constant float *sliders) {
     float t = clamp((h - c0) / (c1 - c0), 0.0f, 1.0f);
     float w = t * t * (3.0f - 2.0f * t);
     return mix(sliders[j], sliders[(j + 1) & 7], w);
+}
+
+// Saturation weight. `pow(s, e)` with e < 1 has an unbounded derivative at 0, so
+// half-float quantisation of a *nearly* neutral gradient would band at high
+// slider values; below `knee` the weight follows the straight line through
+// (knee, knee^e) instead, which caps the derivative at knee^(e-1).
+// Exactly 0 at s = 0 either way, so neutrals stay bit-identical.
+inline float grSatWeight(float s, float e, float knee) {
+    s = clamp(s, 0.0f, 1.0f);
+    knee = max(knee, 1e-6f);
+    return (s >= knee) ? pow(s, e) : s * pow(knee, e - 1.0f);
 }
 
 kernel void bwMixKernel(texture2d<float, access::read>  src [[texture(0)]],
@@ -50,7 +74,7 @@ kernel void bwMixKernel(texture2d<float, access::read>  src [[texture(0)]],
     grHueSat(enc, hue, sat);
 
     float mixAmount = grBandMix(hue, sliders);
-    float gain = 1.0f + mixAmount * u.gainPerUnit * clamp(sat, 0.0f, 1.0f);
+    float gain = exp2(u.maxEV * (mixAmount * 0.01f) * grSatWeight(sat, u.satExponent, u.satKnee));
     float gray = max(Y * gain, 0.0f);
 
     dst.write(float4(gray, gray, gray, s.a), gid);

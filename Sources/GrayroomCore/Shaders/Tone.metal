@@ -35,11 +35,7 @@ constant float kToneShadowRange    = 1.3f;
 constant float kToneRampLo = -2.7f;
 constant float kToneRampHi = 5.3f;
 
-// Quintic smootherstep, clamped: 6t^5 - 15t^4 + 10t^3.
-inline float grSmootherstep(float e0, float e1, float x) {
-    float t = clamp((x - e0) / (e1 - e0), 0.0f, 1.0f);
-    return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
-}
+// `grSmootherstep` lives in Common.metal (Toning uses it too).
 
 // The three maskable curve components, summed. Sliders are -100..100.
 // CPU reference: ToneCurve.toneDeltaEV.

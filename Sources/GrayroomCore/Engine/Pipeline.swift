@@ -129,7 +129,9 @@ public final class Pipeline {
         // --- B&W mix --------------------------------------------------------
         if runs(.bwMix), edit.bwMix.enabled {
             var sliders = edit.bwMix.sliders.map { Float($0) }
-            var bwU = BWMixUniforms(gainPerUnit: StageConstants.bwGainPerUnit)
+            var bwU = BWMixUniforms(maxEV: Float(BWMixBands.maxEV),
+                                    satExponent: Float(BWMixBands.saturationExponent),
+                                    satKnee: Float(BWMixBands.saturationKnee))
             try encode(commandBuffer, bwMixPipeline, w, h) { e in
                 e.setTexture(src, index: 0)
                 e.setTexture(dst, index: 1)
@@ -149,7 +151,9 @@ public final class Pipeline {
                 highlightHue: Float(t.highlightHue),
                 highlightSat: Float(min(max(t.highlightSaturation, 0), 100) / 100),
                 balance: Float(min(max(t.balance, -100), 100) / 100),
-                strength: StageConstants.toningStrength)
+                strength: StageConstants.toningStrength,
+                crossoverHalfWidth: StageConstants.toningCrossoverHalfWidth,
+                lumaPreserve: StageConstants.toningLumaPreserve)
             try encode(commandBuffer, toningPipeline, w, h) { e in
                 e.setTexture(src, index: 0)
                 e.setTexture(dst, index: 1)

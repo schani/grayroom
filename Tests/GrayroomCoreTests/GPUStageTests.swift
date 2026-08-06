@@ -11,6 +11,8 @@ final class GPUStageTests: XCTestCase {
         static let blue = 2
         static let darkGray = 3
         static let nearWhite = 4
+        static let pureRed = 5
+        static let pureMagenta = 6
     }
 
     private let patches: [(Float, Float, Float)] = [
@@ -19,6 +21,8 @@ final class GPUStageTests: XCTestCase {
         (0.02, 0.02, 0.40),   // saturated blue
         (0.02, 0.02, 0.02),   // dark gray
         (0.90, 0.90, 0.90),   // near white
+        (0.40, 0.00, 0.00),   // fully saturated red (HSV sat = 1, hue 0)
+        (0.40, 0.00, 0.40),   // fully saturated magenta (hue 300)
     ]
 
     private func run(_ edit: EditState, upTo: Pipeline.Stage) throws -> FloatImage {
@@ -116,21 +120,75 @@ final class GPUStageTests: XCTestCase {
         }
     }
 
-    func testRedSliderDarkensRedPatch() throws {
+    /// Wave 2 authority (audit `bwmix-toning.json` #0): a *fully* saturated
+    /// colour at −100 on its own band goes to 1/8 of its untouched luminance —
+    /// three stops, symmetric with ×8 at +100. That is the "red filter" reach
+    /// Lightroom's mixer has and the old linear law (×0.2 … ×1.8) did not.
+    func testFullySaturatedColourAtMinus100ReachesNearBlack() throws {
         let neutral = try run(EditState(), upTo: .bwMix)
         var edit = EditState()
         edit.bwMix.red = -100
-        let darkened = try run(edit, upTo: .bwMix)
+        let dark = try run(edit, upTo: .bwMix)
 
-        let base = Double(neutral.rgb(x: P.red, y: 0).0)
-        let dark = Double(darkened.rgb(x: P.red, y: 0).0)
-        XCTAssertGreaterThan(base, 0.05)
-        XCTAssertLessThan(dark, base * 0.6, "red slider -100 should clearly darken a red patch")
+        let base = Double(neutral.rgb(x: P.pureRed, y: 0).0)
+        XCTAssertGreaterThan(base, 0.05, "the reference patch must not already be black")
+        let ratio = Double(dark.rgb(x: P.pureRed, y: 0).0) / base
+        XCTAssertEqual(ratio, 1.0 / 8, accuracy: 0.002,
+                       "sat = 1 at −100 must land on exactly 2^−maxEV")
 
-        // ... and brightens it in the other direction.
         edit.bwMix.red = 100
-        let brightened = try run(edit, upTo: .bwMix)
-        XCTAssertGreaterThan(Double(brightened.rgb(x: P.red, y: 0).0), base * 1.4)
+        let bright = try run(edit, upTo: .bwMix)
+        XCTAssertEqual(Double(bright.rgb(x: P.pureRed, y: 0).0) / base, 8, accuracy: 0.05,
+                       "and be symmetric in stops in the other direction")
+    }
+
+    /// The GPU gain must equal the law `BWMixBands.gain` publishes, because the
+    /// GUI reasons about the mixer through that mirror.
+    func testMixerGainMatchesTheDocumentedLaw() throws {
+        let neutral = try run(EditState(), upTo: .bwMix)
+        // Encoded HSV saturation of each patch, computed the way the kernel does.
+        func encodedSat(_ p: (Float, Float, Float)) -> Double {
+            let e = [p.0, p.1, p.2].map { pow(Double(max($0, 0)), 1 / 2.2) }
+            let mx = e.max()!, mn = e.min()!
+            return mx > 1e-6 ? (mx - mn) / mx : 0
+        }
+        for slider in [-100.0, -55.0, 25.0, 100.0] {
+            var edit = EditState()
+            edit.bwMix.red = slider          // hue 0 -> the red band alone
+            let out = try run(edit, upTo: .bwMix)
+            for idx in [P.red, P.pureRed, P.midGray] {
+                let expected = BWMixBands.gain(mixAmount: slider,
+                                               saturation: encodedSat(patches[idx]))
+                let got = Double(out.rgb(x: idx, y: 0).0) / Double(neutral.rgb(x: idx, y: 0).0)
+                XCTAssertEqual(got, expected, accuracy: expected * 0.01,
+                               "patch \(idx) at slider \(slider)")
+            }
+        }
+    }
+
+    /// The saturation weight is what keeps neutrals invariant and keeps the
+    /// mixer from banding. Pure Swift; the GPU side is pinned above.
+    func testSaturationWeightShape() {
+        XCTAssertEqual(BWMixBands.saturationWeight(0), 0, accuracy: 1e-15)
+        XCTAssertEqual(BWMixBands.saturationWeight(1), 1, accuracy: 1e-12)
+        XCTAssertEqual(BWMixBands.gain(mixAmount: 0, saturation: 1), 1, accuracy: 1e-12)
+        XCTAssertEqual(BWMixBands.gain(mixAmount: -100, saturation: 1), 0.125, accuracy: 1e-12)
+        XCTAssertEqual(BWMixBands.gain(mixAmount: 100, saturation: 1), 8, accuracy: 1e-12)
+        // Monotone, and always above the linear weight it replaced — that is the
+        // whole point: a real subject at saturation 0.5 gets 0.66 of the
+        // authority, not 0.5.
+        XCTAssertEqual(BWMixBands.saturationWeight(0.5), 0.6598, accuracy: 1e-4)
+        var previous = 0.0
+        var maxSlope = 0.0
+        for i in 1...10_000 {
+            let s = Double(i) / 10_000
+            let w = BWMixBands.saturationWeight(s)
+            XCTAssertGreaterThan(w, previous, "not monotone at \(s)")
+            maxSlope = max(maxSlope, (w - previous) * 10_000)
+            previous = w
+        }
+        // Without the knee this would diverge as s -> 0.
+        XCTAssertLessThan(maxSlope, 5, "saturation weight slope is unbounded")
     }
 
     func testBlueSliderTargetsBlueNotRed() throws {
@@ -139,12 +197,74 @@ final class GPUStageTests: XCTestCase {
         edit.bwMix.blue = -100
         let out = try run(edit, upTo: .bwMix)
 
+        // (0.02, 0.02, 0.40) has encoded saturation 0.744, so it lands at
+        // 2^(−3·0.744^0.6) ≈ 0.175 — several stops, not the ~0.7 EV the linear
+        // law managed on the same patch.
         XCTAssertLessThan(Double(out.rgb(x: P.blue, y: 0).0),
-                          Double(neutral.rgb(x: P.blue, y: 0).0) * 0.6)
+                          Double(neutral.rgb(x: P.blue, y: 0).0) * 0.2)
         // The red patch is on the far side of the hue circle and must not move.
         XCTAssertEqual(Double(out.rgb(x: P.red, y: 0).0),
                        Double(neutral.rgb(x: P.red, y: 0).0),
                        accuracy: Double(neutral.rgb(x: P.red, y: 0).0) * 0.02)
+    }
+
+    /// Band centres moved in wave 2 (audit #5): a pure magenta pixel (HSV 300°)
+    /// now lands entirely on the Magenta slider instead of being split 50/50
+    /// with Purple.
+    func testPureMagentaLandsOnTheMagentaSlider() throws {
+        let neutral = try run(EditState(), upTo: .bwMix)
+        let base = Double(neutral.rgb(x: P.pureMagenta, y: 0).0)
+
+        var onBand = EditState()
+        onBand.bwMix.magenta = -100
+        let magenta = try run(onBand, upTo: .bwMix)
+        XCTAssertEqual(Double(magenta.rgb(x: P.pureMagenta, y: 0).0) / base,
+                       1.0 / 8, accuracy: 0.002)
+
+        var neighbour = EditState()
+        neighbour.bwMix.purple = -100
+        let purple = try run(neighbour, upTo: .bwMix)
+        XCTAssertEqual(Double(purple.rgb(x: P.pureMagenta, y: 0).0), base,
+                       accuracy: base * 0.01, "Purple must not touch a pure magenta")
+    }
+
+    /// PV6 exists because big mixer moves band. Ours must not: on a near-neutral
+    /// gradient with a faint cast — the sky/skin case — a ±100 move has to leave
+    /// a monotone, gap-free 8-bit ramp.
+    func testMixerDoesNotBandANearNeutralGradient() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        let w = 512
+        for cast in [0.004, 0.01, 0.03] {
+            let tex = try ctx.makeTexture(width: w, height: 2) { x, _ in
+                let y = Float(0.01 + Double(x) * (0.5 - 0.01) / Double(w - 1))
+                return (y * Float(1 + cast), y, y * Float(1 - cast))
+            }
+            for slider in [-100.0, 100.0] {
+                var edit = EditState()
+                edit.bwMix.red = slider
+                edit.bwMix.orange = slider
+                let out = try TextureReadback.read(
+                    pipe.render(input: tex, edit: edit, upTo: .output).texture)
+                let codes = (0..<w).map { Int((Double(out.rgb(x: $0, y: 0).0) * 255).rounded()) }
+                let span = abs(codes.last! - codes.first!) + 1
+                let jumps = (1..<w).map { abs(codes[$0] - codes[$0 - 1]) }
+                let label = "cast \(cast) slider \(slider)"
+                XCTAssertGreaterThan(span, 150, "\(label): the ramp must still span the range")
+                // No skipped levels: a banded ramp shows plateaus and then jumps.
+                XCTAssertLessThanOrEqual(jumps.max() ?? 0, 2, "\(label): step > 2 codes")
+                XCTAssertGreaterThan(Double(Set(codes).count) / Double(span), 0.85,
+                                     "\(label): output uses too few of its levels")
+                // Half-float quantisation of a sub-1 % saturation leaves a little
+                // jitter; the saturation knee keeps it to a handful of 1-code
+                // reversals (21 -> 9 at cast 0.004, measured) rather than a
+                // staircase. Nothing above 1 code ever reverses.
+                let reversals = (1..<w).filter { codes[$0] < codes[$0 - 1] }
+                XCTAssertLessThan(reversals.count, 20, "\(label): ramp is not smooth")
+                for i in reversals {
+                    XCTAssertEqual(codes[i - 1] - codes[i], 1, "\(label): reversal at \(i)")
+                }
+            }
+        }
     }
 
     func testNeutralPatchInvariantForAnySlider() throws {
@@ -193,13 +313,96 @@ final class GPUStageTests: XCTestCase {
         XCTAssertEqual(Double(wr), Double(wb), accuracy: 0.01, "near-white must stay neutral")
         XCTAssertEqual(Double(wg), Double(wb), accuracy: 0.01)
 
-        // Luminance is (approximately) invariant: the tint is chroma only.
+        // Wave 2 retired the exact luminance invariant on purpose (audit #2):
+        // `lumaPreserve = 0.5` keeps half the tint's luminance excursion, so a
+        // warm tint *lifts*. What is asserted now is the sign and the bound.
         for idx in 0..<patches.count {
             let (r0, g0, b0) = before.rgb(x: idx, y: 0)
             let (r1, g1, b1) = out.rgb(x: idx, y: 0)
             let y0 = 0.2126 * Double(r0) + 0.7152 * Double(g0) + 0.0722 * Double(b0)
             let y1 = 0.2126 * Double(r1) + 0.7152 * Double(g1) + 0.0722 * Double(b1)
-            XCTAssertEqual(y1, y0, accuracy: max(y0 * 0.03, 1e-3), "luminance moved on patch \(idx)")
+            let dEV = log2(y1 / y0)
+            XCTAssertGreaterThanOrEqual(dEV, 0, "a warm tint must not darken (patch \(idx))")
+            XCTAssertLessThan(dEV, 0.1, "excursion too large on patch \(idx)")
+        }
+        // ... and it really does move: the deep shadow, which is fully tinted,
+        // gains about 1/27 of a stop at hue 30 / saturation 50.
+        let (r0, g0, b0) = before.rgb(x: P.darkGray, y: 0)
+        let (r1, g1, b1) = out.rgb(x: P.darkGray, y: 0)
+        let y0 = 0.2126 * Double(r0) + 0.7152 * Double(g0) + 0.0722 * Double(b0)
+        let y1 = 0.2126 * Double(r1) + 0.7152 * Double(g1) + 0.0722 * Double(b1)
+        XCTAssertEqual(log2(y1 / y0), 0.0366, accuracy: 0.004)
+    }
+
+    /// The other sign: a cool tint darkens. Together with the test above this is
+    /// the whole of the new luminance contract — bidirectional, hue-dependent,
+    /// bounded, and *not* zero.
+    func testCoolToningDarkensAndTheExcursionIsBounded() throws {
+        let before = try run(EditState(), upTo: .toning)
+        func lumaShift(hue: Double, sat: Double, at idx: Int) throws -> Double {
+            var edit = EditState()
+            edit.toning = .init(shadowHue: hue, shadowSaturation: sat,
+                                highlightHue: hue, highlightSaturation: sat)
+            let out = try run(edit, upTo: .toning)
+            let (r0, g0, b0) = before.rgb(x: idx, y: 0)
+            let (r1, g1, b1) = out.rgb(x: idx, y: 0)
+            let y0 = 0.2126 * Double(r0) + 0.7152 * Double(g0) + 0.0722 * Double(b0)
+            let y1 = 0.2126 * Double(r1) + 0.7152 * Double(g1) + 0.0722 * Double(b1)
+            return log2(y1 / y0)
+        }
+        XCTAssertLessThan(try lumaShift(hue: 240, sat: 100, at: P.midGray), -0.3)
+        XCTAssertGreaterThan(try lumaShift(hue: 40, sat: 100, at: P.midGray), 0.05)
+        // Worst case over the hue circle at full saturation is blue, −0.64 EV.
+        for hue in stride(from: 0.0, to: 360.0, by: 15.0) {
+            let d = try lumaShift(hue: hue, sat: 100, at: P.midGray)
+            XCTAssertLessThan(abs(d), 0.7, "hue \(hue) moved luminance by \(d) EV")
+        }
+        // And it scales with saturation, so a mild tint is a mild shift.
+        XCTAssertLessThan(abs(try lumaShift(hue: 240, sat: 20, at: P.midGray)), 0.1)
+    }
+
+    /// The Swift mirror the crossover is documented and unit-tested through has
+    /// to be the curve the kernel actually evaluates.
+    func testToningWeightsMatchTheShader() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        // Neutral ramp wide enough that the tone stage delivers t across 0…1.
+        let inputs: [Float] = [0.0002, 0.001, 0.003, 0.008, 0.02, 0.05, 0.12,
+                               0.18, 0.3, 0.6, 1.2, 2.5, 5, 10]
+        let tex = try ctx.makeTexture(width: inputs.count, height: 2) { x, _ in
+            (inputs[x], inputs[x], inputs[x])
+        }
+        for balance in [-100.0, 0.0, 100.0] {
+            let base = try TextureReadback.read(
+                pipe.render(input: tex, edit: EditState(), upTo: .bwMix).texture)
+            // Shadow wheel only, then highlight wheel only, same hue and
+            // saturation: the tint each produces is linear in its weight, so the
+            // ratio of the two chromas is the ratio of the two weights.
+            func chroma(shadow: Bool) throws -> [Double] {
+                var edit = EditState()
+                edit.toning = shadow
+                    ? .init(shadowHue: 0, shadowSaturation: 40, balance: balance)
+                    : .init(highlightHue: 0, highlightSaturation: 40, balance: balance)
+                let out = try TextureReadback.read(
+                    pipe.render(input: tex, edit: edit, upTo: .toning).texture)
+                return (0..<inputs.count).map {
+                    let (r, _, b) = out.rgb(x: $0, y: 0)
+                    let y = Double(base.rgb(x: $0, y: 0).0)
+                    return (Double(r) - Double(b)) / max(y, 1e-9)
+                }
+            }
+            let cs = try chroma(shadow: true)
+            let ch = try chroma(shadow: false)
+            for i in 0..<inputs.count {
+                let t = Double(base.rgb(x: i, y: 0).0).squareRoot()
+                let w = ToningWeights.weights(t: min(t, 1), balance: balance)
+                // Full weight on either side produces the same chroma, so the
+                // predicted split scales one measured total.
+                let total = cs[i] + ch[i]
+                guard total > 0.02 else { continue }
+                XCTAssertEqual(cs[i] / total, w.shadow / (w.shadow + w.highlight),
+                               accuracy: 0.03,
+                               "balance \(balance), t \(t): shadow share")
+            }
         }
     }
 
@@ -233,6 +436,115 @@ final class GPUStageTests: XCTestCase {
         // crossover at either balance, so it is no longer a probe of it.
         XCTAssertGreaterThan(warmth(mid, P.darkGray), 1.05)
         XCTAssertLessThan(warmth(shifted, P.darkGray), warmth(mid, P.darkGray))
+    }
+
+    /// Audit #1: the weights are complementary, so they sum to 1 everywhere the
+    /// endpoint fade is inactive and there is no neutral band at the crossover.
+    /// Pure Swift — this is the contract `testToningWeightsMatchTheShader` ties
+    /// to the kernel.
+    func testSplitToneWeightsSumToOneAndCrossoverFollowsBalance() throws {
+        for balance in [-100.0, -50.0, 0.0, 50.0, 100.0] {
+            var previousHighlight = -1.0
+            for t in stride(from: 0.10, through: 0.90, by: 0.01) {
+                let w = ToningWeights.weights(t: t, balance: balance)
+                XCTAssertEqual(w.shadow + w.highlight, 1, accuracy: 1e-9,
+                               "balance \(balance), t \(t)")
+                XCTAssertGreaterThan(w.highlight, previousHighlight - 1e-12,
+                                     "highlight weight must be monotone")
+                previousHighlight = w.highlight
+            }
+            // Nothing in the midtones is left untinted — the old shape had both
+            // weights at 0 exactly at the pivot.
+            let p = ToningWeights.pivot(balance: balance)
+            let atPivot = ToningWeights.weights(t: p, balance: balance)
+            XCTAssertEqual(atPivot.shadow, 0.5, accuracy: 1e-9)
+            XCTAssertEqual(atPivot.highlight, 0.5, accuracy: 1e-9)
+        }
+        // Balance moves the crossover, and only that.
+        XCTAssertEqual(ToningWeights.pivot(balance: 0), 0.5, accuracy: 1e-12)
+        XCTAssertEqual(ToningWeights.pivot(balance: 100), 0.15, accuracy: 1e-12)
+        XCTAssertEqual(ToningWeights.pivot(balance: -100), 0.85, accuracy: 1e-12)
+        // Positive balance favours highlights: at mid gray the shadow tint has
+        // already handed over.
+        XCTAssertLessThan(ToningWeights.weights(t: 0.5, balance: 100).shadow, 0.01)
+        XCTAssertGreaterThan(ToningWeights.weights(t: 0.5, balance: -100).shadow, 0.99)
+        // The extremes stay black and white.
+        XCTAssertEqual(ToningWeights.weights(t: 0, balance: 0).shadow, 0, accuracy: 1e-12)
+        XCTAssertEqual(ToningWeights.weights(t: 1, balance: 0).highlight, 0, accuracy: 1e-12)
+    }
+
+    /// The audit's own golden for the dead zone: both wheels on the same hue and
+    /// saturation must give one *uniform* tint across the tonal range, not
+    /// tinted ends around a grey middle.
+    func testEqualWheelsGiveAUniformTintWithNoNeutralMidtones() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        let inputs: [Float] = [0.008, 0.02, 0.05, 0.12, 0.18, 0.3, 0.6]
+        let tex = try ctx.makeTexture(width: inputs.count, height: 2) { x, _ in
+            (inputs[x], inputs[x], inputs[x])
+        }
+        let base = try TextureReadback.read(
+            pipe.render(input: tex, edit: EditState(), upTo: .bwMix).texture)
+        var edit = EditState()
+        edit.toning = .init(shadowHue: 210, shadowSaturation: 60,
+                            highlightHue: 210, highlightSaturation: 60)
+        let out = try TextureReadback.read(
+            pipe.render(input: tex, edit: edit, upTo: .toning).texture)
+
+        let chroma = (0..<inputs.count).map { i -> Double in
+            let (r, _, b) = out.rgb(x: i, y: 0)
+            return (Double(b) - Double(r)) / max(Double(base.rgb(x: i, y: 0).0), 1e-9)
+        }
+        let lo = chroma.min()!, hi = chroma.max()!
+        XCTAssertGreaterThan(lo, 0.3, "some tone was left untinted: \(chroma)")
+        XCTAssertLessThan(hi / lo, 1.15, "the tint is not uniform: \(chroma)")
+    }
+
+    /// Sepia sanity: shadows warm, the tint weakens monotonically with
+    /// luminance, and only genuinely near-white stays neutral.
+    func testSepiaPresetIsWarmAndMonotone() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        let inputs: [Float] = [0.0002, 0.001, 0.003, 0.008, 0.02, 0.05, 0.12,
+                               0.18, 0.3, 0.6, 1.2, 2.5, 5, 10]
+        let tex = try ctx.makeTexture(width: inputs.count, height: 2) { x, _ in
+            (inputs[x], inputs[x], inputs[x])
+        }
+        let base = try TextureReadback.read(
+            pipe.render(input: tex, edit: EditState(), upTo: .bwMix).texture)
+        var edit = EditState()
+        edit.toning = .init(shadowHue: 40, shadowSaturation: 30,
+                            highlightHue: 45, highlightSaturation: 25)
+        let out = try TextureReadback.read(
+            pipe.render(input: tex, edit: edit, upTo: .toning).texture)
+
+        var chroma: [Double] = []
+        for i in 0..<inputs.count {
+            let (r, g, b) = out.rgb(x: i, y: 0)
+            let y0 = Double(base.rgb(x: i, y: 0).0)
+            let y1 = 0.2126 * Double(r) + 0.7152 * Double(g) + 0.0722 * Double(b)
+            chroma.append((Double(r) - Double(b)) / max(y1, 1e-9))
+            // Hue direction: warm means R > G > B, everywhere it is tinted.
+            if chroma[i] > 0.01 {
+                XCTAssertGreaterThan(Double(r), Double(g), "patch \(i) not warm")
+                XCTAssertGreaterThan(Double(g), Double(b), "patch \(i) not warm")
+                // ... and the warm tint lifts, it does not darken.
+                XCTAssertGreaterThan(log2(y1 / y0), 0)
+            }
+            XCTAssertLessThan(log2(y1 / max(y0, 1e-12)), 0.06, "patch \(i) lifted too far")
+        }
+        // Peak strength is in the deep shadows and it falls monotonically with
+        // luminance from there. (Below the peak the endpoint fade takes it to 0,
+        // which is what keeps clipped black black.)
+        let peak = chroma.firstIndex(of: chroma.max()!)!
+        XCTAssertGreaterThan(chroma[peak], 0.35)
+        for i in (peak + 1)..<inputs.count {
+            XCTAssertLessThanOrEqual(chroma[i], chroma[i - 1] + 1e-6,
+                                     "tint strength not monotone at \(i): \(chroma)")
+        }
+        XCTAssertLessThan(chroma[0], 0.05, "clipped black must stay neutral")
+        XCTAssertLessThan(chroma[inputs.count - 1], 0.01, "clipped white must stay neutral")
+        // Mid gray really does gain warmth — the old shape left it exactly grey.
+        let mid = 7   // input 0.18
+        XCTAssertGreaterThan(chroma[mid], 0.25)
     }
 
     func testToningIdentityWhenSaturationsAreZero() throws {
