@@ -9,6 +9,9 @@ struct ToneUniforms {
     var gainBelow: Float
     var gainAbove: Float
     var lutSize: UInt32
+    /// 1 when the `params` texture holds real per-pixel mask deltas. 0 takes the
+    /// kernel down exactly the pre-M3 path.
+    var hasLocal: UInt32
 }
 
 struct BWMixUniforms {
@@ -41,6 +44,42 @@ struct ClarityUniforms {
 
 struct ClarityApplyUniforms {
     var maxStops: Float
+}
+
+// MARK: - Masks (M3)
+
+/// Mirrors `MaskStamp` in `Mask.metal`: five floats, stride 20.
+struct MaskStampGPU {
+    var cx: Float
+    var cy: Float
+    var radius: Float
+    var innerRadius: Float
+    var alpha: Float
+}
+
+struct MaskStrokeUniforms {
+    var stampCount: UInt32
+    var density: Float
+    var erase: UInt32
+}
+
+struct MaskAccumulateUniforms {
+    var dExposure: Float
+    var dContrast: Float
+    var dHighlights: Float
+    var dShadows: Float
+    var dClarity: Float
+}
+
+struct MaskClampUniforms {
+    var exposureLimit: Float
+    var otherLimit: Float
+}
+
+struct MaskClarityUniforms {
+    var globalClarity: Float
+    var dominantSign: Float
+    var invMaxAbs: Float
 }
 
 enum StageConstants {

@@ -1,0 +1,601 @@
+import Metal
+import XCTest
+@testable import GrayroomCore
+
+/// M3: brush masks, parameter accumulation and the per-pixel stage hooks.
+///
+/// The CPU rasterizer in `MaskRasterizer` is the reference: the stamp-profile,
+/// flow, density and erase tests pin the *semantics* there, and one test then
+/// pins the GPU to it.
+final class MaskTests: XCTestCase {
+
+    // MARK: - CPU rasterizer: the stamp
+
+    /// One stamp, hard and feathered. `feather = 0` still gets a 1 px antialias
+    /// ramp (`inner = radius − 1`); `feather = 100` falls off from the centre.
+    func testSingleStampRadialProfile() throws {
+        let w = 64, h = 64
+        // diameter = 0.5 * 64 = 32 px, so radius 16 centred on (32, 32).
+        func coverage(feather: Double) -> [Float] {
+            let mask = Mask(strokes: [Stroke(brush: BrushParams(size: 0.5, feather: feather,
+                                                                flow: 100, density: 100),
+                                             points: [StrokePoint(x: 0.5, y: 0.5)])])
+            return MaskRasterizer.rasterize(mask, width: w, height: h)
+        }
+        // Sample along the +x axis from the stamp centre. Pixel (32, 31) has its
+        // centre at (32.5, 31.5), i.e. 0.5 px off-axis — sample on row 31 and
+        // account for it with the exact distance.
+        func value(_ c: [Float], _ x: Int) -> Double { Double(c[31 * w + x]) }
+        func distance(_ x: Int) -> Double {
+            let dx = Double(x) + 0.5 - 32, dy = 31.5 - 32.0
+            return (dx * dx + dy * dy).squareRoot()
+        }
+
+        let hard = coverage(feather: 0)
+        let soft = coverage(feather: 100)
+
+        for x in 32..<52 {
+            let d = distance(x)
+            let expectedHard = MaskRasterizer.profile(distance: d, inner: 15, outer: 16)
+            let expectedSoft = MaskRasterizer.profile(distance: d, inner: 0, outer: 16)
+            // The coverage array is Float; the reference is Double.
+            XCTAssertEqual(value(hard, x), expectedHard, accuracy: 1e-6)
+            XCTAssertEqual(value(soft, x), expectedSoft, accuracy: 1e-6)
+        }
+
+        // Shape: hard is flat then drops in ~1 px; soft is a smooth dome.
+        XCTAssertEqual(value(hard, 32), 1, accuracy: 1e-9)
+        XCTAssertEqual(value(hard, 44), 1, accuracy: 1e-9)          // d = 11.5 < 15
+        XCTAssertEqual(value(hard, 47), 0.5, accuracy: 0.06)        // d = 15.5, mid-ramp
+        XCTAssertEqual(value(hard, 48), 0, accuracy: 1e-9)          // d = 16.5 >= 16
+        // Soft falls off from the centre, so even 0.7 px out it is below 1.
+        XCTAssertGreaterThan(value(soft, 32), 0.99)
+        XCTAssertLessThan(value(soft, 32), 1)
+        XCTAssertEqual(value(soft, 40), 0.5, accuracy: 0.06)        // d ~ 8 = r/2
+        XCTAssertLessThan(value(soft, 44), value(soft, 40))
+        XCTAssertEqual(value(soft, 48), 0, accuracy: 1e-9)
+        // A featherless brush covers strictly more than a feathered one.
+        for i in 0..<(w * h) where soft[i] > 0 {
+            XCTAssertGreaterThanOrEqual(hard[i], soft[i] - 1e-6)
+        }
+    }
+
+    /// Stamp placement: spacing is 15% of the *nominal* diameter, measured in
+    /// pixels along the polyline, with the first stamp on the first point.
+    func testStampPlacementSpacing() {
+        let stroke = Stroke(brush: BrushParams(size: 0.5, feather: 0),
+                            polyline: [(0.25, 0.5), (0.75, 0.5)])
+        let stamps = MaskRasterizer.stamps(for: stroke, width: 64, height: 64)
+        // diameter 32 px -> spacing 4.8 px over a 32 px segment: 1 + 6 stamps.
+        XCTAssertEqual(stamps.count, 7)
+        XCTAssertEqual(stamps[0].x, 16, accuracy: 1e-9)
+        for i in 1..<stamps.count {
+            XCTAssertEqual(stamps[i].x - stamps[i - 1].x, 4.8, accuracy: 1e-9)
+            XCTAssertEqual(stamps[i].y, 32, accuracy: 1e-9)
+        }
+        // Pressure scales the radius (and only the radius); spacing is unchanged.
+        let ramped = Stroke(brush: BrushParams(size: 0.5, feather: 0),
+                            points: [StrokePoint(x: 0.25, y: 0.5, pressure: 1),
+                                     StrokePoint(x: 0.75, y: 0.5, pressure: 0)])
+        let rampedStamps = MaskRasterizer.stamps(for: ramped, width: 64, height: 64)
+        XCTAssertEqual(rampedStamps.count, 7)
+        XCTAssertEqual(rampedStamps[0].radius, 16, accuracy: 1e-9)
+        // The last stamp lands at u = 0.9 (the endpoint itself is never stamped
+        // unless it falls exactly on the spacing grid), so pressure is 0.1.
+        XCTAssertEqual(rampedStamps[6].radius, 1.6, accuracy: 1e-9)
+        for i in 1..<rampedStamps.count {
+            XCTAssertLessThan(rampedStamps[i].radius, rampedStamps[i - 1].radius)
+            XCTAssertEqual(rampedStamps[i].alpha, rampedStamps[i - 1].alpha)
+        }
+        // Sub-spacing strokes still get their single stamp.
+        let dot = Stroke(brush: BrushParams(size: 0.5), polyline: [(0.5, 0.5)])
+        XCTAssertEqual(MaskRasterizer.stamps(for: dot, width: 64, height: 64).count, 1)
+    }
+
+    // MARK: - CPU rasterizer: flow, density, erase
+
+    /// Flow accumulates by **over**-compositing, not by adding: two stamps at
+    /// flow 20 give 0.2 + 0.2·0.8 = 0.36, not 0.4.
+    func testFlowBuildsUpByOverCompositing() {
+        let w = 64, h = 64
+        // Two stamps: one on the first point, one 4.8 px down the 6 px segment.
+        let stroke = Stroke(brush: BrushParams(size: 0.5, feather: 0, flow: 20, density: 100),
+                            polyline: [(0.5, 0.5), (0.5, 0.5 + 6.0 / 64.0)])
+        XCTAssertEqual(MaskRasterizer.stamps(for: stroke, width: w, height: h).count, 2)
+        let c = MaskRasterizer.rasterize(Mask(strokes: [stroke]), width: w, height: h)
+        // (32, 34) is inside both stamps' full-opacity discs.
+        XCTAssertEqual(Double(c[34 * w + 32]), 0.36, accuracy: 1e-6)
+        // A single stamp at the same flow is just 0.2.
+        let one = Stroke(brush: BrushParams(size: 0.5, feather: 0, flow: 20),
+                         polyline: [(0.5, 0.5)])
+        let c1 = MaskRasterizer.rasterize(Mask(strokes: [one]), width: w, height: h)
+        XCTAssertEqual(Double(c1[32 * w + 32]), 0.2, accuracy: 1e-6)
+    }
+
+    /// Density is a per-stroke ceiling applied to the stroke's own buffer, so a
+    /// stroke that crosses itself never exceeds it.
+    func testDensityClampsTheStroke() {
+        let w = 64, h = 64
+        let brush = BrushParams(size: 0.5, feather: 0, flow: 20, density: 30)
+        let stroke = Stroke(brush: brush, polyline: [(0.5, 0.5), (0.5, 0.5 + 6.0 / 64.0)])
+        let c = MaskRasterizer.rasterize(Mask(strokes: [stroke]), width: w, height: h)
+        XCTAssertEqual(Double(c[34 * w + 32]), 0.30, accuracy: 1e-6)   // 0.36 clamped
+
+        // Below the ceiling nothing changes.
+        var loose = brush
+        loose.density = 100
+        let unclamped = MaskRasterizer.rasterize(
+            Mask(strokes: [Stroke(brush: loose, polyline: [(0.5, 0.5)])]), width: w, height: h)
+        XCTAssertEqual(Double(unclamped[32 * w + 32]), 0.2, accuracy: 1e-6)
+    }
+
+    /// Normal strokes merge with `max`, erase strokes with `mask·(1 − stroke)`.
+    func testEraseStrokeSubtracts() {
+        let w = 64, h = 64
+        let paint = Stroke(brush: BrushParams(size: 2.0, feather: 0, flow: 100),
+                           polyline: [(0.5, 0.5)])
+        let half = Stroke(brush: BrushParams(size: 0.5, feather: 0, flow: 50),
+                          erase: true, polyline: [(0.5, 0.5)])
+        let full = Stroke(brush: BrushParams(size: 0.5, feather: 0, flow: 100),
+                          erase: true, polyline: [(0.5, 0.5)])
+
+        let painted = MaskRasterizer.rasterize(Mask(strokes: [paint]), width: w, height: h)
+        XCTAssertEqual(Double(painted[32 * w + 32]), 1, accuracy: 1e-9)
+        XCTAssertEqual(Double(painted[0]), 1, accuracy: 1e-9, "a size-2.0 brush covers everything")
+
+        let halfErased = MaskRasterizer.rasterize(Mask(strokes: [paint, half]), width: w, height: h)
+        XCTAssertEqual(Double(halfErased[32 * w + 32]), 0.5, accuracy: 1e-6)
+        XCTAssertEqual(Double(halfErased[0]), 1, accuracy: 1e-9, "erase is local to its stamps")
+
+        let erased = MaskRasterizer.rasterize(Mask(strokes: [paint, full]), width: w, height: h)
+        XCTAssertEqual(Double(erased[32 * w + 32]), 0, accuracy: 1e-9)
+        // ... and a normal stroke after the eraser paints back over the hole.
+        let repainted = MaskRasterizer.rasterize(Mask(strokes: [paint, full, paint]),
+                                                 width: w, height: h)
+        XCTAssertEqual(Double(repainted[32 * w + 32]), 1, accuracy: 1e-9)
+    }
+
+    // MARK: - GPU vs CPU
+
+    private func syntheticStrokeMask() -> Mask {
+        Mask(name: "synthetic",
+             adjustments: MaskAdjustments(exposure: 1),
+             strokes: [
+                // A soft diagonal, a hard dab with a pressure ramp, and an eraser.
+                Stroke(brush: BrushParams(size: 0.30, feather: 70, flow: 60, density: 90),
+                       polyline: [(0.15, 0.2), (0.5, 0.55), (0.85, 0.35)]),
+                Stroke(brush: BrushParams(size: 0.18, feather: 10, flow: 100, density: 100),
+                       points: [StrokePoint(x: 0.2, y: 0.8, pressure: 0.3),
+                                StrokePoint(x: 0.8, y: 0.8, pressure: 1.0)]),
+                Stroke(brush: BrushParams(size: 0.22, feather: 40, flow: 80, density: 70),
+                       erase: true, polyline: [(0.35, 0.3), (0.6, 0.6)]),
+             ])
+    }
+
+    func testGPUMatchesCPURasterizer() throws {
+        let (_, pipe) = try TestGPU.require()
+        let w = 96, h = 64
+        let mask = syntheticStrokeMask()
+        let gpu = try pipe.maskCoverage(masks: [mask], width: w, height: h, maskIndex: 0)
+        let cpu = MaskRasterizer.rasterize(mask, width: w, height: h)
+
+        XCTAssertEqual(gpu.count, cpu.count)
+        var maxDelta = 0.0
+        for i in 0..<cpu.count {
+            maxDelta = max(maxDelta, abs(Double(gpu[i]) - Double(cpu[i])))
+        }
+        // r16Float storage quantises to ~1e-3 near 1.0; the arithmetic itself is
+        // float32 on the GPU and Double on the CPU.
+        XCTAssertLessThan(maxDelta, 2e-3, "GPU/CPU rasterizer disagree by \(maxDelta)")
+        XCTAssertGreaterThan(cpu.reduce(0, +) / Float(cpu.count), 0.05, "test mask is empty")
+
+        // The union of two masks is the max of their coverages.
+        var other = mask
+        other.strokes = [Stroke(brush: BrushParams(size: 0.4, feather: 0),
+                                polyline: [(0.1, 0.1)])]
+        let union = try pipe.maskCoverage(masks: [mask, other], width: w, height: h)
+        let cpuUnion = MaskRasterizer.rasterizeUnion([mask, other], width: w, height: h)
+        for i in 0..<union.count {
+            XCTAssertEqual(Double(union[i]), Double(cpuUnion[i]), accuracy: 2e-3)
+        }
+    }
+
+    // MARK: - Parameter accumulation
+
+    /// Two masks covering the same pixels sum, then saturate at the documented
+    /// range edges (±4 EV, ±100).
+    func testParameterAccumulationSumsAndClamps() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        let w = 32, h = 32
+        // A size-2.0 brush covers the whole frame at coverage 1.
+        func mask(_ a: MaskAdjustments) -> Mask {
+            Mask(adjustments: a,
+                 strokes: [Stroke(brush: BrushParams(size: 2.0, feather: 0, flow: 100),
+                                  polyline: [(0.5, 0.5)])])
+        }
+        let masks = [
+            mask(MaskAdjustments(exposure: 3, contrast: 60, highlights: -80, shadows: 10, clarity: 70)),
+            mask(MaskAdjustments(exposure: 3, contrast: 60, highlights: -80, shadows: -40, clarity: 70)),
+        ]
+
+        guard let cb = ctx.commandQueue.makeCommandBuffer() else { return XCTFail("no cb") }
+        let maps = try pipe.maskStage.encodeMaps(cb, masks: masks, width: w, height: h)
+        cb.commit()
+        cb.waitUntilCompleted()
+
+        let a = try TextureReadback.read(maps.paramsA)
+        let b = try TextureReadback.readScalar(maps.paramsB)
+        let i = (16 * w + 16) * 4
+        XCTAssertEqual(Double(a.pixels[i]), 4, accuracy: 1e-3)        // 3 + 3 -> clamped to 4
+        XCTAssertEqual(Double(a.pixels[i + 1]), 100, accuracy: 1e-2)  // 60 + 60 -> clamped
+        XCTAssertEqual(Double(a.pixels[i + 2]), -100, accuracy: 1e-2) // -80 - 80 -> clamped
+        XCTAssertEqual(Double(a.pixels[i + 3]), -30, accuracy: 1e-2)  // 10 - 40, in range
+        XCTAssertEqual(Double(b[16 * w + 16]), 100, accuracy: 1e-2)   // 70 + 70 -> clamped
+
+        // The CPU reference agrees.
+        let coverages = masks.map { MaskRasterizer.rasterize($0, width: w, height: h) }
+        let p = MaskRasterizer.accumulate(masks, coverages: coverages, at: 16 * w + 16)
+        XCTAssertEqual(p.exposure, 4, accuracy: 1e-9)
+        XCTAssertEqual(p.contrast, 100, accuracy: 1e-9)
+        XCTAssertEqual(p.highlights, -100, accuracy: 1e-9)
+        XCTAssertEqual(p.shadows, -30, accuracy: 1e-9)
+        XCTAssertEqual(p.clarity, 100, accuracy: 1e-9)
+    }
+
+    // MARK: - Tone delta
+
+    /// Zero deltas must leave the tone stage **bit-for-bit** where it was: this
+    /// is what makes an unmasked pixel identical to a pre-M3 render.
+    func testToneDeltaIsBitwiseIdentityAtZero() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        let w = 64, h = 8
+        let input = try ctx.makeTexture(width: w, height: h) { x, _ in
+            let v = Float(exp2(Double(x) / 8 - 6))
+            return (v, v * 0.8, v * 1.2)
+        }
+        let zeros = try ctx.makeRGBATexture(width: w, height: h) { _, _ in (0, 0, 0, 0) }
+        let tone = EditState.Tone(exposure: 0.3, contrast: 25, highlights: -40, shadows: 20)
+
+        let withParams = try TextureReadback.read(
+            pipe.renderToneOnly(input: input, tone: tone, params: zeros))
+        let without = try TextureReadback.read(
+            pipe.renderToneOnly(input: input, tone: tone, params: nil))
+        for i in 0..<withParams.pixels.count {
+            XCTAssertEqual(withParams.pixels[i], without.pixels[i],
+                           "zero local delta must not perturb the tone stage (i=\(i))")
+        }
+    }
+
+    /// The shader's `grToneDeltaEV` against `ToneCurve`'s components, over a grid
+    /// of luminances and delta triples, composed after the global LUT.
+    func testGPUToneDeltaMatchesCPUReference() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        // Half-float-exact values so the texture round trip contributes nothing.
+        let deltas: [(Float, Float, Float, Float)] = [
+            (0, 0, 0, 0), (1, 0, 0, 0), (-1.5, 0, 0, 0),
+            (0, 50, 0, 0), (0, -50, 0, 0),
+            (0, 0, 60, 0), (0, 0, -60, 0),
+            (0, 0, 0, 75), (0, 0, 0, -75),
+            (0.5, 25, -40, 20), (-2, -25, 40, -20), (4, 100, 100, 100),
+            (-4, -100, -100, -100), (1.5, 60, -80, 30),
+        ]
+        let luminances: [Float] = (0..<40).map { Float(exp2(Double($0) * 0.5 - 12)) }
+        let w = luminances.count, h = deltas.count
+
+        let input = try ctx.makeTexture(width: w, height: h) { x, _ in
+            (luminances[x], luminances[x], luminances[x])
+        }
+        let params = try ctx.makeRGBATexture(width: w, height: h) { _, y in deltas[y] }
+        let tone = EditState.Tone(exposure: 0.3, contrast: 25, highlights: -40, shadows: 20)
+        let out = try TextureReadback.read(pipe.renderToneOnly(input: input, tone: tone, params: params))
+
+        let lut = ToneCurve.makeLUT(for: tone)
+        var worst = 0.0
+        for y in 0..<h {
+            let d = deltas[y]
+            for x in 0..<w {
+                let Y = Double(Float16(luminances[x]))
+                let global = ToneCurve.applyLUT(lut, toLuminance: Y)
+                let expected = ToneCurve.applyToneDelta(global,
+                                                        exposure: Double(d.0),
+                                                        contrast: Double(d.1),
+                                                        highlights: Double(d.2),
+                                                        shadows: Double(d.3))
+                let got = Double(out.rgb(x: x, y: y).0)
+                let tol = max(expected * 3e-3, 1e-7)
+                // Below ~1e-4 the rgba16Float round trip dominates; the relative
+                // summary only tracks values the format can actually resolve.
+                if expected > 1e-4 { worst = max(worst, abs(got - expected) / expected) }
+                XCTAssertEqual(got, expected, accuracy: tol,
+                               "Y=\(Y) delta=\(d): GPU \(got) vs CPU \(expected)")
+            }
+        }
+        XCTAssertLessThan(worst, 3e-3)
+    }
+
+    /// The local delta must stay monotone in Y, or masked highlights would fold
+    /// over masked midtones. Seeded random deltas over the full slider ranges.
+    func testToneDeltaIsMonotoneInLuminance() {
+        var rng = SeededRandom(seed: 0x5EED_0003)
+        for _ in 0..<200 {
+            let ev = rng.double(in: -4...4)
+            let c = rng.double(in: -100...100)
+            let hi = rng.double(in: -100...100)
+            let sh = rng.double(in: -100...100)
+            var previous = -Double.infinity
+            for i in 0...800 {
+                let x = -14.0 + Double(i) * 22.0 / 800.0
+                let y = ToneCurve.pivot * exp2(x)
+                let out = ToneCurve.applyToneDelta(y, exposure: ev, contrast: c,
+                                                   highlights: hi, shadows: sh)
+                XCTAssertGreaterThan(out, previous,
+                                     "not monotone at \(x) EV for (\(ev), \(c), \(hi), \(sh))")
+                previous = out
+            }
+        }
+    }
+
+    // MARK: - Golden: a mask over half the frame
+
+    /// One mask covering the left half at Δexposure +1 doubles linear luminance
+    /// there and leaves the right half bit-for-bit alone.
+    func testMaskedExposureDoublesTheCoveredHalf() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        let w = 256, h = 256
+        let input = try ctx.makeTexture(width: w, height: h) { x, y in
+            let fx: Double = Double(x) / 255
+            let fy: Double = Double(y) / 255
+            let v = Float(0.02 + 0.3 * fx + 0.1 * fy)
+            return (v, v * 0.9, v * 1.1)
+        }
+        // A wide hard brush dragged down past both edges of the frame: full
+        // coverage out to x ~ 100, zero past x ~ 103.
+        let mask = Mask(name: "left",
+                        adjustments: MaskAdjustments(exposure: 1),
+                        strokes: [Stroke(brush: BrushParams(size: 0.6, feather: 0,
+                                                            flow: 100, density: 100),
+                                         polyline: [(0.1, -0.2), (0.1, 1.2)])])
+        var edit = EditState()
+        edit.tone = .init(exposure: 0.3, contrast: 25)
+        var masked = edit
+        masked.masks = [mask]
+
+        let plain = try TextureReadback.read(pipe.render(input: input, edit: edit, upTo: .tone).texture)
+        let out = try TextureReadback.read(pipe.render(input: input, edit: masked, upTo: .tone).texture)
+
+        // Left: x2 in linear luminance. Sampled away from the feathered edge.
+        for y in stride(from: 8, to: h, by: 16) {
+            for x in stride(from: 4, to: 80, by: 8) {
+                let a = Double(plain.rgb(x: x, y: y).0)
+                let b = Double(out.rgb(x: x, y: y).0)
+                XCTAssertEqual(b / a, 2.0, accuracy: 0.02, "at (\(x), \(y))")
+            }
+        }
+        // Right: outside every stamp the parameter map is exactly zero, so the
+        // kernel takes the same path and the bits match.
+        for y in 0..<h {
+            for x in 110..<w {
+                let i = (y * w + x) * 4
+                XCTAssertEqual(out.pixels[i], plain.pixels[i], "at (\(x), \(y))")
+                XCTAssertEqual(out.pixels[i + 1], plain.pixels[i + 1])
+                XCTAssertEqual(out.pixels[i + 2], plain.pixels[i + 2])
+            }
+        }
+        // The transition is monotone across the feathered boundary.
+        let row = 128
+        var previous = 0.0
+        for x in stride(from: 108, through: 84, by: -1) {
+            let ratio = Double(out.rgb(x: x, y: row).0) / Double(plain.rgb(x: x, y: row).0)
+            XCTAssertGreaterThanOrEqual(ratio, previous - 1e-3, "ratio dipped at x=\(x)")
+            previous = ratio
+        }
+    }
+
+    // MARK: - Local clarity
+
+    /// A clarity mask raises fine-texture contrast where it covers and leaves
+    /// the rest of the frame bit-for-bit alone (amount 0 => `mix(L, L', 0)`).
+    func testLocalClarityAffectsOnlyTheMaskedRegion() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        let w = 256, h = 256
+        // Flat base with a period-4 multiplicative ripple: the same fine
+        // texture ClarityTests uses, without the step edge.
+        let input = try ctx.makeTexture(width: w, height: h) { x, y in
+            let sx = sin(Double(x) * .pi / 2), sy = sin(Double(y) * .pi / 2)
+            let v = Float(0.18 * (1 + 0.12 * 0.5 * (sx + sy)))
+            return (v, v, v)
+        }
+        let mask = Mask(name: "clarity left",
+                        adjustments: MaskAdjustments(clarity: 80),
+                        strokes: [Stroke(brush: BrushParams(size: 0.6, feather: 0,
+                                                            flow: 100, density: 100),
+                                         polyline: [(0.1, -0.2), (0.1, 1.2)])])
+        var edit = EditState()
+        var masked = edit
+        masked.masks = [mask]
+
+        let plain = try TextureReadback.read(pipe.render(input: input, edit: edit, upTo: .clarity).texture)
+        let out = try TextureReadback.read(pipe.render(input: input, edit: masked, upTo: .clarity).texture)
+
+        func textureRMS(_ img: FloatImage, _ xs: Range<Int>) -> Double {
+            var acc = 0.0, n = 0.0, mean = 0.0
+            var values: [Double] = []
+            for y in 40..<216 {
+                for x in xs {
+                    let v = log2(max(Double(img.rgb(x: x, y: y).0), 1e-9))
+                    values.append(v)
+                    mean += v
+                    n += 1
+                }
+            }
+            mean /= n
+            for v in values { acc += (v - mean) * (v - mean) }
+            return (acc / n).squareRoot()
+        }
+
+        let before = textureRMS(plain, 8..<72)
+        let after = textureRMS(out, 8..<72)
+        XCTAssertGreaterThan(after, before * 1.3,
+                             "masked clarity should raise fine texture (\(before) -> \(after))")
+
+        // Unmasked half: amount = 0 means the clarity stage writes the input back
+        // unchanged, and the no-mask render skips the stage entirely.
+        for y in 0..<h {
+            for x in 130..<w {
+                let i = (y * w + x) * 4
+                XCTAssertEqual(out.pixels[i], plain.pixels[i], "at (\(x), \(y))")
+            }
+        }
+    }
+
+    /// The documented conflict rule: with signs in conflict, only the dominant
+    /// variant is rendered and the other side is clamped to zero amount.
+    func testClarityVariantPicksTheDominantSign() {
+        let boost = Mask(adjustments: MaskAdjustments(clarity: 40),
+                         strokes: [Stroke(brush: BrushParams(), polyline: [(0.5, 0.5)])])
+        let smooth = Mask(adjustments: MaskAdjustments(clarity: -90),
+                          strokes: [Stroke(brush: BrushParams(), polyline: [(0.5, 0.5)])])
+
+        // Global only.
+        XCTAssertEqual(MaskRasterizer.clarityVariant(global: 30, masks: []).clarity, 30)
+        // Global + same sign: the extreme is the sum.
+        XCTAssertEqual(MaskRasterizer.clarityVariant(global: 30, masks: [boost]).clarity, 70)
+        // Conflicting signs: -90 + 0 = -90 wins over 0 + 40 = 40.
+        let conflicted = MaskRasterizer.clarityVariant(global: 0, masks: [boost, smooth])
+        XCTAssertEqual(conflicted.clarity, -90)
+        XCTAssertEqual(conflicted.sign, -1)
+        let range = MaskRasterizer.clarityRange(global: 0, masks: [boost, smooth])
+        XCTAssertEqual(range.lo, -90)
+        XCTAssertEqual(range.hi, 40)
+        // Ranges saturate at ±100.
+        XCTAssertEqual(MaskRasterizer.clarityRange(global: 80, masks: [boost]).hi, 100)
+        // Disabled masks do not count.
+        var off = boost
+        off.enabled = false
+        XCTAssertEqual(MaskRasterizer.clarityVariant(global: 10, masks: [off]).clarity, 10)
+    }
+
+    // MARK: - Gating
+
+    /// Zero *effective* masks must leave the whole pipeline byte-identical to a
+    /// pre-M3 render, whether the masks are absent, disabled or all-zero.
+    func testPipelineIsUnchangedWithoutEffectiveMasks() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        let w = 128, h = 96
+        let input = try ctx.makeTexture(width: w, height: h) { x, y in
+            (Float(0.05 + 0.4 * Double(x) / Double(w)),
+             Float(0.05 + 0.3 * Double(y) / Double(h)),
+             Float(0.2))
+        }
+        var base = EditState()
+        base.tone = .init(exposure: 0.3, contrast: 25, highlights: -40, shadows: 20)
+        base.clarity = 40
+        base.bwMix = .init(red: -30, blue: -60)
+        base.toning = .init(shadowHue: 215, shadowSaturation: 12,
+                            highlightHue: 45, highlightSaturation: 10, balance: 10)
+
+        let strokes = [Stroke(brush: BrushParams(size: 0.5, feather: 30),
+                              polyline: [(0.2, 0.2), (0.8, 0.8)])]
+        var disabled = base
+        disabled.masks = [Mask(name: "off", enabled: false,
+                               adjustments: MaskAdjustments(exposure: 2, clarity: -60),
+                               strokes: strokes)]
+        var zeroed = base
+        zeroed.masks = [Mask(name: "flat", adjustments: MaskAdjustments(), strokes: strokes)]
+        var strokeless = base
+        strokeless.masks = [Mask(name: "empty",
+                                 adjustments: MaskAdjustments(exposure: 2), strokes: [])]
+
+        let reference = try TextureReadback.read(pipe.render(input: input, edit: base).texture)
+        for (label, edit) in [("disabled", disabled), ("zero adjustments", zeroed),
+                              ("no strokes", strokeless)] {
+            let other = try TextureReadback.read(pipe.render(input: input, edit: edit).texture)
+            for i in 0..<reference.pixels.count {
+                XCTAssertEqual(other.pixels[i], reference.pixels[i],
+                               "\(label) mask changed the output at index \(i)")
+            }
+        }
+    }
+
+    // MARK: - End to end
+
+    func testEndToEndMaskedRender() throws {
+        guard let url = testDataURL("L1000003.DNG") else {
+            throw XCTSkip("testdata/L1000003.DNG not present (set GRAYROOM_TEST_DNG to override)")
+        }
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("grayroom-mask-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // A painted "graduated ND" over the top of the portrait frame: three
+        // horizontal sweeps with a big soft brush.
+        let brush = BrushParams(size: 0.25, feather: 60, flow: 100, density: 100)
+        let mask = Mask(name: "sky",
+                        adjustments: MaskAdjustments(exposure: -0.8, contrast: 15, clarity: 20),
+                        strokes: (0..<3).map { i in
+                            Stroke(brush: brush,
+                                   polyline: [(-0.05, 0.06 + 0.10 * Double(i)),
+                                              (1.05, 0.06 + 0.10 * Double(i))])
+                        })
+        var edit = EditState()
+        edit.tone = .init(exposure: 0.3, contrast: 25, highlights: -40, shadows: 20)
+        edit.clarity = 25
+        edit.masks = [mask]
+
+        let renderer = try Renderer()
+        let out = dir.appendingPathComponent("masked.png")
+        let result = try renderer.render(rawURL: url, edit: edit, to: out, format: .png,
+                                         maxDimension: 1024, computeHistogram: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: out.path))
+        XCTAssertEqual(max(result.width, result.height), 1024)
+        let histogram = try XCTUnwrap(result.histogram)
+        XCTAssertGreaterThan(histogram.meanLuminance, 0.05)
+        XCTAssertLessThan(histogram.meanLuminance, 0.95)
+
+        // The coverage is where we said it is: heavy at the top, none at
+        // the bottom.
+        let coverage = try renderer.pipeline.maskCoverage(masks: edit.masks,
+                                                          width: result.width,
+                                                          height: result.height)
+        func meanCoverage(_ rows: Range<Int>) -> Double {
+            var acc = 0.0
+            for y in rows { for x in 0..<result.width { acc += Double(coverage[y * result.width + x]) } }
+            return acc / Double(rows.count * result.width)
+        }
+        XCTAssertGreaterThan(meanCoverage(0..<(result.height / 5)), 0.8)
+        XCTAssertLessThan(meanCoverage((result.height * 2 / 3)..<result.height), 1e-4)
+
+        // And the masked render differs from the unmasked one only up top.
+        var plain = edit
+        plain.masks = []
+        let decoded = try renderer.decoder.decode(url: url, edit: edit, maxDimension: 1024)
+        let a = try TextureReadback.read(
+            renderer.pipeline.render(input: decoded.texture, edit: plain).texture)
+        let b = try TextureReadback.read(
+            renderer.pipeline.render(input: decoded.texture, edit: edit).texture)
+
+        func bandMean(_ img: FloatImage, _ rows: Range<Int>) -> Double {
+            var acc = 0.0
+            for y in rows {
+                for x in 0..<img.width {
+                    let (r, g, bl) = img.rgb(x: x, y: y)
+                    acc += 0.2126 * Double(r) + 0.7152 * Double(g) + 0.0722 * Double(bl)
+                }
+            }
+            return acc / Double(rows.count * img.width)
+        }
+        let topPlain = bandMean(a, 0..<(a.height / 5))
+        let topMasked = bandMean(b, 0..<(b.height / 5))
+        let bottomPlain = bandMean(a, (a.height * 2 / 3)..<a.height)
+        let bottomMasked = bandMean(b, (b.height * 2 / 3)..<b.height)
+        XCTAssertLessThan(topMasked, topPlain * 0.95, "the mask should darken the top")
+        // The bottom is outside the mask. It is not bit-identical because the
+        // frame's clarity variant is the *largest* |clarity| present (25 + 20 =
+        // 45) with amount 25/45 outside the mask — the documented linear-blend
+        // contract, an approximation of a clarity-25 pass. It must not move
+        // visibly, though.
+        XCTAssertEqual(bottomMasked, bottomPlain, accuracy: bottomPlain * 0.005,
+                       "the bottom is outside the mask and must barely move")
+    }
+}

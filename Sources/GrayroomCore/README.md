@@ -6,7 +6,8 @@ shell over these types.
 ```
 Decode/     CIRAWFilter -> linear scene-referred rgba16Float MTLTexture
 Engine/     MetalContext (runtime-compiled shader library), Pipeline, Renderer, Histogram
-Stages/     CPU-side stage support (currently the tone curve + its LUT)
+Stages/     CPU-side stage support (the tone curve + its LUT, the clarity mapping)
+Masks/      stroke model, CPU reference rasterizer, GPU rasterisation + param maps
 Shaders/    MSL source, bundled as *text* resources
 Export/     texture readback + ImageIO writers
 EditState.swift / EditStateIO.swift
@@ -22,16 +23,23 @@ text at startup, concatenated (`Common.metal` first) and compiled with
 ## Pipeline order
 
 ```
-decode(+WB)  ->  tone  ->  clarity  ->  bwMix  ->  toning  ->  output  ->  histogram
+decode(+WB)  ->  [masks]  ->  tone  ->  clarity  ->  bwMix  ->  toning  ->  output  ->  histogram
 ```
 
 Each stage is one `rgba16Float -> rgba16Float` compute pass, ping-ponging
 between two working textures (`clarity` is many passes, but it has the same
-signature and allocates its own scratch). `clarity` is skipped when the slider
-is exactly 0; `bwMix` is skipped when `bwMix.enabled == false` (colour
-passthrough, a debugging aid); `toning` is skipped when both saturations are
-zero. `Pipeline.render(upTo:)` can stop at any stage boundary, which is what the
-golden tests use to inspect linear intermediates.
+signature and allocates its own scratch). `clarity` is skipped when neither the
+slider nor any mask asks for it; `bwMix` is skipped when `bwMix.enabled ==
+false` (colour passthrough, a debugging aid); `toning` is skipped when both
+saturations are zero. `Pipeline.render(upTo:)` can stop at any stage boundary,
+which is what the golden tests use to inspect linear intermediates.
+
+`[masks]` is not an image stage: it runs before `tone` and produces the two
+per-pixel parameter textures that `tone` and `clarity` read. With no *effective*
+mask (none present, all disabled, all strokeless, or all adjustments zero) it is
+skipped entirely and every downstream kernel takes exactly its pre-M3 path, so
+the output is bit-for-bit what it was — `MaskTests.testPipelineIsUnchanged-
+WithoutEffectiveMasks` asserts that on a full-pipeline render.
 
 ## Tone curve
 
@@ -141,6 +149,48 @@ rgb' = rgb * (Y' / Y)
 Channel ratios — and therefore hue and HSV saturation — are untouched by
 construction. `testTonePreservesRatiosNoHueShift` asserts it on saturated
 patches.
+
+### Local (per-pixel) tone deltas
+
+A mask gives every pixel its *own* (Δev, Δcontrast, Δhighlights, Δshadows), so
+the LUT trick stops working — a LUT per pixel is not a thing. The curve is
+therefore factored into its additive components (`ToneCurve.contrastDeltaEV`,
+`highlightsDeltaEV`, `shadowsDeltaEV`) and the shader evaluates the same three
+analytically, in `grToneDeltaEV`. **Composition order:**
+
+```
+Y  --global LUT-->  Y'  --local delta-->  Y''      rgb'' = rgb · (Y''/Y)
+```
+
+and inside the local delta the global curve's own ordering is mirrored —
+Δexposure is a pure EV shift, the zone controls are evaluated on the shifted
+value:
+
+```
+x   = log2(Y'/0.18) + Δev
+Y'' = 0.18 · 2^( x + Δ_c(x) + Δ_h(x) + Δ_s(x) )
+```
+
+Two consequences worth being explicit about:
+
+* This is **not** the same as building one curve from `global + local` and
+  applying it once — the composition is a curve of a curve. For the pure cases
+  it is exact (a Δev of +1 doubles linear luminance whatever the global curve
+  did, because exposure is a shift and the delta's other terms are zero) and for
+  combined global+local it is a defensible, monotone approximation, but it is
+  not slider-additive: contrast 25 global + 25 local ≠ contrast 50.
+* Zero deltas are the **identity bit-for-bit**, not merely to within rounding:
+  both the CPU reference and the shader early-out on an all-zero parameter
+  vector rather than round-tripping through `log2`/`exp2`. That is what makes an
+  unmasked pixel byte-identical to a pre-M3 render.
+
+Whites and blacks are deliberately not maskable (PLAN.md's per-mask set is
+exposure/contrast/highlights/shadows/clarity), so `grToneDeltaEV` implements
+three components, not five. `MaskTests.testGPUToneDeltaMatchesCPUReference`
+compares the GPU against the CPU components over a grid of 40 luminances × 14
+delta vectors (worst relative error 5·10⁻⁴, i.e. the `rgba16Float` round trip),
+and `testToneDeltaIsMonotoneInLuminance` checks 200 seeded random delta vectors
+over −14…+8 EV.
 
 ## Clarity — fast local Laplacian filter
 
@@ -263,7 +313,7 @@ texture 0.087 → 0.143 stops RMS (×1.65), while the flat region 4 px from a
 4-stop edge moves by 0.0006 stops. An unsharp mask tuned to the same texture
 gain moves it by 0.042 stops — 65× more.
 
-### Per-pixel amount (the M3 contract)
+### Per-pixel amount (the M3 contract, now implemented)
 
 The last kernel is
 
@@ -272,17 +322,139 @@ L_out = mix(L, L_llf, amountTex(x))
 ```
 
 with `amountTex` clamped-sampled, so a **1×1 texture is the global case** and no
-shader change is needed when M3 arrives. The contract for masks:
+shader change was needed for M3. What M3 actually put in it:
 
-* The sign of clarity selects which variant is computed — boost or smooth — so
-  one pass covers all pixels of one sign. If a frame ends up with both signs,
-  M3 runs the stage twice (the plan's "second pyramid pass only when any
-  negative amount exists").
-* `L_llf` is computed once at **full strength for the largest |clarity| present**
-  in the frame (global slider or mask delta), and `amountTex(x) =
-  |clarity(x)| / |clarity_max|` scales it per pixel. Blending within one sign is
+* `L_llf` is computed **once**, at full strength for the largest |clarity|
+  present in the frame (global slider or accumulated mask delta), and
+
+  ```
+  c(x)      = clamp(clarity_global + Δclarity(x), −100, 100)
+  amount(x) = clamp(sign_dominant · c(x), 0, |c_max|) / |c_max|
+  ```
+
+  scales it per pixel (`maskClarityAmountKernel`). Blending within one sign is
   linear, which is exactly what a coverage mask wants.
-* Today `amountTex` is 1×1 holding 1.0, and the strength lives in the remap.
+* `c_max` is the end of the range `[global + Σ min(Δ,0), global + Σ max(Δ,0)]`
+  with the larger magnitude — a bound, since every coverage is ≤ 1, so
+  `amount ≤ 1` always.
+* **Sign conflict rule (v1, chosen deliberately):** when the range straddles
+  zero, only the **dominant** sign's variant is rendered and the opposite side
+  is clamped to amount 0 — those pixels are left untouched rather than getting a
+  second pyramid pass. The plan allowed "a second pass when any negative amount
+  exists"; that would double the cost of the most expensive stage in the
+  pipeline for a case (a smoothing mask under a boosting global, or vice versa)
+  that is rare and whose failure mode is benign. `MaskTests.-
+  testClarityVariantPicksTheDominantSign` pins the rule.
+* The price of the single-variant model: with global 25 and a +20 mask the frame
+  is rendered as clarity 45 at amount 25/45 outside the mask, which is a *linear
+  blend* toward the strength-45 result rather than the exact strength-25 result.
+  Measured on the M3 reference render that is a 0.1 % luminance shift in the
+  unmasked bottom third — visible in no way, but it is not bit-identity, and the
+  end-to-end test asserts 0.5 % rather than equality.
+
+## Masks — brush-painted local adjustments
+
+`Masks/Mask.swift` is the model, `Masks/MaskRasterizer.swift` the pure CPU
+reference (stamp placement, profile, compositing, accumulation),
+`Masks/MaskStage.swift` the GPU orchestration and `Shaders/Mask.metal` the
+kernels. Strokes are stored as **vector** data in the sidecar (darktable-style),
+never raster: tiny to persist and re-rasterisable at any pipeline resolution.
+
+```
+Mask             id, name, enabled, adjustments, strokes[]
+MaskAdjustments  exposure (EV, ±4), contrast, highlights, shadows, clarity (±100)
+Stroke           brush, erase, points[]
+BrushParams      size, feather, flow, density
+StrokePoint      x, y, pressure
+```
+
+### Coordinate and unit conventions
+
+* **Space.** Stroke points are normalised `0…1` in the **oriented image space**
+  — the space the decoded texture is already in (EXIF orientation applied). `x`
+  runs right, `y` runs **down from the top-left corner**: `(0,0)` is the
+  top-left pixel corner, `(1,1)` the bottom-right one, pixel *centres* are at
+  `((i+0.5)/w, (j+0.5)/h)`. That matches `MTLTexture` row order (row 0 = top)
+  and the exported PNG.
+* Coordinates outside `0…1` are legal — a stroke may start or end off-canvas,
+  which is how you paint a clean edge-to-edge sweep.
+* **`size` is the brush *diameter* as a fraction of the image long edge**
+  (`max(w, h)`), so masks are resolution-independent and the brush stays round
+  on non-square images. Everything else is unitless: `feather`, `flow` and
+  `density` are 0…100, `pressure` is 0…1.
+* `pressure` scales the stamp **radius**, not its alpha.
+
+### The stamp model
+
+Standard paint-engine construction (see `research/mac-app-stack.md` §3):
+
+```
+diameter = size · max(w, h)                      [px]
+spacing  = max(0.15 · diameter, 1 px)            along the polyline
+radius   = 0.5 · diameter · pressure             [per stamp]
+inner    = min(hardness · radius, radius − 1)    hardness = 1 − feather/100
+alpha(d) = flow/100 · (1 − smoothstep(inner, radius, d))
+```
+
+* A stamp is placed on the first point and then every `spacing` px of arc
+  length; position and pressure are interpolated **linearly** between authored
+  points, with the leftover distance carried across segment boundaries. Spacing
+  uses the *nominal* (pressure-1) diameter so a pressure ramp does not change
+  how densely the stroke is sampled. Catmull-Rom interpolation is future work —
+  at GUI event rates the input points are dense enough not to care.
+* `inner = radius − 1` at `feather = 0` is the **1 px antialias minimum**: a
+  "hard" brush still gets one pixel of ramp instead of a jaggy disc.
+* Stamps composite into a per-**stroke** buffer with over-compositing,
+  `a ← a + s·(1 − a)`, so flow builds up sub-linearly: two passes at flow 20 give
+  0.36, not 0.4. That buffer is clamped at `density/100` **before** merging,
+  which is what makes "one stroke never exceeds its density where it crosses
+  itself" work. On the GPU the stroke buffer never exists as a texture: each
+  thread walks the stroke's stamps in order in a register.
+* Strokes merge into the mask in order: `mask = max(mask, stroke)` normally,
+  `mask = mask·(1 − stroke)` for an eraser. Erase is scoped to its own mask.
+
+One compute dispatch per stroke, brute force over the stamp list per pixel with
+a bounding-box reject. That is O(pixels × stamps) and is fine at v1 sizes (the
+M3 reference render: 3 strokes, ~30 stamps, 1067×1600 — under a millisecond);
+a stamp-bucketed grid is the obvious optimisation if it ever matters.
+
+Coverage textures are `r16Float`, everything ping-pongs between two textures
+rather than using `read_write` so no pixel format is constrained.
+
+### Parameter accumulation
+
+All enabled masks accumulate into two textures at pipeline resolution:
+
+```
+paramsA  rgba16Float  Σ coverage_i · (Δexposure, Δcontrast, Δhighlights, Δshadows)_i
+paramsB  r16Float     Σ coverage_i · Δclarity_i
+```
+
+The sum is clamped **once at the end**, to ±4 EV and ±100, not per mask — so a
+negative delta can pull an over-range partial sum back, and **overlapping masks
+saturate at the range edges** rather than running away. `tone` reads `paramsA`,
+the clarity amount kernel reads `paramsB`. Stages read `global + params(x)`;
+masks never multiply full-image passes.
+
+Rasterisation depends only on the strokes and the resolution — never on the
+sliders — so `Pipeline` caches the maps against the mask array and the size. In
+M4 that is what makes dragging a slider cheap; the GUI will want a proper
+invalidation key (and a lower-resolution mask for interaction) rather than a
+one-entry array comparison.
+
+### CLI
+
+```
+grayroom render <raw> -o out.png --edit sidecar.json \
+    --set 'masks[0].adjustments.exposure=1.5'
+grayroom mask-preview <raw> -o mask.png --edit sidecar.json [--mask N] [--max-dimension N]
+```
+
+`--set` reaches array elements with a bracket subscript; the mask must already
+exist (`--set` edits masks, it does not create them — strokes come from the
+sidecar). `mask-preview` writes the rasterised coverage as an 8-bit grayscale
+PNG, **linearly** (`round(255·coverage)`, no transfer function): it is data, not
+a picture. With no `--mask` it shows the union of every enabled mask.
 
 ## B&W mix
 
@@ -328,9 +500,20 @@ per-pixel shadow (`min channel ≤ 0.5/255`) and highlight (`max channel ≥
 254.5/255`) clip counters, accumulated with `atomic_fetch_add` in one compute
 pass.
 
-## Known limitations (M1 + M2)
+## Known limitations (M1 + M2 + M3)
 
-* `masks` is an empty placeholder array (M3); clarity's amount map is still 1×1.
+* Local tone deltas compose *after* the global curve rather than being folded
+  into one curve, so global and local sliders are not additive (see above).
+* One clarity variant per frame: opposite-sign clarity is dropped, and the
+  single-variant linear blend is an approximation for pixels whose |clarity|
+  is below the frame maximum.
+* Mask rasterisation is brute force per stamp, at full pipeline resolution, and
+  re-runs whenever the strokes or the size change (one-entry cache). No
+  half-resolution mask, no guided-filter edge snapping.
+* Stroke interpolation is linear, not Catmull-Rom, so a sparse fast stroke has
+  visibly straight segments.
+* Only drawn masks exist: no gradients, no radial shapes, no parametric or range
+  masks, no per-mask invert/intersect, no reuse of one mask by several stages.
 * Clarity amplifies noise along with texture — there is no noise floor in the
   remap, so ±100 on a high-ISO frame is grainy. A detail-magnitude threshold (or
   running the stage on a denoised guide) is a v2 question.

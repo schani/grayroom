@@ -62,6 +62,60 @@ public enum ToneCurve {
         return t * t * t * (t * (t * 6 - 15) + 10)
     }
 
+    // MARK: - Components
+    //
+    // The curve is a sum of independent additive offsets in EV space. They are
+    // factored out here because M3's *local* (per-mask) tone deltas cannot go
+    // through a LUT — the mask stage produces a different (contrast, highlights,
+    // shadows) triple per pixel — so the shader has to evaluate the same
+    // components analytically. `Shaders/Tone.metal:grToneDeltaEV` is the direct
+    // translation of `toneDeltaEV` below, and `ToneDeltaTests` compares them.
+
+    /// Contrast: an odd bump `x·exp(-x²/2σ²)` adds slope at the pivot and decays
+    /// to zero far away, so it steepens midtones without moving the extremes.
+    /// Positive contrast = steeper.
+    @inline(__always)
+    public static func contrastDeltaEV(_ x: Double, _ contrast: Double) -> Double {
+        let c = min(max(contrast, -100), 100) / 100
+        guard c != 0 else { return 0 }
+        let u = x / contrastSigma
+        return c * contrastGain * x * exp(-0.5 * u * u)
+    }
+
+    /// Highlights: a one-sided smootherstep ramp saturating to a constant EV
+    /// offset in the highlight zone. Positive brightens.
+    @inline(__always)
+    public static func highlightsDeltaEV(_ x: Double, _ highlights: Double) -> Double {
+        let h = min(max(highlights, -100), 100) / 100
+        guard h != 0 else { return 0 }
+        return h * highlightRange * smootherstep(highlightRamp.0, highlightRamp.1, x)
+    }
+
+    /// Shadows: the mirror of the highlight ramp about `x = 0`. Positive lifts.
+    @inline(__always)
+    public static func shadowsDeltaEV(_ x: Double, _ shadows: Double) -> Double {
+        let s = min(max(shadows, -100), 100) / 100
+        guard s != 0 else { return 0 }
+        return s * shadowRange * smootherstep(-shadowRamp.0, -shadowRamp.1, -x)
+    }
+
+    /// Whites: an endpoint control with a soft shoulder, reaching further out
+    /// than highlights so it acts on the extremes.
+    @inline(__always)
+    public static func whitesDeltaEV(_ x: Double, _ whites: Double) -> Double {
+        let w = min(max(whites, -100), 100) / 100
+        guard w != 0 else { return 0 }
+        return w * whitesRange * smootherstep(whitesRamp.0, whitesRamp.1, x)
+    }
+
+    /// Blacks: the mirror of whites.
+    @inline(__always)
+    public static func blacksDeltaEV(_ x: Double, _ blacks: Double) -> Double {
+        let b = min(max(blacks, -100), 100) / 100
+        guard b != 0 else { return 0 }
+        return b * blacksRange * smootherstep(-blacksRamp.0, -blacksRamp.1, -x)
+    }
+
     /// Evaluates the curve in EV space. `x` is `log2(Y/0.18)` of the *scene*
     /// luminance; exposure is folded in here so a single LUT covers everything.
     ///
@@ -71,44 +125,56 @@ public enum ToneCurve {
         // Exposure is a pure shift in EV space; all zone weights are evaluated on
         // the *exposed* image, matching Lightroom's ordering.
         let x = x0 + t.exposure
+        return x
+            + contrastDeltaEV(x, t.contrast)
+            + highlightsDeltaEV(x, t.highlights)
+            + shadowsDeltaEV(x, t.shadows)
+            + whitesDeltaEV(x, t.whites)
+            + blacksDeltaEV(x, t.blacks)
+    }
 
-        let c = t.contrast / 100
-        let h = t.highlights / 100
-        let s = t.shadows / 100
-        let w = t.whites / 100
-        let b = t.blacks / 100
+    // MARK: - Local (per-pixel) tone delta
 
-        var y = x
+    /// The three curve components a **mask** can drive, summed. The CPU
+    /// reference for `grToneDeltaEV` in `Tone.metal`.
+    ///
+    /// Whites and blacks are deliberately not maskable in v1 (PLAN.md lists
+    /// exposure/contrast/highlights/shadows/clarity as the per-mask set).
+    public static func toneDeltaEV(_ x: Double,
+                                   contrast: Double,
+                                   highlights: Double,
+                                   shadows: Double) -> Double {
+        contrastDeltaEV(x, contrast)
+            + highlightsDeltaEV(x, highlights)
+            + shadowsDeltaEV(x, shadows)
+    }
 
-        // Contrast: an odd bump x*exp(-x^2/2s^2) adds slope at the pivot and
-        // decays to zero far away, so it steepens midtones without moving the
-        // extremes. Positive contrast = steeper.
-        if c != 0 {
-            let u = x / contrastSigma
-            y += c * contrastGain * x * exp(-0.5 * u * u)
-        }
-
-        // Highlights / shadows: one-sided smootherstep ramps that saturate to a
-        // constant EV offset in their zone. +highlights brightens highlights,
-        // +shadows lifts shadows (Lightroom sign convention).
-        if h != 0 {
-            y += h * highlightRange * smootherstep(highlightRamp.0, highlightRamp.1, x)
-        }
-        if s != 0 {
-            // mirror of the highlight ramp about x = 0
-            y += s * shadowRange * smootherstep(-shadowRamp.0, -shadowRamp.1, -x)
-        }
-
-        // Whites / blacks: endpoint controls with a soft shoulder/toe, reaching
-        // further out than highlights/shadows so they act on the extremes.
-        if w != 0 {
-            y += w * whitesRange * smootherstep(whitesRamp.0, whitesRamp.1, x)
-        }
-        if b != 0 {
-            y += b * blacksRange * smootherstep(-blacksRamp.0, -blacksRamp.1, -x)
-        }
-
-        return y
+    /// Applies a **local** tone delta to an already globally-toned luminance.
+    ///
+    /// Composition order (also documented in README.md): the global LUT runs
+    /// first, and the local delta is applied to its result. Within the delta the
+    /// ordering mirrors the global curve — Δexposure is a pure shift in EV space
+    /// and the zone controls are evaluated on the shifted value:
+    ///
+    /// ```
+    /// x  = log2(Y/0.18) + Δev
+    /// Y' = 0.18 · 2^(x + Δ_c(x) + Δ_h(x) + Δ_s(x))
+    /// ```
+    ///
+    /// All-zero deltas return `y` unchanged **bit-for-bit** (not merely to
+    /// within rounding) — that early-out is what keeps unmasked pixels identical
+    /// to a pre-M3 render, and the shader has the same guard.
+    public static func applyToneDelta(_ y: Double,
+                                      exposure: Double,
+                                      contrast: Double,
+                                      highlights: Double,
+                                      shadows: Double) -> Double {
+        if exposure == 0 && contrast == 0 && highlights == 0 && shadows == 0 { return y }
+        guard y > 0 else { return 0 }
+        let ev = min(max(exposure, -MaskAdjustments.exposureLimit), MaskAdjustments.exposureLimit)
+        let x = log2(y / pivot) + ev
+        return pivot * exp2(x + toneDeltaEV(x, contrast: contrast,
+                                            highlights: highlights, shadows: shadows))
     }
 
     /// Convenience: maps a linear luminance through the curve.

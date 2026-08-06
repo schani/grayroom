@@ -20,6 +20,7 @@ let package = Package(
                 .copy("Shaders/Tone.metal"),
                 .copy("Shaders/BWMix.metal"),
                 .copy("Shaders/Clarity.metal"),
+                .copy("Shaders/Mask.metal"),
                 .copy("Shaders/Toning.metal"),
                 .copy("Shaders/Output.metal"),
                 .copy("Shaders/Histogram.metal"),

@@ -68,4 +68,34 @@ public enum TextureReadback {
         for i in 0..<floats.count { floats[i] = Float(halfs[i]) }
         return FloatImage(width: w, height: h, pixels: floats)
     }
+
+    /// Reads a single-channel texture (`r16Float` mask coverage / parameter
+    /// maps, `r32Float` clarity pyramids) into `width * height` floats,
+    /// row-major, top row first.
+    public static func readScalar(_ texture: MTLTexture) throws -> [Float] {
+        guard texture.storageMode != .private else { throw ReadbackError.privateStorage }
+        let w = texture.width, h = texture.height
+        switch texture.pixelFormat {
+        case .r16Float:
+            var halfs = [Float16](repeating: 0, count: w * h)
+            halfs.withUnsafeMutableBytes { raw in
+                texture.getBytes(raw.baseAddress!,
+                                 bytesPerRow: w * MemoryLayout<Float16>.size,
+                                 from: MTLRegionMake2D(0, 0, w, h),
+                                 mipmapLevel: 0)
+            }
+            return halfs.map { Float($0) }
+        case .r32Float:
+            var floats = [Float](repeating: 0, count: w * h)
+            floats.withUnsafeMutableBytes { raw in
+                texture.getBytes(raw.baseAddress!,
+                                 bytesPerRow: w * MemoryLayout<Float>.size,
+                                 from: MTLRegionMake2D(0, 0, w, h),
+                                 mipmapLevel: 0)
+            }
+            return floats
+        default:
+            throw ReadbackError.unsupportedPixelFormat(texture.pixelFormat)
+        }
+    }
 }

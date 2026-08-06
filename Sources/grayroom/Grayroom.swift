@@ -6,8 +6,8 @@ struct Grayroom: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "grayroom",
         abstract: "Headless B&W RAW developer.",
-        version: "0.1.0 (M1)",
-        subcommands: [Probe.self, Render.self],
+        version: "0.3.0 (M3)",
+        subcommands: [Probe.self, Render.self, MaskPreview.self],
         defaultSubcommand: nil)
 }
 

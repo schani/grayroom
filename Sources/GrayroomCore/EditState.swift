@@ -14,11 +14,12 @@ public struct EditState: Codable, Equatable, Sendable {
     public var whiteBalance: WhiteBalance
     public var tone: Tone
     public var bwMix: BWMix
-    /// Clarity amount (−100…100). The stage lands in M2; the pipeline ignores it today.
+    /// Global clarity amount (−100…100).
     public var clarity: Double
     public var toning: Toning
-    /// Placeholder for M3 local adjustments so the sidecar schema is forward-compatible.
-    public var masks: [MaskStub]
+    /// Brush-painted local adjustments (M3). Schema version stays 1: `masks` was
+    /// already part of it, so a sidecar with `"masks": []` still decodes.
+    public var masks: [Mask]
 
     public init(
         version: Int = EditState.currentVersion,
@@ -27,7 +28,7 @@ public struct EditState: Codable, Equatable, Sendable {
         bwMix: BWMix = BWMix(),
         clarity: Double = 0,
         toning: Toning = Toning(),
-        masks: [MaskStub] = []
+        masks: [Mask] = []
     ) {
         self.version = version
         self.whiteBalance = whiteBalance
@@ -50,8 +51,11 @@ public struct EditState: Codable, Equatable, Sendable {
         bwMix = try c.decodeIfPresent(BWMix.self, forKey: .bwMix) ?? BWMix()
         clarity = try c.decodeIfPresent(Double.self, forKey: .clarity) ?? 0
         toning = try c.decodeIfPresent(Toning.self, forKey: .toning) ?? Toning()
-        masks = try c.decodeIfPresent([MaskStub].self, forKey: .masks) ?? []
+        masks = try c.decodeIfPresent([Mask].self, forKey: .masks) ?? []
     }
+
+    /// The masks that can actually change a pixel.
+    public var activeMasks: [Mask] { masks.filter { !$0.isIdentity } }
 
     // MARK: - Nested types
 
@@ -230,20 +234,4 @@ public struct EditState: Codable, Equatable, Sendable {
         }
     }
 
-    /// Empty placeholder so `masks` round-trips today and can grow in M3.
-    public struct MaskStub: Codable, Equatable, Sendable {
-        public init() {}
-        public init(from decoder: Decoder) throws {
-            _ = try? decoder.container(keyedBy: EmptyKey.self)
-        }
-        public func encode(to encoder: Encoder) throws {
-            _ = encoder.container(keyedBy: EmptyKey.self)
-        }
-        private struct EmptyKey: CodingKey {
-            var stringValue: String
-            var intValue: Int?
-            init?(stringValue: String) { self.stringValue = stringValue }
-            init?(intValue: Int) { return nil }
-        }
-    }
 }

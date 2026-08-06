@@ -24,7 +24,10 @@ final class EditStateTests: XCTestCase {
         e.clarity = 22
         e.toning = .init(shadowHue: 215, shadowSaturation: 12,
                          highlightHue: 45, highlightSaturation: 10, balance: 10)
-        e.masks = [EditState.MaskStub()]
+        e.masks = [Mask(name: "sky",
+                        adjustments: MaskAdjustments(exposure: -0.8, contrast: 15, clarity: 20),
+                        strokes: [Stroke(brush: BrushParams(size: 0.25, feather: 60),
+                                         polyline: [(0.1, 0.2), (0.9, 0.2)])])]
 
         let data = try e.jsonData()
         // Pretty printed, as required for a human-editable sidecar.
@@ -133,6 +136,96 @@ final class EditStateTests: XCTestCase {
             }
             XCTAssertEqual(k, "tone.vibrance")
         }
+    }
+
+    // MARK: - Masks (M3)
+
+    func testMasksRoundTrip() throws {
+        var e = EditState()
+        e.clarity = 25
+        e.masks = [
+            Mask(name: "sky",
+                 adjustments: MaskAdjustments(exposure: -0.8, contrast: 15, clarity: 20),
+                 strokes: [
+                    Stroke(brush: BrushParams(size: 0.25, feather: 60, flow: 100, density: 100),
+                           points: [StrokePoint(x: -0.05, y: 0.06),
+                                    StrokePoint(x: 0.5, y: 0.07, pressure: 0.6),
+                                    StrokePoint(x: 1.05, y: 0.06)]),
+                    Stroke(brush: BrushParams(size: 0.1, feather: 20, flow: 40, density: 70),
+                           erase: true,
+                           polyline: [(0.4, 0.1), (0.6, 0.2)]),
+                 ]),
+            Mask(name: "face", enabled: false,
+                 adjustments: MaskAdjustments(highlights: -30, shadows: 40),
+                 strokes: []),
+        ]
+
+        let data = try e.jsonData()
+        let back = try EditState.decode(from: data)
+        XCTAssertEqual(e, back)
+        XCTAssertEqual(back.masks[0].strokes[0].points[1].pressure, 0.6)
+        XCTAssertTrue(back.masks[0].strokes[1].erase)
+        XCTAssertFalse(back.masks[1].enabled)
+        XCTAssertEqual(back.activeMasks.count, 1, "disabled and strokeless masks are inactive")
+        // The schema version does not move: `masks` was already part of v1.
+        XCTAssertEqual(back.version, 1)
+    }
+
+    /// Pre-M3 sidecars wrote `"masks": []` (and older ones had no key at all).
+    func testLegacyMasksDecode() throws {
+        let legacy = """
+        {"version": 1, "clarity": 10, "masks": [], "tone": {"exposure": 0.5}}
+        """
+        let e = try EditState.decode(from: Data(legacy.utf8))
+        XCTAssertTrue(e.masks.isEmpty)
+        XCTAssertEqual(e.clarity, 10)
+        XCTAssertEqual(e.tone.exposure, 0.5)
+
+        // Partial masks fall back to defaults key by key.
+        let partial = """
+        {"masks": [{"strokes": [{"points": [{"x": 0.5, "y": 0.5}]}]}]}
+        """
+        let p = try EditState.decode(from: Data(partial.utf8))
+        XCTAssertEqual(p.masks.count, 1)
+        XCTAssertTrue(p.masks[0].enabled)
+        XCTAssertEqual(p.masks[0].adjustments, MaskAdjustments())
+        XCTAssertEqual(p.masks[0].strokes[0].brush, BrushParams())
+        XCTAssertEqual(p.masks[0].strokes[0].points[0].pressure, 1)
+        XCTAssertFalse(p.masks[0].strokes[0].erase)
+    }
+
+    func testSetReachesMasksByIndex() throws {
+        var base = EditState()
+        base.masks = [
+            Mask(name: "a", adjustments: MaskAdjustments(exposure: 0.5)),
+            Mask(name: "b", adjustments: MaskAdjustments(clarity: 10)),
+        ]
+        let e = try base.applying(settings: [
+            "masks[0].adjustments.exposure=1.5",
+            "masks[1].adjustments.clarity=-40",
+            "masks[1].enabled=false",
+            "tone.contrast=20",
+        ])
+        XCTAssertEqual(e.masks[0].adjustments.exposure, 1.5)
+        XCTAssertEqual(e.masks[1].adjustments.clarity, -40)
+        XCTAssertFalse(e.masks[1].enabled)
+        XCTAssertTrue(e.masks[0].enabled)
+        XCTAssertEqual(e.masks[0].id, base.masks[0].id, "unrelated fields survive the merge")
+        XCTAssertEqual(e.tone.contrast, 20)
+
+        // Out of range and unknown leaves are rejected, and --set cannot create
+        // a mask (strokes come from the sidecar).
+        XCTAssertThrowsError(try base.applying(settings: ["masks[2].enabled=false"])) { err in
+            guard case EditStateError.indexOutOfRange(_, let i, let n) = err else {
+                return XCTFail("wrong error \(err)")
+            }
+            XCTAssertEqual(i, 2)
+            XCTAssertEqual(n, 2)
+        }
+        XCTAssertThrowsError(try base.applying(settings: ["masks[0].adjustments.vibrance=1"])) { err in
+            guard case EditStateError.unknownKeyPath = err else { return XCTFail("wrong error \(err)") }
+        }
+        XCTAssertThrowsError(try EditState().applying(settings: ["masks[0].enabled=false"]))
     }
 
     func testSetRejectsMalformedArgument() {

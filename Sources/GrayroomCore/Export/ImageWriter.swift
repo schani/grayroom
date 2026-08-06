@@ -78,6 +78,36 @@ public enum ImageWriter {
         guard CGImageDestinationFinalize(dest) else { throw ExportError.writeFailed(url) }
     }
 
+    /// Writes a single-channel image as an 8-bit **grayscale** PNG.
+    ///
+    /// Values are written **linearly** (`round(255 · clamp(v, 0, 1))`), with no
+    /// transfer function: this is for inspecting data, not pictures — it is what
+    /// `grayroom mask-preview` uses, where 128 means "coverage 0.5", not
+    /// "mid gray".
+    public static func writeGray(_ values: [Float],
+                                 width: Int, height: Int,
+                                 to url: URL) throws {
+        precondition(values.count == width * height)
+        var bytes = [UInt8](repeating: 0, count: width * height)
+        for i in 0..<values.count {
+            bytes[i] = UInt8(clamping: Int((min(max(values[i], 0), 1) * 255).rounded()))
+        }
+        let data = Data(bytes) as CFData
+        guard let provider = CGDataProvider(data: data),
+              let cg = CGImage(width: width, height: height,
+                               bitsPerComponent: 8, bitsPerPixel: 8, bytesPerRow: width,
+                               space: CGColorSpaceCreateDeviceGray(),
+                               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                               provider: provider, decode: nil,
+                               shouldInterpolate: false, intent: .defaultIntent)
+        else { throw ExportError.cgImageCreationFailed }
+        guard let dest = CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.png.identifier as CFString, 1, nil)
+        else { throw ExportError.destinationCreationFailed(url) }
+        CGImageDestinationAddImage(dest, cg, nil)
+        guard CGImageDestinationFinalize(dest) else { throw ExportError.writeFailed(url) }
+    }
+
     /// Builds an interleaved RGB (no alpha) CGImage. 8-bit uses one byte per
     /// component; 16-bit uses host-endian UInt16.
     public static func makeCGImage(_ image: FloatImage, bitsPerComponent: Int) throws -> CGImage {

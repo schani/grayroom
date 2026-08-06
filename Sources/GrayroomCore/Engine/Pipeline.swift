@@ -1,17 +1,20 @@
 import Foundation
 import Metal
 
-/// Fixed-order global pipeline for M1 + M2.
+/// Fixed-order global pipeline for M1 + M2, with M3 local adjustments.
 ///
 ///   input (linear, WB applied at decode)
-///     -> tone       (exposure + 5 tone controls, ratio-preserving)
-///     -> clarity    (fast local Laplacian on log2 luminance) [skipped at 0]
+///     -> masks      (rasterise strokes -> per-pixel parameter maps) [no masks: skipped]
+///     -> tone       (exposure + 5 tone controls + local deltas, ratio-preserving)
+///     -> clarity    (fast local Laplacian on log2 luminance, per-pixel amount) [skipped at 0]
 ///     -> bwMix      (8 hue bands -> gray)          [skipped when disabled]
 ///     -> toning     (split tone, luminance-neutral) [skipped when identity]
 ///     -> output     (linear -> sRGB)
 ///     -> histogram tap
 ///
-/// Masks (M3) feed per-pixel parameter maps into tone and clarity.
+/// With zero active masks nothing about the encoding changes: the tone kernel's
+/// `hasLocal` flag is 0 and the clarity stage gets its 1x1 global amount
+/// texture, so the result is bit-for-bit the pre-M3 one.
 public final class Pipeline {
     public let context: MetalContext
 
@@ -21,6 +24,12 @@ public final class Pipeline {
     private let outputPipeline: MTLComputePipelineState
     private let histogramPipeline: MTLComputePipelineState
     private let clarityStage: ClarityStage
+    let maskStage: MaskStage
+
+    /// Rasterisation depends only on the strokes and the resolution, never on
+    /// the sliders, so moving a slider reuses the maps. One entry is enough for
+    /// the CLI and for the M4 GUI's single-image editing loop.
+    private var maskCache: (masks: [Mask], width: Int, height: Int, maps: MaskStage.Maps)?
 
     public init(context: MetalContext) throws {
         self.context = context
@@ -30,6 +39,7 @@ public final class Pipeline {
         outputPipeline = try context.computePipeline("outputKernel")
         histogramPipeline = try context.computePipeline("histogramKernel")
         clarityStage = try ClarityStage(context: context)
+        maskStage = try MaskStage(context: context)
     }
 
     /// Stage boundaries, in pipeline order. Useful for golden tests that need to
@@ -71,28 +81,49 @@ public final class Pipeline {
         var latest = input
         func runs(_ stage: Stage) -> Bool { lastStage.rawValue >= stage.rawValue }
 
+        // --- masks ----------------------------------------------------------
+        let masks = edit.activeMasks
+        let maps = try maskMaps(commandBuffer, masks: masks, width: w, height: h)
+
         // --- tone -----------------------------------------------------------
-        let lut = ToneCurve.makeLUT(for: edit.tone)
-        let lutTexture = try context.makeLUTTexture(lut.values)
-        var toneU = ToneUniforms(minEV: lut.minEV, maxEV: lut.maxEV,
-                                 gainBelow: lut.gainBelow, gainAbove: lut.gainAbove,
-                                 lutSize: UInt32(lut.size))
-        try encode(commandBuffer, tonePipeline, w, h) { e in
-            e.setTexture(src, index: 0)
-            e.setTexture(dst, index: 1)
-            e.setTexture(lutTexture, index: 2)
-            e.setBytes(&toneU, length: MemoryLayout<ToneUniforms>.stride, index: 0)
-        }
+        // Local deltas are applied analytically on top of the global LUT's
+        // output; see Tone.metal and ToneCurve.applyToneDelta.
+        let hasLocalTone = maps != nil && masks.contains { $0.adjustments.affectsTone }
+        try encodeTone(commandBuffer, src: src, dst: dst, tone: edit.tone,
+                       params: hasLocalTone ? maps!.paramsA : nil)
         latest = dst
         advance()
 
         // --- clarity ---------------------------------------------------------
-        // Skipped entirely at 0, so the default edit is bit-for-bit unchanged.
-        if runs(.clarity), edit.clarity != 0 {
-            try clarityStage.encode(commandBuffer, source: src, destination: dst,
-                                    clarity: edit.clarity)
-            latest = dst
-            advance()
+        // Skipped entirely when nothing asks for it, so the default edit is
+        // bit-for-bit unchanged.
+        let localClarity = maps != nil && masks.contains { $0.adjustments.clarity != 0 }
+        if runs(.clarity), edit.clarity != 0 || localClarity {
+            if localClarity {
+                // One variant for the whole frame, at the largest |clarity|
+                // present; the amount map scales it per pixel and zeroes any
+                // pixel whose clarity has the opposite sign (see
+                // MaskRasterizer.clarityVariant).
+                let variant = MaskRasterizer.clarityVariant(global: edit.clarity, masks: masks)
+                if variant.clarity != 0 {
+                    let amount = try maskStage.encodeClarityAmount(
+                        commandBuffer,
+                        paramsB: maps!.paramsB,
+                        globalClarity: edit.clarity,
+                        dominantSign: variant.sign,
+                        maxAbs: abs(variant.clarity),
+                        width: w, height: h)
+                    try clarityStage.encode(commandBuffer, source: src, destination: dst,
+                                            clarity: variant.clarity, amountTexture: amount)
+                    latest = dst
+                    advance()
+                }
+            } else {
+                try clarityStage.encode(commandBuffer, source: src, destination: dst,
+                                        clarity: edit.clarity)
+                latest = dst
+                advance()
+            }
         }
 
         // --- B&W mix --------------------------------------------------------
@@ -168,6 +199,83 @@ public final class Pipeline {
                                   highlightClippedPixels: Int(p[257]))
         }
         return Result(texture: output, histogram: histogram)
+    }
+
+    // MARK: - Masks
+
+    /// The parameter maps for `masks`, from the cache when the strokes and the
+    /// resolution are unchanged. Cached maps were produced by an already
+    /// completed command buffer, so they need no extra synchronisation.
+    private func maskMaps(_ cb: MTLCommandBuffer,
+                          masks: [Mask],
+                          width: Int, height: Int) throws -> MaskStage.Maps? {
+        guard !masks.isEmpty else { return nil }
+        if let c = maskCache, c.width == width, c.height == height, c.masks == masks {
+            return c.maps
+        }
+        let maps = try maskStage.encodeMaps(cb, masks: masks, width: width, height: height)
+        maskCache = (masks, width, height, maps)
+        return maps
+    }
+
+    /// Rasterised mask coverage at `width x height`, read back to the CPU.
+    /// `maskIndex` selects one mask; `nil` unions every enabled mask. This is
+    /// what `grayroom mask-preview` renders.
+    public func maskCoverage(masks: [Mask],
+                             width: Int, height: Int,
+                             maskIndex: Int? = nil) throws -> [Float] {
+        let selected: [Mask]
+        if let i = maskIndex {
+            guard i >= 0, i < masks.count else { return [Float](repeating: 0, count: width * height) }
+            selected = [masks[i]]
+        } else {
+            selected = masks.filter { $0.enabled }
+        }
+        guard let cb = context.commandQueue.makeCommandBuffer() else { throw MetalError.encoderFailed }
+        let texture = try maskStage.encodeUnionCoverage(cb, masks: selected,
+                                                        width: width, height: height)
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let err = cb.error { throw err }
+        return try TextureReadback.readScalar(texture)
+    }
+
+    // MARK: - Tone
+
+    private func encodeTone(_ cb: MTLCommandBuffer,
+                            src: MTLTexture,
+                            dst: MTLTexture,
+                            tone: EditState.Tone,
+                            params: MTLTexture?) throws {
+        let lut = ToneCurve.makeLUT(for: tone)
+        let lutTexture = try context.makeLUTTexture(lut.values)
+        // A texture is always bound (a 1x1 dummy when there are no masks) so the
+        // kernel never reads an unbound argument; `hasLocal` gates the code path.
+        let paramsTexture = try params ?? context.makeWorkingTexture(width: 1, height: 1)
+        var toneU = ToneUniforms(minEV: lut.minEV, maxEV: lut.maxEV,
+                                 gainBelow: lut.gainBelow, gainAbove: lut.gainAbove,
+                                 lutSize: UInt32(lut.size),
+                                 hasLocal: params == nil ? 0 : 1)
+        try encode(cb, tonePipeline, dst.width, dst.height) { e in
+            e.setTexture(src, index: 0)
+            e.setTexture(dst, index: 1)
+            e.setTexture(lutTexture, index: 2)
+            e.setTexture(paramsTexture, index: 3)
+            e.setBytes(&toneU, length: MemoryLayout<ToneUniforms>.stride, index: 0)
+        }
+    }
+
+    /// Test hook: the tone stage alone, with an explicit per-pixel parameter map.
+    func renderToneOnly(input: MTLTexture,
+                        tone: EditState.Tone,
+                        params: MTLTexture?) throws -> MTLTexture {
+        guard let cb = context.commandQueue.makeCommandBuffer() else { throw MetalError.encoderFailed }
+        let dst = try context.makeWorkingTexture(width: input.width, height: input.height)
+        try encodeTone(cb, src: input, dst: dst, tone: tone, params: params)
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let err = cb.error { throw err }
+        return dst
     }
 
     private func encode(_ cb: MTLCommandBuffer,

@@ -4,12 +4,15 @@ public enum EditStateError: Error, CustomStringConvertible {
     case unknownKeyPath(String)
     case malformedSetting(String)
     case notAnObject(String)
+    case indexOutOfRange(String, Int, Int)
 
     public var description: String {
         switch self {
         case .unknownKeyPath(let k): return "unknown edit key '\(k)'"
         case .malformedSetting(let s): return "malformed --set argument '\(s)' (expected key=value)"
         case .notAnObject(let k): return "edit key '\(k)' is not an object"
+        case .indexOutOfRange(let k, let i, let n):
+            return "index \(i) out of range in '\(k)' (\(n) element\(n == 1 ? "" : "s"))"
         }
     }
 }
@@ -73,6 +76,11 @@ extension EditState {
     /// Applies `key=value` overrides where `key` is a dotted JSON path
     /// (`tone.exposure`, `bwMix.enabled`, `clarity`, …).
     ///
+    /// Array elements are addressed with a bracket subscript:
+    /// `masks[0].adjustments.exposure=1.5`. The mask must already exist —
+    /// `--set` edits masks, it does not create them (strokes come from the
+    /// sidecar JSON).
+    ///
     /// Implemented as a JSON merge: encode → mutate the dictionary → decode.
     public func applying(settings: [String]) throws -> EditState {
         guard !settings.isEmpty else { return self }
@@ -95,25 +103,119 @@ extension EditState {
             throw EditStateError.notAnObject("")
         }
         for (key, raw) in keyValues {
-            guard valid.contains(key) else { throw EditStateError.unknownKeyPath(key) }
-            try EditState.set(path: key.split(separator: ".").map(String.init),
-                              to: EditState.parse(raw),
-                              in: &root,
-                              fullKey: key)
+            let path = try EditState.parsePath(key)
+            if path.contains(where: { if case .index = $0 { return true } else { return false } }) {
+                // Array paths (`masks[0].adjustments.exposure`) are validated
+                // against the *actual* document: which indices exist depends on
+                // how many masks the sidecar holds, so a static key-path list
+                // cannot say. Creating masks with --set is not supported —
+                // masks come from the sidecar JSON.
+                try EditState.validate(path: path[...], in: root, fullKey: key)
+            } else {
+                guard valid.contains(key) else { throw EditStateError.unknownKeyPath(key) }
+            }
+            var container: Any = root
+            try EditState.set(path: path[...], to: EditState.parse(raw),
+                              in: &container, fullKey: key)
+            guard let dict = container as? [String: Any] else {
+                throw EditStateError.notAnObject(key)
+            }
+            root = dict
         }
         let merged = try JSONSerialization.data(withJSONObject: root)
         return try EditState.decode(from: merged)
     }
 
-    private static func set(path: [String], to value: Any, in dict: inout [String: Any], fullKey: String) throws {
+    /// One step of a dotted `--set` path.
+    enum PathElement: Equatable {
+        case key(String)
+        case index(Int)
+    }
+
+    /// `masks[0].adjustments.exposure` → `[.key(masks), .index(0),
+    /// .key(adjustments), .key(exposure)]`. A component may carry several
+    /// subscripts (`a[0][1]`), though nothing in the schema needs that today.
+    static func parsePath(_ key: String) throws -> [PathElement] {
+        var out: [PathElement] = []
+        for component in key.split(separator: ".", omittingEmptySubsequences: false) {
+            var name = ""
+            var indices: [Int] = []
+            var rest = Substring(component)
+            if let open = rest.firstIndex(of: "[") {
+                name = String(rest[rest.startIndex..<open])
+                rest = rest[open...]
+                while let open = rest.firstIndex(of: "["), let close = rest.firstIndex(of: "]"),
+                      open < close {
+                    guard let i = Int(rest[rest.index(after: open)..<close]), i >= 0 else {
+                        throw EditStateError.unknownKeyPath(key)
+                    }
+                    indices.append(i)
+                    rest = rest[rest.index(after: close)...]
+                }
+                guard rest.isEmpty else { throw EditStateError.unknownKeyPath(key) }
+            } else {
+                name = String(rest)
+            }
+            guard !name.isEmpty else { throw EditStateError.unknownKeyPath(key) }
+            out.append(.key(name))
+            out.append(contentsOf: indices.map { PathElement.index($0) })
+        }
+        guard !out.isEmpty else { throw EditStateError.unknownKeyPath(key) }
+        return out
+    }
+
+    /// Structural validation: every element of the path must already exist.
+    private static func validate(path: ArraySlice<PathElement>, in container: Any, fullKey: String) throws {
         guard let head = path.first else { return }
-        if path.count == 1 {
-            dict[head] = value
+        switch head {
+        case .key(let name):
+            guard let dict = container as? [String: Any] else {
+                throw EditStateError.notAnObject(fullKey)
+            }
+            guard let child = dict[name] else { throw EditStateError.unknownKeyPath(fullKey) }
+            try validate(path: path.dropFirst(), in: child, fullKey: fullKey)
+        case .index(let i):
+            guard let array = container as? [Any] else {
+                throw EditStateError.unknownKeyPath(fullKey)
+            }
+            guard i < array.count else {
+                throw EditStateError.indexOutOfRange(fullKey, i, array.count)
+            }
+            try validate(path: path.dropFirst(), in: array[i], fullKey: fullKey)
+        }
+    }
+
+    private static func set(path: ArraySlice<PathElement>, to value: Any,
+                            in container: inout Any, fullKey: String) throws {
+        guard let head = path.first else {
+            container = value
             return
         }
-        var child = (dict[head] as? [String: Any]) ?? [:]
-        try set(path: Array(path.dropFirst()), to: value, in: &child, fullKey: fullKey)
-        dict[head] = child
+        let tail = path.dropFirst()
+        switch head {
+        case .key(let name):
+            var dict = (container as? [String: Any]) ?? [:]
+            var child: Any = dict[name] ?? [String: Any]()
+            if tail.isEmpty {
+                child = value
+            } else {
+                try set(path: tail, to: value, in: &child, fullKey: fullKey)
+            }
+            dict[name] = child
+            container = dict
+        case .index(let i):
+            guard var array = container as? [Any], i < array.count else {
+                throw EditStateError.unknownKeyPath(fullKey)
+            }
+            var child: Any = array[i]
+            if tail.isEmpty {
+                child = value
+            } else {
+                try set(path: tail, to: value, in: &child, fullKey: fullKey)
+            }
+            array[i] = child
+            container = array
+        }
     }
 
     /// `true`/`false` → Bool, numeric → Double, `null` → NSNull, otherwise String.

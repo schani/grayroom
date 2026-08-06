@@ -70,6 +70,34 @@ extension MetalContext {
     }
 }
 
+extension MetalContext {
+    /// Builds an `rgba16Float` texture from a per-pixel closure that supplies all
+    /// four channels — the mask parameter maps use every one of them
+    /// (`.a` is Δshadows), so the RGB-only helper above will not do.
+    func makeRGBATexture(width: Int, height: Int,
+                         _ pixel: (Int, Int) -> (Float, Float, Float, Float)) throws -> MTLTexture {
+        var halfs = [Float16](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let (r, g, b, a) = pixel(x, y)
+                let i = (y * width + x) * 4
+                halfs[i] = Float16(r)
+                halfs[i + 1] = Float16(g)
+                halfs[i + 2] = Float16(b)
+                halfs[i + 3] = Float16(a)
+            }
+        }
+        let t = try makeWorkingTexture(width: width, height: height)
+        halfs.withUnsafeBytes { raw in
+            t.replace(region: MTLRegionMake2D(0, 0, width, height),
+                      mipmapLevel: 0,
+                      withBytes: raw.baseAddress!,
+                      bytesPerRow: width * 4 * MemoryLayout<Float16>.size)
+        }
+        return t
+    }
+}
+
 /// Deterministic LCG so property tests are reproducible.
 struct SeededRandom: RandomNumberGenerator {
     private var state: UInt64
