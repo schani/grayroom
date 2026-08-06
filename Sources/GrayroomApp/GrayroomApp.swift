@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.center()
         }
         AppModel.shared.openInitialDocument()
+        SelfTest.startIfRequested()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

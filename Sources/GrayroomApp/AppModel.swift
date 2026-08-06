@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import GrayroomCanvas
 import GrayroomCore
 import GrayroomUI
 import Metal

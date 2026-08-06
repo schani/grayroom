@@ -5,3 +5,10 @@ testdata/
 *.xcodeproj
 DerivedData/
 out/
+
+# stray SwiftPM object files (an interrupted build once wrote these into the
+# package root instead of .build — see the M4 canvas-coordinate postmortem)
+*.o
+*.d
+*.swiftdeps
+*.swiftdeps~

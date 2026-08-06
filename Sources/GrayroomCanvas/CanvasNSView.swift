@@ -6,10 +6,10 @@ import MetalKit
 import simd
 
 /// What a click-drag on the canvas does.
-enum CanvasTool: String, CaseIterable {
+public enum CanvasTool: String, CaseIterable {
     case pan, brush, targeted
 
-    var label: String {
+    public var label: String {
         switch self {
         case .pan: return "Pan"
         case .brush: return "Brush"
@@ -18,7 +18,7 @@ enum CanvasTool: String, CaseIterable {
     }
 }
 
-enum CanvasKeyCommand {
+public enum CanvasKeyCommand {
     case toggleBrush
     case toggleTargeted
     case toggleEraser
@@ -28,7 +28,7 @@ enum CanvasKeyCommand {
     case actualSize
 }
 
-protocol CanvasInputHandler: AnyObject {
+public protocol CanvasInputHandler: AnyObject {
     func canvasTransformChanged(_ transform: CanvasTransform)
     func canvasBeginStroke(atNormalized p: CGPoint, pressure: Double, erase: Bool)
     func canvasExtendStroke(toNormalized p: CGPoint, pressure: Double)
@@ -42,16 +42,17 @@ protocol CanvasInputHandler: AnyObject {
 
 /// Uniforms for `Canvas.metal`. `float2`s first so the Swift and MSL layouts
 /// agree without padding games.
-struct CanvasUniforms {
-    var viewSize = SIMD2<Float>(1, 1)
-    var imageSize = SIMD2<Float>(1, 1)
-    var center = SIMD2<Float>(0, 0)
-    var cursor = SIMD2<Float>(-1, -1)
-    var zoom: Float = 1
-    var overlay: Float = 0
-    var cursorRadius: Float = 0
-    var cursorInner: Float = 0
-    var nearest: Float = 0
+public struct CanvasUniforms {
+    public var viewSize = SIMD2<Float>(1, 1)
+    public var imageSize = SIMD2<Float>(1, 1)
+    public var center = SIMD2<Float>(0, 0)
+    public var cursor = SIMD2<Float>(-1, -1)
+    public var zoom: Float = 1
+    public var overlay: Float = 0
+    public var cursorRadius: Float = 0
+    public var cursorInner: Float = 0
+    public var nearest: Float = 0
+    public init() {}
 }
 
 /// The image canvas: one window-sized `MTKView` that draws the current output
@@ -64,23 +65,23 @@ struct CanvasUniforms {
 /// Drawing is on demand (`isPaused` + `enableSetNeedsDisplay`), never a 60 Hz
 /// treadmill: nothing animates, so a frame is only worth drawing when the
 /// texture, the transform or the cursor changed.
-final class CanvasNSView: MTKView {
-    weak var handler: CanvasInputHandler?
+public final class CanvasNSView: MTKView {
+    public weak var handler: CanvasInputHandler?
 
-    var tool: CanvasTool = .pan { didSet { updateCursorVisibility() } }
-    var eraserActive = false { didSet { needsDisplay = true } }
+    public var tool: CanvasTool = .pan { didSet { updateCursorVisibility() } }
+    public var eraserActive = false { didSet { needsDisplay = true } }
 
-    private(set) var transform = CanvasTransform(imageSize: CGSize(width: 1, height: 1),
+    public private(set) var transform = CanvasTransform(imageSize: CGSize(width: 1, height: 1),
                                                  viewSize: CGSize(width: 1, height: 1),
                                                  zoom: 1, center: .zero)
 
     /// Brush diameter as a fraction of the image long edge, for the cursor ring.
-    var brushSize: Double = 0.05 { didSet { needsDisplay = true } }
-    var brushFeather: Double = 50 { didSet { needsDisplay = true } }
+    public var brushSize: Double = 0.05 { didSet { needsDisplay = true } }
+    public var brushFeather: Double = 50 { didSet { needsDisplay = true } }
 
-    var imageTexture: MTLTexture? { didSet { needsDisplay = true } }
-    var coverageTexture: MTLTexture? { didSet { needsDisplay = true } }
-    var showOverlay = false { didSet { needsDisplay = true } }
+    public var imageTexture: MTLTexture? { didSet { needsDisplay = true } }
+    public var coverageTexture: MTLTexture? { didSet { needsDisplay = true } }
+    public var showOverlay = false { didSet { needsDisplay = true } }
 
     private var pipelineState: MTLRenderPipelineState?
     private let commandQueue: MTLCommandQueue
@@ -97,7 +98,7 @@ final class CanvasNSView: MTKView {
     private var drag: Drag = .none
     private var backslashHeld = false
 
-    init(device: MTLDevice, commandQueue: MTLCommandQueue) {
+    public init(device: MTLDevice, commandQueue: MTLCommandQueue) {
         self.commandQueue = commandQueue
         super.init(frame: .zero, device: device)
         colorPixelFormat = .bgra8Unorm
@@ -112,11 +113,11 @@ final class CanvasNSView: MTKView {
     }
 
     @available(*, unavailable)
-    required init(coder: NSCoder) { fatalError("not supported") }
+    public required init(coder: NSCoder) { fatalError("not supported") }
 
-    override var isFlipped: Bool { true }
-    override var acceptsFirstResponder: Bool { true }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    public override var isFlipped: Bool { true }
+    public override var acceptsFirstResponder: Bool { true }
+    public override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     private func buildPipeline() {
         guard let device else { return }
@@ -135,7 +136,7 @@ final class CanvasNSView: MTKView {
     // MARK: - Transform
 
     /// Called when a new image is loaded: refit.
-    func setImageSize(_ size: CGSize) {
+    public func setImageSize(_ size: CGSize) {
         transform = CanvasTransform.fitting(imageSize: size, viewSize: backingSize)
         handler?.canvasTransformChanged(transform)
         needsDisplay = true
@@ -153,11 +154,11 @@ final class CanvasNSView: MTKView {
         needsDisplay = true
     }
 
-    func zoomToFit() {
+    public func zoomToFit() {
         setTransform(CanvasTransform.fitting(imageSize: transform.imageSize, viewSize: backingSize))
     }
 
-    func zoomToActualSize() {
+    public func zoomToActualSize() {
         setTransform(transform.zoomed(to: 1, anchorView: CGPoint(x: backingSize.width / 2,
                                                                  y: backingSize.height / 2)))
     }
@@ -176,7 +177,7 @@ final class CanvasNSView: MTKView {
 
     // MARK: - Tracking / cursor
 
-    override func updateTrackingAreas() {
+    public override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let trackingArea { removeTrackingArea(trackingArea) }
         let area = NSTrackingArea(rect: bounds,
@@ -187,7 +188,7 @@ final class CanvasNSView: MTKView {
         trackingArea = area
     }
 
-    override func viewDidChangeBackingProperties() {
+    public override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         setTransform(transform.resized(viewSize: backingSize))
     }
@@ -197,7 +198,7 @@ final class CanvasNSView: MTKView {
         window?.invalidateCursorRects(for: self)
     }
 
-    override func resetCursorRects() {
+    public override func resetCursorRects() {
         // In brush mode the ring *is* the cursor, so hide the arrow.
         if tool == .brush {
             addCursorRect(bounds, cursor: .crosshair)
@@ -208,19 +209,19 @@ final class CanvasNSView: MTKView {
         }
     }
 
-    override func mouseMoved(with event: NSEvent) {
+    public override func mouseMoved(with event: NSEvent) {
         cursorLocation = backingPoint(event)
         if tool == .brush { needsDisplay = true }
     }
 
-    override func mouseExited(with event: NSEvent) {
+    public override func mouseExited(with event: NSEvent) {
         cursorLocation = nil
         needsDisplay = true
     }
 
     // MARK: - Mouse
 
-    override func mouseDown(with event: NSEvent) {
+    public override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let p = backingPoint(event)
         cursorLocation = p
@@ -245,7 +246,7 @@ final class CanvasNSView: MTKView {
         }
     }
 
-    override func mouseDragged(with event: NSEvent) {
+    public override func mouseDragged(with event: NSEvent) {
         let p = backingPoint(event)
         cursorLocation = p
         switch drag {
@@ -265,7 +266,7 @@ final class CanvasNSView: MTKView {
         if tool == .brush { needsDisplay = true }
     }
 
-    override func mouseUp(with event: NSEvent) {
+    public override func mouseUp(with event: NSEvent) {
         switch drag {
         case .paint: handler?.canvasEndStroke()
         case .targeted: handler?.canvasEndTargeted()
@@ -276,7 +277,7 @@ final class CanvasNSView: MTKView {
 
     // MARK: - Zoom / pan gestures
 
-    override func scrollWheel(with event: NSEvent) {
+    public override func scrollWheel(with event: NSEvent) {
         let p = backingPoint(event)
         if event.modifierFlags.contains(.command) {
             let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 4
@@ -290,14 +291,14 @@ final class CanvasNSView: MTKView {
         }
     }
 
-    override func magnify(with event: NSEvent) {
+    public override func magnify(with event: NSEvent) {
         let p = backingPoint(event)
         setTransform(transform.scaled(by: 1 + Double(event.magnification), anchorView: p))
     }
 
     // MARK: - Keyboard
 
-    override func keyDown(with event: NSEvent) {
+    public override func keyDown(with event: NSEvent) {
         guard let chars = event.charactersIgnoringModifiers, let c = chars.first else {
             super.keyDown(with: event)
             return
@@ -320,7 +321,7 @@ final class CanvasNSView: MTKView {
         }
     }
 
-    override func keyUp(with event: NSEvent) {
+    public override func keyUp(with event: NSEvent) {
         if event.charactersIgnoringModifiers?.first == "\\" {
             backslashHeld = false
             handler?.canvasBeforeAfterHeld(false)
@@ -331,9 +332,20 @@ final class CanvasNSView: MTKView {
 
     // MARK: - Uniforms
 
+    /// The uniforms the next frame will be drawn with. Public so a test can
+    /// check them against the transform the input path uses.
+    public func currentUniforms() -> CanvasUniforms { makeUniforms() }
+
     private func makeUniforms() -> CanvasUniforms {
         var u = CanvasUniforms()
-        let vs = backingSize
+        // `transform.viewSize`, NOT `backingSize`: the display and the input
+        // mapping have to invert *the same* transform, or a click lands
+        // somewhere other than where the pixel under it was drawn. The two
+        // agree in the steady state, but `bounds` and the drawable size do not
+        // change atomically (a live resize updates them from different
+        // callbacks), and this is the number `CanvasTransform` was inverted
+        // with when the event arrived.
+        let vs = transform.viewSize
         u.viewSize = SIMD2<Float>(Float(vs.width), Float(vs.height))
         u.imageSize = SIMD2<Float>(Float(max(transform.imageSize.width, 1)),
                                    Float(max(transform.imageSize.height, 1)))
@@ -355,18 +367,30 @@ final class CanvasNSView: MTKView {
 // MARK: - Drawing
 
 extension CanvasNSView: MTKViewDelegate {
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+    public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         setTransform(transform.resized(viewSize: CGSize(width: max(size.width, 1),
                                                         height: max(size.height, 1))))
     }
 
-    func draw(in view: MTKView) {
-        guard let pipelineState,
-              let descriptor = currentRenderPassDescriptor,
+    public func draw(in view: MTKView) {
+        guard let descriptor = currentRenderPassDescriptor,
               let drawable = currentDrawable,
-              let buffer = commandQueue.makeCommandBuffer(),
-              let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+              let buffer = commandQueue.makeCommandBuffer() else { return }
+        encodeCanvas(into: descriptor, commandBuffer: buffer)
+        buffer.present(drawable)
+        buffer.commit()
+    }
 
+    /// Encodes one canvas frame into `descriptor`'s colour attachment.
+    ///
+    /// Split out of `draw(in:)` so the closed-loop display-vs-input test can
+    /// render into an offscreen texture through *exactly* the same uniforms,
+    /// pipeline state and shader that the screen sees. Nothing here may consult
+    /// the drawable: the only geometry input is `transform`.
+    public func encodeCanvas(into descriptor: MTLRenderPassDescriptor,
+                             commandBuffer buffer: MTLCommandBuffer) {
+        guard let pipelineState,
+              let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
         if let image = imageTexture {
             var u = makeUniforms()
             encoder.setRenderPipelineState(pipelineState)
@@ -376,7 +400,5 @@ extension CanvasNSView: MTKViewDelegate {
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         encoder.endEncoding()
-        buffer.present(drawable)
-        buffer.commit()
     }
 }

@@ -40,9 +40,18 @@ let package = Package(
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        // The canvas view lives in its own library, not in the app executable,
+        // for one reason: an executable target cannot be imported by a test
+        // target, and the canvas is where the input/display coordinate contract
+        // lives — exactly the code that most needs a real-AppKit regression test.
+        .target(
+            name: "GrayroomCanvas",
+            dependencies: ["GrayroomCore", "GrayroomUI"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .executableTarget(
             name: "GrayroomApp",
-            dependencies: ["GrayroomCore", "GrayroomUI"],
+            dependencies: ["GrayroomCore", "GrayroomUI", "GrayroomCanvas"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
@@ -53,6 +62,11 @@ let package = Package(
         .testTarget(
             name: "GrayroomUITests",
             dependencies: ["GrayroomUI", "GrayroomCore"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "GrayroomCanvasTests",
+            dependencies: ["GrayroomCanvas", "GrayroomUI", "GrayroomCore"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

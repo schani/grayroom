@@ -1,3 +1,4 @@
+import GrayroomCanvas
 import GrayroomCore
 import SwiftUI
 

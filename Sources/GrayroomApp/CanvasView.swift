@@ -1,4 +1,5 @@
 import AppKit
+import GrayroomCanvas
 import SwiftUI
 
 /// SwiftUI wrapper around the `MTKView` canvas.
