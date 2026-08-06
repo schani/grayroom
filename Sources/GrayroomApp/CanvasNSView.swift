@@ -142,8 +142,9 @@ final class CanvasNSView: MTKView {
     }
 
     private var backingSize: CGSize {
-        let s = convertToBacking(bounds).size
-        return CGSize(width: max(s.width, 1), height: max(s.height, 1))
+        let scale = window?.backingScaleFactor ?? 1
+        return CGSize(width: max(bounds.width * scale, 1),
+                      height: max(bounds.height * scale, 1))
     }
 
     private func setTransform(_ t: CanvasTransform) {
@@ -162,8 +163,15 @@ final class CanvasNSView: MTKView {
     }
 
     /// Device-pixel location of an event in this view.
+    ///
+    /// NOT `convertToBacking(_ point:)`: for a flipped view that returns a
+    /// *negated* y (backing space is bottom-up), which inverted vertical pan
+    /// and scrambled brush coordinates. Scale explicitly instead — the local
+    /// point is already in this view's flipped (y-down) coordinates.
     private func backingPoint(_ event: NSEvent) -> CGPoint {
-        convertToBacking(convert(event.locationInWindow, from: nil))
+        let local = convert(event.locationInWindow, from: nil)
+        let scale = window?.backingScaleFactor ?? 1
+        return CGPoint(x: local.x * scale, y: local.y * scale)
     }
 
     // MARK: - Tracking / cursor

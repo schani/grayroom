@@ -13,6 +13,15 @@ extension AppModel {
                 set: { newValue in self.store.update { $0[keyPath: keyPath] = newValue } })
     }
 
+    /// A binding into the *selected* mask's adjustments, resolved by mask ID on
+    /// every access. Never index-captured: SwiftUI can evaluate a stale binding
+    /// after the mask it was built for is gone, and that must be a no-op, not
+    /// an out-of-range trap.
+    func maskBinding(_ keyPath: WritableKeyPath<MaskAdjustments, Double>) -> Binding<Double> {
+        Binding(get: { self.store.maskAdjustment(keyPath) },
+                set: { newValue in self.store.setMaskAdjustment(keyPath, to: newValue) })
+    }
+
     func beginEdit() { store.beginGesture() }
     func endEdit(_ name: String) { store.endGesture(named: name) }
 }
@@ -239,29 +248,29 @@ private struct MasksPanel: View {
                 MaskRow(model: model, mask: mask)
             }
 
-            if let index = model.store.selectedMaskIndex {
+            if let selected = model.store.selectedMask {
                 Divider()
                 Toggle("Show overlay", isOn: Binding(get: { model.showMaskOverlay },
                                                      set: { model.showMaskOverlay = $0 }))
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
                 SliderRow(title: "Exposure",
-                          value: model.binding(\.masks[index].adjustments.exposure),
+                          value: model.maskBinding(\.exposure),
                           range: -4...4, format: "%+.2f EV",
                           onBegin: model.beginEdit, onEnd: { model.endEdit("Mask Exposure") })
                 SliderRow(title: "Contrast",
-                          value: model.binding(\.masks[index].adjustments.contrast),
+                          value: model.maskBinding(\.contrast),
                           onBegin: model.beginEdit, onEnd: { model.endEdit("Mask Contrast") })
                 SliderRow(title: "Highlights",
-                          value: model.binding(\.masks[index].adjustments.highlights),
+                          value: model.maskBinding(\.highlights),
                           onBegin: model.beginEdit, onEnd: { model.endEdit("Mask Highlights") })
                 SliderRow(title: "Shadows",
-                          value: model.binding(\.masks[index].adjustments.shadows),
+                          value: model.maskBinding(\.shadows),
                           onBegin: model.beginEdit, onEnd: { model.endEdit("Mask Shadows") })
                 SliderRow(title: "Clarity",
-                          value: model.binding(\.masks[index].adjustments.clarity),
+                          value: model.maskBinding(\.clarity),
                           onBegin: model.beginEdit, onEnd: { model.endEdit("Mask Clarity") })
-                Text("\(model.store.edit.masks[index].strokes.count) stroke(s)")
+                Text("\(selected.strokes.count) stroke(s)")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }

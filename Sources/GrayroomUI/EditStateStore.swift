@@ -181,9 +181,33 @@ public final class EditStateStore {
 
     public func deleteMask(id: UUID) {
         guard let i = edit.masks.firstIndex(where: { $0.id == id }) else { return }
-        perform("Delete Mask") { $0.masks.remove(at: i) }
+        // Move the selection off the doomed mask BEFORE mutating, so any view
+        // re-evaluation triggered by the mutation never sees a selection that
+        // points at a mask that no longer exists.
         if selectedMaskID == id {
-            selectedMaskID = edit.masks.indices.contains(i) ? edit.masks[i].id : edit.masks.last?.id
+            let remaining = edit.masks.filter { $0.id != id }
+            selectedMaskID = i < remaining.count ? remaining[i].id : remaining.last?.id
+        }
+        perform("Delete Mask") { $0.masks.removeAll { $0.id == id } }
+    }
+
+    /// Bounds-safe read of an adjustment on the selected mask; `0` when nothing
+    /// is selected (or the selection is stale). SwiftUI can evaluate a binding
+    /// created for a mask row *after* that mask was deleted — this getter and
+    /// the setter below must therefore never trap on a stale selection.
+    public func maskAdjustment(_ keyPath: WritableKeyPath<MaskAdjustments, Double>) -> Double {
+        guard let i = selectedMaskIndex else { return 0 }
+        return edit.masks[i].adjustments[keyPath: keyPath]
+    }
+
+    /// Bounds-safe write to the selected mask, resolved by ID at write time.
+    /// A no-op when the selection no longer resolves to a live mask.
+    public func setMaskAdjustment(_ keyPath: WritableKeyPath<MaskAdjustments, Double>,
+                                  to value: Double) {
+        guard let id = selectedMaskID else { return }
+        update {
+            guard let i = $0.masks.firstIndex(where: { $0.id == id }) else { return }
+            $0.masks[i].adjustments[keyPath: keyPath] = value
         }
     }
 

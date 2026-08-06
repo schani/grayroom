@@ -150,6 +150,49 @@ final class EditStateStoreTests: XCTestCase {
         XCTAssertEqual(store.edit.masks.count, 2)
     }
 
+    /// The crash scenario: SwiftUI evaluates a mask-adjustment binding after
+    /// the mask it was created for has been deleted. The safe accessors must
+    /// no-op / return 0, never trap.
+    func testMaskAdjustmentAccessorsSurviveDeletion() {
+        let store = makeStore()
+        let id = store.addMask()
+        store.setMaskAdjustment(\.exposure, to: 1.5)
+        XCTAssertEqual(store.maskAdjustment(\.exposure), 1.5)
+
+        store.deleteMask(id: id)
+        XCTAssertTrue(store.edit.masks.isEmpty)
+        XCTAssertNil(store.selectedMaskID)
+
+        // Stale evaluations after deletion: harmless.
+        XCTAssertEqual(store.maskAdjustment(\.exposure), 0)
+        store.setMaskAdjustment(\.contrast, to: 50)
+        XCTAssertTrue(store.edit.masks.isEmpty)
+    }
+
+    /// Deleting the selected mask must move the selection off it *before* the
+    /// mutation is observable, and select a sensible neighbour.
+    func testDeleteSelectedMaskRetargetsSelectionBeforeMutation() {
+        let store = makeStore()
+        let a = store.addMask()
+        let b = store.addMask()
+        let c = store.addMask()
+
+        store.selectedMaskID = b
+        var selectionSeenDuringChange: UUID?
+        store.onChange = { _ in selectionSeenDuringChange = store.selectedMaskID }
+        store.deleteMask(id: b)
+        // The onChange fired by the deletion must already see a live selection.
+        XCTAssertNotEqual(selectionSeenDuringChange, b)
+        XCTAssertEqual(store.selectedMaskID, c, "selection moves to the next mask")
+
+        store.selectedMaskID = c
+        store.deleteMask(id: c)
+        XCTAssertEqual(store.selectedMaskID, a, "deleting the last falls back to the previous")
+
+        store.deleteMask(id: a)
+        XCTAssertNil(store.selectedMaskID)
+    }
+
     func testNextMaskNameSkipsTakenNames() {
         XCTAssertEqual(EditStateStore.nextMaskName(existing: []), "Mask 1")
         XCTAssertEqual(EditStateStore.nextMaskName(existing: ["Mask 1", "Mask 3"]), "Mask 2")
