@@ -242,35 +242,21 @@ public enum MaskRasterizer {
 
     // MARK: - Clarity range
 
-    /// Bounds on the effective per-pixel clarity `global + Σ coverage·Δ`, given
-    /// that every coverage is in 0…1. Used to pick the single local-Laplacian
-    /// variant the frame is rendered with.
+    /// Bounds on the effective per-pixel clarity `clamp(global + Σ coverage·Δ,
+    /// 0, 100)`, given that every coverage is in 0…1.
+    ///
+    /// Clarity itself is positive-only; the per-mask deltas are still ±100, so
+    /// `lo` is what the most heavily *reduced* region gets and `hi` is the
+    /// frame's maximum. `hi == 0` means no pixel asks for clarity, so the stage
+    /// can be skipped entirely; there is only one local-Laplacian variant now,
+    /// so nothing else needs the range.
     public static func clarityRange(global: Double, masks: [Mask]) -> (lo: Double, hi: Double) {
-        let g = min(max(global, -100), 100)
+        let g = min(max(global, 0), 100)
         var lo = g, hi = g
         for m in masks where m.enabled && !m.strokes.isEmpty {
             let d = m.adjustments.clamped.clarity
             if d > 0 { hi += d } else { lo += d }
         }
-        return (min(max(lo, -100), 100), min(max(hi, -100), 100))
-    }
-
-    /// The clarity variant the frame is rendered with, per the README's M3
-    /// contract.
-    ///
-    /// `L_llf` is computed once at the **full-scale** lift for one sign; the
-    /// per-pixel amount is `|clarity(x)| / 100`. Only this function's *sign* is
-    /// used for that (its magnitude is still what decides which sign wins, and
-    /// `clarity == 0` still means "skip the stage"). When global and local
-    /// clarity have **conflicting signs**
-    /// the v1 rule is: render the variant of the *dominant* sign (the end of the
-    /// range with the larger magnitude) and clamp the other side's amount to 0 —
-    /// i.e. a small opposite-sign region is left untouched rather than being
-    /// given a second pyramid pass. Deliberate: a second full pass would double
-    /// the cost of the most expensive stage for a case that is rare in practice.
-    public static func clarityVariant(global: Double, masks: [Mask]) -> (clarity: Double, sign: Double) {
-        let r = clarityRange(global: global, masks: masks)
-        let dominant = abs(r.hi) >= abs(r.lo) ? r.hi : r.lo
-        return (dominant, dominant >= 0 ? 1 : -1)
+        return (min(max(lo, 0), 100), min(max(hi, 0), 100))
     }
 }

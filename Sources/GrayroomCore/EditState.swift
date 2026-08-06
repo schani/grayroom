@@ -14,7 +14,12 @@ public struct EditState: Codable, Equatable, Sendable {
     public var whiteBalance: WhiteBalance
     public var tone: Tone
     public var bwMix: BWMix
-    /// Global clarity amount (−100…100).
+    /// Global clarity amount (0…100). Clarity is positive-only: there is no
+    /// smoothing/glow operator, so negative values have no meaning and are
+    /// clamped away (see `init(from:)` and `ClarityMapping.parameters(for:)`).
+    /// Per-mask clarity deltas are still ±100 — a mask may reduce clarity below
+    /// the global value, and the effective amount is
+    /// `clamp(global + Σ Δ, 0, 100)`.
     public var clarity: Double
     public var toning: Toning
     /// Brush-painted local adjustments (M3). Schema version stays 1: `masks` was
@@ -49,7 +54,10 @@ public struct EditState: Codable, Equatable, Sendable {
         whiteBalance = try c.decodeIfPresent(WhiteBalance.self, forKey: .whiteBalance) ?? WhiteBalance()
         tone = try c.decodeIfPresent(Tone.self, forKey: .tone) ?? Tone()
         bwMix = try c.decodeIfPresent(BWMix.self, forKey: .bwMix) ?? BWMix()
-        clarity = try c.decodeIfPresent(Double.self, forKey: .clarity) ?? 0
+        // Lenient, not strict: sidecars written before clarity became
+        // positive-only (and `--set clarity=-50`) load with the value clamped
+        // into 0…100 rather than failing.
+        clarity = min(max(try c.decodeIfPresent(Double.self, forKey: .clarity) ?? 0, 0), 100)
         toning = try c.decodeIfPresent(Toning.self, forKey: .toning) ?? Toning()
         masks = try c.decodeIfPresent([Mask].self, forKey: .masks) ?? []
     }

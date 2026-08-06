@@ -141,7 +141,10 @@ private struct TonePanel: View {
             SliderRow(title: "Blacks", value: model.binding(\.tone.blacks),
                       onBegin: model.beginEdit, onEnd: { model.endEdit("Blacks") })
             PanelHeader(title: "Presence")
+            // Global clarity is positive-only; per-mask deltas keep the full
+            // ±100 range (a mask may reduce clarity below the global value).
             SliderRow(title: "Clarity", value: model.binding(\.clarity),
+                      range: 0...100,
                       onBegin: model.beginEdit, onEnd: { model.endEdit("Clarity") })
         }
     }

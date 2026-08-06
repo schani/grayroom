@@ -94,7 +94,6 @@ struct MaskClampUniforms {
 
 struct MaskClarityUniforms {
     var globalClarity: Float
-    var dominantSign: Float
     /// 1 / 100 — the **fixed** full-scale reference, not the frame's maximum.
     var invReference: Float
 }

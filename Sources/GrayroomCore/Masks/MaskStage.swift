@@ -154,7 +154,10 @@ final class MaskStage {
         return Maps(paramsA: backA, paramsB: backB)
     }
 
-    /// Builds the clarity stage's per-pixel amount map from `paramsB`.
+    /// Builds the clarity stage's per-pixel amount map from `paramsB`:
+    /// `amount(x) = clamp(global + Δclarity(x), 0, 100) / 100`. Local deltas are
+    /// still ±100, so a mask can pull a region below the global value; below
+    /// zero it saturates at amount 0, which is exactly the identity.
     ///
     /// Normalised against the **fixed** full-scale clarity (100), which is also
     /// what `ClarityStage` builds its pyramid at. Before wave 3 this divided by
@@ -168,11 +171,9 @@ final class MaskStage {
     func encodeClarityAmount(_ cb: MTLCommandBuffer,
                              paramsB: MTLTexture,
                              globalClarity: Double,
-                             dominantSign: Double,
                              width: Int, height: Int) throws -> MTLTexture {
         let amount = try context.makeAmountTexture(width: width, height: height)
-        var u = MaskClarityUniforms(globalClarity: Float(globalClarity),
-                                    dominantSign: Float(dominantSign),
+        var u = MaskClarityUniforms(globalClarity: Float(min(max(globalClarity, 0), 100)),
                                     invReference: 1.0 / 100.0)
         try encodePass(cb, clarityAmountPipeline, width, height) { e in
             e.setTexture(paramsB, index: 0)

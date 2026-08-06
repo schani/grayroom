@@ -48,15 +48,13 @@ public enum ClarityMapping {
     public static let workingMinEV: Double = -8
     public static let workingMaxEV: Double = 3
 
-    /// alpha at clarity = +100 is `1 − alphaBoostRange`, at −100 it is
-    /// `1 + alphaSmoothRange`. The remap's fine-detail slope is `1/alpha`, so
-    /// ±100 means "fine detail ×2.5" and "fine detail ×1/3".
+    /// alpha at clarity = +100 is `1 − alphaBoostRange`. The remap's fine-detail
+    /// slope is `1/alpha`, so +100 means "fine detail ×2.5".
     ///
-    /// These are **endpoint** definitions: alpha no longer slides with the
-    /// slider (see `parameters(for:)`), it is pinned here and `gain` does the
+    /// This is an **endpoint** definition: alpha does not slide with the slider
+    /// (see `parameters(for:)`), it is pinned here and `gain` does the
     /// interpolating, which is what makes the response linear.
     public static let alphaBoostRange: Double = 0.6
-    public static let alphaSmoothRange: Double = 2.0
 
     /// Midtone weighting of the applied lift (wave 3, audit `clarity-local` #1).
     ///
@@ -118,26 +116,27 @@ public enum ClarityMapping {
 
     /// What the clarity slider means to the remap function.
     ///
-    /// * `alpha < 1` boosts detail, `alpha > 1` smooths it: the remap's slope on
-    ///   fine detail is `1 + gain·(1/alpha − 1)`, so `alpha` keeps its usual
-    ///   "detail exponent" reading (`1/alpha` is the fine-detail gain).
+    /// * `alpha < 1` boosts detail: the remap's slope on fine detail is
+    ///   `1 + gain·(1/alpha − 1)`, so `alpha` keeps its usual "detail exponent"
+    ///   reading (`1/alpha` is the fine-detail gain).
     /// * `gain` blends the remap with the identity, so `clarity = 0` is
     ///   *exactly* the identity for any alpha.
-    /// * The sign of clarity picks which variant is built; the magnitude drives
-    ///   both alpha and gain, so strength is monotone in |clarity|.
+    /// * The magnitude drives `gain`, so strength is monotone in `clarity`.
     /// * `amount` is the final `mix(L, L_llf, amount)` weight. Since wave 3 the
     ///   pyramid is *always* built at the full-scale lift (see `referenceLift`),
-    ///   so the global amount is `|clarity|/100`; M3 masks replace it with a
+    ///   so the global amount is `clarity/100`; M3 masks replace it with a
     ///   per-pixel texture carrying the same quantity.
+    ///
+    /// Clarity is **positive only** (0…100). There is no smoothing operator: a
+    /// per-mask delta that pushes the effective value below zero simply lands at
+    /// amount 0, i.e. the identity.
     public struct Parameters: Equatable, Sendable {
         public var alpha: Double
         public var gain: Double
         public var amount: Double
-        /// `true` when this variant smooths (clarity < 0) rather than boosts.
-        public var isSmoothing: Bool
 
         /// Coefficient of the detail lift: `r(v) = v + lift·d·exp(−d²/2sigmaR²)`.
-        /// Positive boosts, negative smooths, 0 is the identity.
+        /// Positive boosts, 0 is the identity.
         public var lift: Double { gain * (1 / alpha - 1) }
 
         /// The remap's slope on infinitesimal detail, `r'(g)`.
@@ -147,15 +146,15 @@ public enum ClarityMapping {
         public var isIdentity: Bool { gain == 0 || amount == 0 }
     }
 
-    /// Maps the −100…+100 slider onto the remap parameters.
+    /// Maps the 0…100 slider onto the remap parameters. Out-of-range values
+    /// clamp, so a negative clarity from an old sidecar is the identity.
     ///
-    /// `a = |clarity| / 100`:
+    /// `a = clarity / 100`:
     ///
     /// ```
-    /// gain  = a                                   (0 at 0, 1 at ±100)
-    /// alpha = 1 − alphaBoostRange     (clarity > 0)   = 0.4, fixed
-    ///       = 1 + alphaSmoothRange    (clarity < 0)   = 3.0, fixed
-    /// lift  = gain · (1/alpha − 1)                 = ±1.5 · a / −0.667 · a
+    /// gain  = a                                   (0 at 0, 1 at 100)
+    /// alpha = 1 − alphaBoostRange                 = 0.4, fixed
+    /// lift  = gain · (1/alpha − 1)                = 1.5 · a
     /// ```
     ///
     /// **Wave 3 (audit `clarity-local` #0).** `alpha` used to slide with the
@@ -166,35 +165,28 @@ public enum ClarityMapping {
     /// instruction ("increase until you see halos, then back off") only makes
     /// sense if small values already do visible work. Pinning `alpha` at its
     /// endpoint value and letting `gain` interpolate makes `lift` **linear** in
-    /// the slider while keeping both endpoints exactly where they were (detail
-    /// ×2.5 at +100, ×1/3 at −100). New slope table: 1.15 at +10, 1.375 at +25,
-    /// 1.75 at +50, 2.5 at +100; 0.933 / 0.833 / 0.667 / 0.333 negative.
+    /// the slider while keeping the endpoint exactly where it was (detail ×2.5
+    /// at +100). Slope table: 1.15 at +10, 1.375 at +25, 1.75 at +50, 2.5 at
+    /// +100.
     ///
     /// Linearity is not just cosmetic: the whole filter is exactly affine in
     /// `lift` (the pyramid operators and the hat weights are linear and the
     /// weights use the *unremapped* Gaussian pyramid), so a linear slider
-    /// response makes `amount = |c|/100` reproduce each pixel's own strength
+    /// response makes `amount = c/100` reproduce each pixel's own strength
     /// exactly — which is what fixes the mask-normalisation bug (audit #6).
-    ///
-    /// The two endpoint excursions stay asymmetric because the slope is
-    /// `1/alpha`: "detail ×1/3" needs alpha = 3 while "×2.5" needs only 0.4.
     public static func parameters(for clarity: Double) -> Parameters {
-        let c = min(max(clarity, -100), 100) / 100
-        let a = abs(c)
-        let alpha = c >= 0 ? 1 - alphaBoostRange : 1 + alphaSmoothRange
-        return Parameters(alpha: alpha, gain: a, amount: a, isSmoothing: c < 0)
+        let a = min(max(clarity, 0), 100) / 100
+        return Parameters(alpha: 1 - alphaBoostRange, gain: a, amount: a)
     }
 
-    /// The lift the local-Laplacian pyramid is **always** built with, for a
-    /// given sign. `parameters(for:).amount` then scales the result per pixel.
+    /// The lift the local-Laplacian pyramid is **always** built with;
+    /// `parameters(for:).amount` then scales the result per pixel.
     ///
     /// Building at full scale and scaling down afterwards is exactly equivalent
     /// (the filter is affine in `lift`) and it makes the rendition independent
     /// of *which other* clarity values happen to be present in the frame — see
     /// `MaskStage.encodeClarityAmount`.
-    public static func referenceLift(sign: Double) -> Double {
-        parameters(for: sign < 0 ? -100 : 100).lift
-    }
+    public static var referenceLift: Double { parameters(for: 100).lift }
 
     /// Midtone weight of the applied lift at log2 luminance `l`. CPU reference
     /// for `grClarityToneWeight` in `Clarity.metal`.

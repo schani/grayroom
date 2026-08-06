@@ -52,18 +52,18 @@ final class ClarityStage {
     ///
     /// `amount` defaults to the global scalar; passing a texture is the M3 hook.
     ///
-    /// The pyramid is always built at the **full-scale** lift for `clarity`'s
-    /// sign and scaled down by the amount, never at the requested strength: the
-    /// filter is exactly affine in `lift`, so the two are equivalent, and the
-    /// fixed reference makes the rendition independent of what other clarity
-    /// values are present in the frame (see `MaskStage.encodeClarityAmount`).
+    /// The pyramid is always built at the **full-scale** lift and scaled down by
+    /// the amount, never at the requested strength: the filter is exactly affine
+    /// in `lift`, so the two are equivalent, and the fixed reference makes the
+    /// rendition independent of what other clarity values are present in the
+    /// frame (see `MaskStage.encodeClarityAmount`).
     func encode(_ cb: MTLCommandBuffer,
                 source: MTLTexture,
                 destination: MTLTexture,
                 clarity: Double,
                 amountTexture explicitAmount: MTLTexture? = nil) throws {
         let params = ClarityMapping.parameters(for: clarity)
-        let lift = ClarityMapping.referenceLift(sign: params.isSmoothing ? -1 : 1)
+        let lift = ClarityMapping.referenceLift
         let w = source.width, h = source.height
 
         // --- L = log2(max(Y, eps)); this is also G[0]. -----------------------

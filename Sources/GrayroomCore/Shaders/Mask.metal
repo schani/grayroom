@@ -42,8 +42,7 @@ struct MaskClampUniforms {
 };
 
 struct MaskClarityUniforms {
-    float globalClarity;   // the global slider, -100..100
-    float dominantSign;    // +1 boost variant, -1 smooth variant
+    float globalClarity;   // the global slider, 0..100
     float invReference;    // 1 / 100 — the fixed full-scale reference
 };
 
@@ -144,12 +143,12 @@ kernel void maskClampKernel(texture2d<float, access::read>  srcA [[texture(0)]],
 
 // Per-pixel clarity amount for the clarity stage:
 //
-//   c(x) = clamp(global + dClarity(x), -100, 100)
-//   a(x) = clamp(sign_dominant * c(x), 0, 100) / 100
+//   c(x) = clamp(global + dClarity(x), 0, 100)
+//   a(x) = c(x) / 100
 //
-// so pixels whose clarity has the *opposite* sign to the frame's dominant
-// variant get amount 0 (the documented v1 conflict rule, see
-// MaskRasterizer.clarityVariant).
+// Clarity is positive-only, but a per-mask delta may be negative (less clarity
+// on a face than the scene has). A region driven below zero lands at amount 0,
+// i.e. the identity — there is no smoothing operator to run.
 //
 // The reference is the **fixed** full-scale 100, not the frame's largest
 // |clarity| as it was before wave 3. The pyramid is built at the full-scale lift
@@ -164,7 +163,6 @@ kernel void maskClarityAmountKernel(texture2d<float, access::read>  paramsB [[te
                                     uint2 gid [[thread_position_in_grid]])
 {
     if (gid.x >= amount.get_width() || gid.y >= amount.get_height()) return;
-    float c = clamp(u.globalClarity + paramsB.read(gid).r, -100.0f, 100.0f);
-    float a = max(u.dominantSign * c, 0.0f) * u.invReference;
-    amount.write(float4(clamp(a, 0.0f, 1.0f), 0.0f, 0.0f, 0.0f), gid);
+    float c = clamp(u.globalClarity + paramsB.read(gid).r, 0.0f, 100.0f);
+    amount.write(float4(clamp(c * u.invReference, 0.0f, 1.0f), 0.0f, 0.0f, 0.0f), gid);
 }

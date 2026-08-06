@@ -97,29 +97,28 @@ public final class Pipeline {
         // --- clarity ---------------------------------------------------------
         // Skipped entirely when nothing asks for it, so the default edit is
         // bit-for-bit unchanged.
+        let globalClarity = min(max(edit.clarity, 0), 100)
         let localClarity = maps != nil && masks.contains { $0.adjustments.clarity != 0 }
-        if runs(.clarity), edit.clarity != 0 || localClarity {
+        if runs(.clarity), globalClarity > 0 || localClarity {
             if localClarity {
-                // One variant for the whole frame — full-scale for the dominant
-                // *sign*; the amount map scales it per pixel and zeroes any
-                // pixel whose clarity has the opposite sign (see
-                // MaskRasterizer.clarityVariant).
-                let variant = MaskRasterizer.clarityVariant(global: edit.clarity, masks: masks)
-                if variant.clarity != 0 {
+                // One pyramid for the whole frame, always at the full-scale
+                // lift; the amount map scales it per pixel. A region whose
+                // deltas push the effective clarity below 0 gets amount 0.
+                let peak = MaskRasterizer.clarityRange(global: globalClarity, masks: masks).hi
+                if peak > 0 {
                     let amount = try maskStage.encodeClarityAmount(
                         commandBuffer,
                         paramsB: maps!.paramsB,
-                        globalClarity: edit.clarity,
-                        dominantSign: variant.sign,
+                        globalClarity: globalClarity,
                         width: w, height: h)
                     try clarityStage.encode(commandBuffer, source: src, destination: dst,
-                                            clarity: variant.clarity, amountTexture: amount)
+                                            clarity: peak, amountTexture: amount)
                     latest = dst
                     advance()
                 }
             } else {
                 try clarityStage.encode(commandBuffer, source: src, destination: dst,
-                                        clarity: edit.clarity)
+                                        clarity: globalClarity)
                 latest = dst
                 advance()
             }

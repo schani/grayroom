@@ -20,6 +20,10 @@ struct Render: ParsableCommand {
 
     @Option(name: .customLong("set"),
             help: ArgumentHelp("Override an edit value, e.g. tone.exposure=1.0 or bwMix.enabled=false.",
+                               discussion: "Values are clamped to their documented ranges, "
+                                   + "not rejected: clarity is 0…100 (positive only), so "
+                                   + "clarity=-50 loads as 0. Per-mask clarity deltas "
+                                   + "(masks[N].adjustments.clarity) keep the full -100…100 range.",
                                valueName: "key=value"))
     var settings: [String] = []
 

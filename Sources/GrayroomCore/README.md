@@ -458,29 +458,39 @@ is essentially the identity — clarity fades out instead of misbehaving.
 
 ### Slider mapping
 
-`a = |clarity|/100`:
+Clarity is **positive only: 0…100**. `a = clarity/100`:
 
 ```
 gain  = a
-alpha = 0.4   (clarity > 0, boost)     lift = gain·(1/alpha − 1) = ±1.5·a
-      = 3.0   (clarity < 0, smooth)                              = −0.667·a
+alpha = 0.4                            lift = gain·(1/alpha − 1) = 1.5·a
                                        detail slope = 1 + lift
 ```
 
 `gain` blends the remap with the identity, so **clarity = 0 is exactly the
 identity** — and the stage is skipped outright anyway, so a default edit is
 bit-for-bit what it was before M2. `alpha` keeps its usual reading: `1/alpha` is
-the fine-detail gain at full scale, `<1` boosts, `>1` smooths. The two endpoint
-values are asymmetric because the slope is `1/alpha`: ±100 give detail ×2.5 and
-×1/3.
+the fine-detail gain at full scale; +100 gives detail ×2.5.
+
+There is **no negative branch and no smoothing operator**. There used to be one
+(`alpha = 3.0`, lift −0.667·a, detail ×1/3 at −100) and it was dropped by user
+decision: it was a mirror of the boost, not Lightroom's negative clarity (glow
+and bloom with a midtone lift — audit `clarity-local` #4), and nobody used it.
+Everything that depended on the sign went with it: the dominant-sign variant
+selection, the sign-conflict rule in the mask contract, and the `isSmoothing`
+plumbing from `ClarityMapping` through `ClarityStage` to the amount kernel.
+
+Values outside 0…100 clamp rather than being rejected, at three places that
+agree: `EditState.init(from:)` (so an old sidecar with `"clarity": -80`, or
+`--set clarity=-50`, loads as 0), `ClarityMapping.parameters(for:)` and
+`Pipeline` (which skips the stage when nothing asks for clarity).
 
 **Wave 3 (audit `clarity-local` #0) linearised this.** `alpha` used to slide with
 the slider too (`1 − 0.6a`), which made `lift` strongly convex — detail slope
 1.006 at +10, 1.044 at +25, 1.214 at +50 — so the first half of the slider was
 dead and the whole perceptual range lived in +60…+100. Lightroom's documented
 working range is +10…+25. Pinning `alpha` at its endpoint and letting `gain`
-interpolate keeps both endpoints exactly where they were and makes everything
-between them linear: **1.15 at +10, 1.375 at +25, 1.75 at +50, 2.5 at +100**.
+interpolate keeps the endpoint exactly where it was and makes everything below
+it linear: **1.15 at +10, 1.375 at +25, 1.75 at +50, 2.5 at +100**.
 Measured on the M2 reference frame (1067×1600, span-16 local-contrast RMS,
 relative to clarity 0): +10 went from +0.25 % to +2.2 %, +25 from +1.8 % to
 +5.7 %, +60 unchanged at +14 %.
@@ -547,17 +557,22 @@ L_out = mix(L, L_llf, amountTex(x))
 with `amountTex` clamped-sampled, so a **1×1 texture is the global case** and no
 shader change was needed for M3. What M3 actually put in it:
 
-* `L_llf` is computed **once**, at the **fixed full-scale lift** for the dominant
-  sign, and
+* `L_llf` is computed **once**, at the **fixed full-scale lift**, and
 
   ```
-  c(x)      = clamp(clarity_global + Δclarity(x), −100, 100)
-  amount(x) = clamp(sign_dominant · c(x), 0, 100) / 100
+  c(x)      = clamp(clarity_global + Δclarity(x), 0, 100)
+  amount(x) = c(x) / 100
   ```
 
   scales it per pixel (`maskClarityAmountKernel`). Since the filter is affine in
   `lift` and `lift` is linear in the slider, `amount · (L_llf(100) − L)` **is**
-  `L_llf(c(x)) − L`, exactly.
+  `L_llf(c(x)) − L`, exactly. Per-mask deltas keep the full **−100…+100** range
+  even though the global slider does not: a mask that *reduces* clarity is
+  useful (less on a face than the scene gets). The clamp at 0 is where negative
+  clarity now goes — a region driven below zero gets amount 0, which is the
+  identity, and `MaskTests.testMaskDeltaGivesTheComposedEffectiveClarity`
+  checks the composition itself: global 30 with a −20 mask is bit-identical to a
+  direct clarity-10 render inside the mask (0 differing samples).
 * **Wave 3 fixed a real bug here (audit #6).** The reference used to be the
   frame's largest |clarity|, so global 25 with a +20 mask built the pyramid at
   strength 45 and blended it at 25/45 *everywhere outside the mask* — and under
@@ -571,16 +586,21 @@ shader change was needed for M3. What M3 actually put in it:
   it. (The old code passed any tolerance-based version of that test — the README
   measured its error at 0.1 % on a low-detail frame — which is exactly why the
   test asserts equality.)
-* **Sign conflict rule (v1, chosen deliberately):** when the range straddles
-  zero, only the **dominant** sign's variant is rendered and the opposite side
-  is clamped to amount 0 — those pixels are left untouched rather than getting a
-  second pyramid pass. The plan allowed "a second pass when any negative amount
-  exists"; that would double the cost of the most expensive stage in the
-  pipeline for a case (a smoothing mask under a boosting global, or vice versa)
-  that is rare and whose failure mode is benign. `MaskTests.-
-  testClarityVariantPicksTheDominantSign` pins the rule. It is the one thing the
-  single-variant model still costs; the amount-map normalisation no longer costs
-  anything.
+* **One caveat on that bit equality, found while removing negative clarity.**
+  The amount map is `r16Float`. Without masks the 1×1 amount is converted on the
+  CPU (`Float16`, round-to-nearest); with masks it is computed by
+  `maskClarityAmountKernel` and rounded by the GPU's texture write, which on the
+  test machine rounds *toward zero*. When `global/100` is not exactly
+  representable in half the two disagree by one half-ulp: at global 30 the
+  unmasked path stores 0.30004883 and the masked path 0.2998047, which moves
+  ~0.7 % of the pixels outside the mask by one rgba16Float ulp. At global 25
+  (0.25, exact) and 10 (both paths land on 0.09997559) they agree exactly, which
+  is what the two bit-equality tests use. Not worth fixing by changing the
+  global path's quantisation — that would move every existing render — and the
+  error is 8·10⁻⁴ of the lift.
+* There is no sign-conflict rule any more: there is only one variant, so a mask
+  can only ask for less clarity than the frame's maximum, never for a different
+  operator.
 
 ## Masks — brush-painted local adjustments
 
@@ -593,6 +613,8 @@ never raster: tiny to persist and re-rasterisable at any pipeline resolution.
 ```
 Mask             id, name, enabled, adjustments, strokes[]
 MaskAdjustments  exposure (EV, ±4), contrast, highlights, shadows, clarity (±100)
+                 (clarity here is a *delta*, so it keeps both signs; the global
+                  slider it adds to is 0…100 and the sum clamps at 0)
 Stroke           brush, erase, points[]
 BrushParams      size, feather, flow, density
 StrokePoint      x, y, pressure
@@ -961,14 +983,11 @@ defaults — measured scale-invariant, so it does not break the agreement.
 
 * Local tone deltas compose *after* the global curve rather than being folded
   into one curve, so global and local sliders are not additive (see above).
-* One clarity variant per frame: opposite-sign clarity is dropped (a smoothing
-  brush under a boosting global slider leaves the skin merely *excluded* from
-  the global clarity rather than softened — audit `clarity-local` #5). The
-  amount-map approximation that used to come with the single-variant model is
-  gone: it is exact now, and bit-exact outside a mask.
-* Negative clarity is still the mirror of the positive remap — detail
-  attenuation, not Lightroom's glow/bloom with its midtone lift (audit #4) — and
-  there is no non-edge-aware halo component, so high positive clarity gains
+* There is no negative clarity at all: the global slider is 0…100 and the
+  smoothing operator has been deleted (audit `clarity-local` #4 and #5 are
+  *removed*, not deferred — see `DEVIATIONS.md`). A mask with a negative delta
+  excludes its region from the global clarity; it cannot soften it.
+* There is no non-edge-aware halo component, so high positive clarity gains
   micro-texture but never the broad edge gradients LR gives (audit #3).
 * Clarity's band weighting is defined on *pyramid* levels, so "pixel scale"
   means pixel scale of the rendition being computed: a 1024 px preview and a

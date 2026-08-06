@@ -22,7 +22,7 @@
 
 struct ClarityUniforms {
     float sigmaR;          // detail-lift window width, in log2 stops
-    float lift;            // gain * (1/alpha - 1); >0 boosts detail, <0 smooths
+    float lift;            // gain * (1/alpha - 1) >= 0; boosts detail, 0 is identity
     float gamma0;          // g_0, in log2(Y)
     float gammaStep;       // (g_{K-1} - g_0) / (K - 1)
     float center;          // g_k for this pass

@@ -552,31 +552,153 @@ final class MaskTests: XCTestCase {
                        "\(differing) pixels outside the mask changed when the mask was added")
     }
 
-    /// The documented conflict rule: with signs in conflict, only the dominant
-    /// variant is rendered and the other side is clamped to zero amount.
-    func testClarityVariantPicksTheDominantSign() {
+    /// Flat middle gray with a period-16 multiplicative ripple — the texture the
+    /// clarity tests use, in the band clarity actually lifts.
+    private static func rippleTexture(_ ctx: MetalContext,
+                                      width: Int, height: Int) throws -> MTLTexture {
+        try ctx.makeTexture(width: width, height: height) { (x: Int, y: Int) in
+            let w0: Double = 2 * Double.pi / 16
+            let sx: Double = sin(Double(x) * w0)
+            let sy: Double = sin(Double(y) * w0)
+            let v = Float(0.18 * (1 + 0.06 * (sx + sy)))
+            return (v, v, v)
+        }
+    }
+
+    /// The effective per-pixel clarity is `clamp(global + Σ Δ, 0, 100)`: local
+    /// deltas keep their full ±100 range, the *result* is positive-only. There
+    /// is only one local-Laplacian variant now, so the range exists only to say
+    /// whether any pixel wants clarity at all.
+    func testClarityRangeIsClampedToThePositiveHalf() {
         let boost = Mask(adjustments: MaskAdjustments(clarity: 40),
                          strokes: [Stroke(brush: BrushParams(), polyline: [(0.5, 0.5)])])
-        let smooth = Mask(adjustments: MaskAdjustments(clarity: -90),
+        let reduce = Mask(adjustments: MaskAdjustments(clarity: -90),
                           strokes: [Stroke(brush: BrushParams(), polyline: [(0.5, 0.5)])])
 
         // Global only.
-        XCTAssertEqual(MaskRasterizer.clarityVariant(global: 30, masks: []).clarity, 30)
-        // Global + same sign: the extreme is the sum.
-        XCTAssertEqual(MaskRasterizer.clarityVariant(global: 30, masks: [boost]).clarity, 70)
-        // Conflicting signs: -90 + 0 = -90 wins over 0 + 40 = 40.
-        let conflicted = MaskRasterizer.clarityVariant(global: 0, masks: [boost, smooth])
-        XCTAssertEqual(conflicted.clarity, -90)
-        XCTAssertEqual(conflicted.sign, -1)
-        let range = MaskRasterizer.clarityRange(global: 0, masks: [boost, smooth])
-        XCTAssertEqual(range.lo, -90)
-        XCTAssertEqual(range.hi, 40)
-        // Ranges saturate at ±100.
+        XCTAssertEqual(MaskRasterizer.clarityRange(global: 30, masks: []).hi, 30)
+        // Global + a boosting mask: the maximum is the sum.
+        XCTAssertEqual(MaskRasterizer.clarityRange(global: 30, masks: [boost]).hi, 70)
+        // A reducing mask lowers the floor but never past 0…
+        let mixed = MaskRasterizer.clarityRange(global: 30, masks: [boost, reduce])
+        XCTAssertEqual(mixed.lo, 0)
+        XCTAssertEqual(mixed.hi, 70)
+        // …and with nothing but reduction there is no clarity anywhere, which is
+        // what lets `Pipeline` skip the stage.
+        XCTAssertEqual(MaskRasterizer.clarityRange(global: 0, masks: [reduce]).hi, 0)
+        // Negative globals clamp on the way in.
+        XCTAssertEqual(MaskRasterizer.clarityRange(global: -60, masks: [boost]).hi, 40)
+        // Ranges saturate at 100.
         XCTAssertEqual(MaskRasterizer.clarityRange(global: 80, masks: [boost]).hi, 100)
         // Disabled masks do not count.
         var off = boost
         off.enabled = false
-        XCTAssertEqual(MaskRasterizer.clarityVariant(global: 10, masks: [off]).clarity, 10)
+        XCTAssertEqual(MaskRasterizer.clarityRange(global: 10, masks: [off]).hi, 10)
+    }
+
+    /// A mask that pulls the effective clarity below zero is the identity there
+    /// — not a smoothing pass, and not a partial one. The rest of the frame
+    /// keeps the global clarity.
+    ///
+    /// `amount = clamp(25 − 60, 0, 100)/100 = 0`, and `mix(L, L', 0)` is exactly
+    /// `L`, so the assertion is bit equality against a clarity-0 render.
+    ///
+    /// Global 25 rather than a rounder-looking number on purpose: 25/100 = 0.25
+    /// is exact in the `r16Float` amount map, so the *outside* half of the
+    /// assertion (bit equality with the unmasked render) is not measuring the
+    /// one-ulp difference between the CPU's round-to-nearest `Float16` and the
+    /// GPU's round-toward-zero texture write. See `README.md`.
+    func testAMaskBelowZeroClarityIsTheIdentityThere() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        let w = 256, h = 256
+        let input = try MaskTests.rippleTexture(ctx, width: w, height: h)
+        // A hard-edged vertical band covering the left third at coverage 1.
+        let mask = Mask(name: "no clarity here",
+                        adjustments: MaskAdjustments(clarity: -60),
+                        strokes: [Stroke(brush: BrushParams(size: 0.5, feather: 0,
+                                                            flow: 100, density: 100),
+                                         polyline: [(-0.1, -0.2), (-0.1, 1.2)])])
+        var global = EditState()
+        global.clarity = 25
+        var masked = global
+        masked.masks = [mask]
+        var off = global
+        off.clarity = 0
+
+        let plain = try TextureReadback.read(pipe.render(input: input, edit: global,
+                                                         upTo: .clarity).texture)
+        let out = try TextureReadback.read(pipe.render(input: input, edit: masked,
+                                                       upTo: .clarity).texture)
+        let identity = try TextureReadback.read(pipe.render(input: input, edit: off,
+                                                            upTo: .clarity).texture)
+
+        // The band reaches x = 38 (centre −25.6 px, radius 64 px), so 8..<32 is
+        // solidly inside it and 160..< is far outside.
+        let coverage = try pipe.maskCoverage(masks: masked.masks, width: w, height: h)
+        XCTAssertEqual(Double(coverage[128 * w + 24]), 1, accuracy: 1e-6)
+        XCTAssertEqual(Double(coverage[128 * w + 200]), 0, accuracy: 1e-6)
+
+        // Inside the mask: bit-identical to clarity 0.
+        for y in 0..<h {
+            for x in 8..<32 {
+                let i = (y * w + x) * 4
+                XCTAssertEqual(out.pixels[i], identity.pixels[i], "inside at (\(x), \(y))")
+            }
+        }
+        // Outside it: bit-identical to the unmasked clarity-25 render, and
+        // actually different from the identity (the mask did not switch clarity
+        // off globally).
+        var moved = false
+        for y in 0..<h {
+            for x in 160..<w {
+                let i = (y * w + x) * 4
+                XCTAssertEqual(out.pixels[i], plain.pixels[i], "outside at (\(x), \(y))")
+                if out.pixels[i] != identity.pixels[i] { moved = true }
+            }
+        }
+        XCTAssertTrue(moved, "clarity 25 must still apply outside the mask")
+    }
+
+    /// Global 30 with a −20 mask is clarity 10 inside the mask. Wave 3 made the
+    /// lift linear in the slider and the pyramid is built at a fixed full-scale
+    /// reference, so `amount·(L_llf(100) − L)` *is* `L_llf(10) − L` — the
+    /// composed value has to match a direct clarity-10 render, not merely
+    /// resemble it.
+    func testMaskDeltaGivesTheComposedEffectiveClarity() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        let w = 256, h = 256
+        let input = try MaskTests.rippleTexture(ctx, width: w, height: h)
+        let mask = Mask(name: "less clarity",
+                        adjustments: MaskAdjustments(clarity: -20),
+                        strokes: [Stroke(brush: BrushParams(size: 0.5, feather: 0,
+                                                            flow: 100, density: 100),
+                                         polyline: [(-0.1, -0.2), (-0.1, 1.2)])])
+        var composed = EditState()
+        composed.clarity = 30
+        composed.masks = [mask]
+        var direct = EditState()
+        direct.clarity = 10
+
+        let a = try TextureReadback.read(pipe.render(input: input, edit: composed,
+                                                     upTo: .clarity).texture)
+        let b = try TextureReadback.read(pipe.render(input: input, edit: direct,
+                                                     upTo: .clarity).texture)
+        var worst: Double = 0
+        var differing = 0
+        for y in 0..<h {
+            for x in 8..<32 {
+                let i = (y * w + x) * 4
+                let p = Double(a.pixels[i])
+                let q = Double(b.pixels[i])
+                if a.pixels[i] != b.pixels[i] { differing += 1 }
+                let relative: Double = abs(p - q) / Swift.max(q, 1e-6)
+                worst = Swift.max(worst, relative)
+            }
+        }
+        print("[clarity compose] global 30 + mask -20 vs clarity 10: "
+              + "\(differing) differing samples, max relative delta \(worst)")
+        XCTAssertLessThan(worst, 1e-3,
+                          "composed clarity should reproduce the direct render (\(worst))")
     }
 
     // MARK: - Gating

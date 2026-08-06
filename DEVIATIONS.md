@@ -44,8 +44,8 @@ decision, not a backlog: the rationale is the point of the column.
 | 1 | No midtone targeting | done, wave 3 (Gaussian tone weight, σ = 3 EV, floor 0.2) | — | high / S |
 | 2 | Lifts the pixel-scale band, so it amplifies noise | done, wave 3 (`levelGains = 0, 0.4, 1…`) | — | medium / S |
 | 3 | No halos at high settings — LR's Clarity has them | deferred | needs a deliberately non-edge-aware component blended in; the halo-free design is a stated goal and this trades it away, so it wants a look decision, not a constant | medium / M |
-| 4 | Negative clarity is detail flattening, not glow/bloom | deferred | needs a separate operator for the negative branch (screen-blended blur + midtone lift), not a retune; sizeable and independent of wave 3's changes | high / M |
-| 5 | Opposite-sign local clarity is dropped, not applied | deferred | needs a second local-Laplacian pass and a 4-input apply kernel — doubles the cost of the most expensive stage for a rare case. Note the linearised response makes this cheap to add later: the filter is affine in `lift`, so one unit-lift pyramid could serve both signs | high / M |
+| 4 | Negative clarity is detail flattening, not glow/bloom | **removed** — negative clarity dropped by user decision | not a parity gap any more: the global slider is 0…100 and the smoothing operator is deleted, so there is no negative branch to make into a glow | high / M |
+| 5 | Opposite-sign local clarity is dropped, not applied | **removed** — negative clarity dropped by user decision | with one sign there is only one variant, so nothing is dropped: a mask delta may still *reduce* clarity, and the effective amount is `clamp(global + Σ Δ, 0, 100)/100`, exact at every pixel | high / M |
 | 6 | A local clarity mask changes the rendering *outside* it | done, wave 3 (amount normalised against a fixed full-scale reference; now bit-exact outside the mask) | — | medium / S |
 | 7 | Brush Flow does not build up across strokes | done, wave 3 (max within a stroke, over-composite across them) | — | high / S |
 | 8 | Density is a per-stroke ceiling, not an absolute one | done, wave 3 (`m ← min(m + s(1−m), max(m, density))`) | — | medium / S |
@@ -78,8 +78,17 @@ decision, not a backlog: the rationale is the point of the column.
 | | tone | bwmix/toning | clarity/local | decode/output | total |
 |---|---|---|---|---|---|
 | implemented | 5 | 4 | 6 | 5 | **20** |
-| deferred | 4 | 4 | 7 | 9 | **24** |
+| deferred | 4 | 4 | 5 | 9 | **22** |
+| removed | 0 | 0 | 2 | 0 | **2** |
 
-Of the 16 items the audits rated *high* severity, 13 are implemented. The three
-open ones are clarity-local #4 (negative clarity is not a glow), #5 (opposite-sign
-local clarity is dropped) and decode-output #2 (no in-image clipping overlay).
+Of the 16 items the audits rated *high* severity, 13 are implemented, two
+(clarity-local #4 and #5) were removed with negative clarity, and the one still
+open is decode-output #2 (no in-image clipping overlay).
+
+"Removed" is not "done": the behaviour the auditor measured no longer exists,
+because the feature it belonged to was taken out. Negative clarity was never
+used and its operator was a mirror of the positive one rather than Lightroom's
+glow, so the sign was dropped from the global slider (0…100 now), from the
+mapping, from the shader and from the mask contract. Per-mask clarity deltas are
+still ±100 — reducing clarity locally is useful — but they compose as
+`clamp(global + Σ Δ, 0, 100)`.

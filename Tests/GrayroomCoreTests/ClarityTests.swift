@@ -31,38 +31,30 @@ final class ClarityTests: XCTestCase {
         var previousGain = -1.0
         for c in stride(from: 0.0, through: 100.0, by: 5) {
             let p = ClarityMapping.parameters(for: c)
-            let n = ClarityMapping.parameters(for: -c)
-            // Symmetric structure: the same gain and amount on both sides, the
-            // sign only picks which side of 1 alpha sits on.
-            XCTAssertEqual(p.gain, n.gain)
-            XCTAssertEqual(p.amount, n.amount)
-            XCTAssertFalse(p.isSmoothing)
-            XCTAssertEqual(n.isSmoothing, c > 0)
-
             XCTAssertGreaterThan(p.gain, previousGain)
             // Wave 3: alpha is pinned at its endpoint value and `gain` does all
-            // the interpolating, which is what makes `lift` linear. (At c = 0
-            // both signs take the boost branch, and `gain = 0` makes the choice
-            // moot — the remap is the identity either way.)
+            // the interpolating, which is what makes `lift` linear.
             XCTAssertEqual(p.alpha, 1 - ClarityMapping.alphaBoostRange, accuracy: 1e-12)
-            if c > 0 {
-                XCTAssertEqual(n.alpha, 1 + ClarityMapping.alphaSmoothRange, accuracy: 1e-12)
-            }
             previousGain = p.gain
         }
         XCTAssertEqual(ClarityMapping.parameters(for: 100).gain, 1)
         XCTAssertEqual(ClarityMapping.parameters(for: 100).amount, 1)
-        // Monotone in |clarity| all the way through to the remap's detail slope.
+        // Monotone in clarity all the way through to the remap's detail slope.
         var previousSlope = 1.0
         for c in stride(from: 5.0, through: 100.0, by: 5) {
             let s = ClarityMapping.parameters(for: c).detailSlope
             XCTAssertGreaterThan(s, previousSlope)
             previousSlope = s
-            XCTAssertLessThan(ClarityMapping.parameters(for: -c).detailSlope, 1)
         }
-        // Out-of-range sliders clamp rather than extrapolate.
+        // Out-of-range sliders clamp rather than extrapolate. Clarity is
+        // positive-only, so everything below 0 is the identity — there is no
+        // smoothing operator to reach.
         XCTAssertEqual(ClarityMapping.parameters(for: 250), ClarityMapping.parameters(for: 100))
-        XCTAssertEqual(ClarityMapping.parameters(for: -250), ClarityMapping.parameters(for: -100))
+        for c in [-1.0, -50, -100, -250] {
+            XCTAssertEqual(ClarityMapping.parameters(for: c), ClarityMapping.parameters(for: 0),
+                           "clarity \(c) must clamp to the identity")
+            XCTAssertTrue(ClarityMapping.parameters(for: c).isIdentity)
+        }
     }
 
     /// The whole slider does work, not just its top third (audit
@@ -75,23 +67,15 @@ final class ClarityTests: XCTestCase {
             XCTAssertEqual(ClarityMapping.parameters(for: c).detailSlope, slope, accuracy: 1e-12,
                            "clarity +\(c)")
         }
-        let negative: [Double: Double] = [10: 0.9333333333333333, 25: 0.8333333333333334,
-                                          50: 0.6666666666666667, 100: 1.0 / 3.0]
-        for (c, slope) in negative {
-            XCTAssertEqual(ClarityMapping.parameters(for: -c).detailSlope, slope, accuracy: 1e-12,
-                           "clarity -\(c)")
-        }
-        // Exactly linear: lift(c) = c/100 · lift(100) on both sides.
-        for c in stride(from: -100.0, through: 100.0, by: 2.5) {
-            let reference = ClarityMapping.referenceLift(sign: c < 0 ? -1 : 1)
+        // Exactly linear: lift(c) = c/100 · lift(100).
+        for c in stride(from: 0.0, through: 100.0, by: 2.5) {
             XCTAssertEqual(ClarityMapping.parameters(for: c).lift,
-                           abs(c) / 100 * reference, accuracy: 1e-12)
+                           c / 100 * ClarityMapping.referenceLift, accuracy: 1e-12)
         }
-        // …which is exactly what makes the mask amount map (|c|/100 against a
+        // …which is exactly what makes the mask amount map (c/100 against a
         // fixed full-scale pyramid) reproduce each pixel's own strength.
-        XCTAssertEqual(ClarityMapping.referenceLift(sign: 1), 1.5, accuracy: 1e-12)
-        XCTAssertEqual(ClarityMapping.referenceLift(sign: -1), -2.0 / 3.0, accuracy: 1e-12)
-        XCTAssertLessThan(abs(ClarityMapping.referenceLift(sign: 1)), ClarityMapping.maxLift)
+        XCTAssertEqual(ClarityMapping.referenceLift, 1.5, accuracy: 1e-12)
+        XCTAssertLessThan(ClarityMapping.referenceLift, ClarityMapping.maxLift)
         // Still exactly the identity at 0, which is the invariant everything
         // else rests on.
         XCTAssertEqual(ClarityMapping.parameters(for: 0).lift, 0)
@@ -100,7 +84,7 @@ final class ClarityTests: XCTestCase {
 
     func testClarityRemapIsMonotoneOddAndFadesOut() {
         let sigma = ClarityMapping.sigmaR
-        for clarity in [-100.0, -60, -20, 20, 60, 100] {
+        for clarity in [20.0, 60, 100] {
             let p = ClarityMapping.parameters(for: clarity)
             XCTAssertLessThan(abs(p.lift), ClarityMapping.maxLift)
 
@@ -124,11 +108,7 @@ final class ClarityTests: XCTestCase {
             // Fine-detail slope: 1/alpha, scaled by gain.
             XCTAssertEqual(p.detailSlope, 1 + p.gain * (1 / p.alpha - 1), accuracy: 1e-12)
             XCTAssertEqual(ClarityMapping.remapSlope(g, center: g, p), p.detailSlope, accuracy: 1e-12)
-            if clarity > 0 {
-                XCTAssertGreaterThan(p.detailSlope, 1)
-            } else {
-                XCTAssertLessThan(p.detailSlope, 1)
-            }
+            XCTAssertGreaterThan(p.detailSlope, 1)
         }
     }
 
@@ -136,7 +116,7 @@ final class ClarityTests: XCTestCase {
     /// so `gain(t)` has to stay flat across the grid or clarity strength would
     /// swing with tone. This is what pins K.
     func testEffectiveDetailGainIsFlatAcrossTheGammaGrid() {
-        for clarity in [30.0, 80, 100, -80, -100] {
+        for clarity in [30.0, 80, 100] {
             let p = ClarityMapping.parameters(for: clarity)
             // Deviation from 1 = the strength of the effect; it must keep its
             // sign and stay within 20% of the ideal across the whole grid.
@@ -426,30 +406,46 @@ final class ClarityTests: XCTestCase {
         XCTAssertGreaterThan(highlight, 1.05)
     }
 
-    // MARK: - GPU: negative clarity
+    // MARK: - GPU: negative clarity is gone
 
-    func testNegativeClaritySmoothsTextureAndKeepsTheStep() throws {
-        let before = logLuminance(try runClarity(0))
-        let after = logLuminance(try runClarity(-80))
-        let w = 256
+    /// Clarity is positive-only. A negative value — from an old sidecar, from
+    /// `--set clarity=-50`, from anywhere — renders exactly like clarity 0, and
+    /// "exactly" means bit-identical: the negative operator does not exist, so
+    /// there is nothing to run at reduced strength.
+    func testNegativeGlobalClarityRendersAsZero() throws {
+        let zero = try runClarity(0)
+        for c in [-1.0, -50, -80, -100, -250] {
+            let negative = try runClarity(c)
+            var differing = 0
+            for i in 0..<zero.pixels.count where zero.pixels[i] != negative.pixels[i] {
+                differing += 1
+            }
+            XCTAssertEqual(differing, 0,
+                           "clarity \(c) differs from clarity 0 in \(differing) samples")
+        }
+    }
 
-        let farBefore = stats(before, width: w, farXs, farYs)
-        let farAfter = stats(after, width: w, farXs, farYs)
-        print("[clarity -80] texture RMS \(farBefore.std) -> \(farAfter.std) "
-              + "(x\(farAfter.std / farBefore.std))")
-        XCTAssertLessThan(farAfter.std, farBefore.std * 0.8,
-                          "clarity -80 should smooth the texture")
+    /// The sidecar path is lenient rather than strict: an old sidecar holding a
+    /// negative clarity decodes to 0 and renders identically to one that says 0.
+    func testOldSidecarWithNegativeClarityClampsToZero() throws {
+        let old = Data(#"{"version": 1, "clarity": -80, "tone": {"contrast": 20}}"#.utf8)
+        let decoded = try EditState.decode(from: old)
+        XCTAssertEqual(decoded.clarity, 0)
+        XCTAssertEqual(decoded.tone.contrast, 20, "the rest of the sidecar must survive")
+        // Over-range positive values clamp too.
+        XCTAssertEqual(try EditState.decode(from: Data(#"{"clarity": 250}"#.utf8)).clarity, 100)
 
-        // The step itself survives: the plateau means either side stay put and
-        // their difference is still (close to) the 4 stops we put in.
-        let leftBefore = stats(before, width: w, farXs, farYs)
-        let leftAfter = stats(after, width: w, farXs, farYs)
-        let rightBefore = stats(before, width: w, 168..<216, farYs)
-        let rightAfter = stats(after, width: w, 168..<216, farYs)
-        XCTAssertEqual(leftAfter.mean, leftBefore.mean, accuracy: 0.03)
-        XCTAssertEqual(rightAfter.mean, rightBefore.mean, accuracy: 0.03)
-        XCTAssertEqual(rightAfter.mean - leftAfter.mean,
-                       rightBefore.mean - leftBefore.mean, accuracy: 0.05)
+        let (ctx, pipe) = try TestGPU.require()
+        let input = try ctx.makeTexture(width: 256, height: 256, syntheticPixel)
+        var zero = decoded
+        zero.clarity = 0
+        let a = try TextureReadback.read(
+            pipe.render(input: input, edit: decoded, upTo: .clarity).texture)
+        let b = try TextureReadback.read(
+            pipe.render(input: input, edit: zero, upTo: .clarity).texture)
+        for i in 0..<a.pixels.count {
+            XCTAssertEqual(a.pixels[i], b.pixels[i], "at sample \(i)")
+        }
     }
 
     // MARK: - GPU: gradient sanity
