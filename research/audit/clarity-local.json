@@ -1,0 +1,179 @@
+{
+  "deviations": [
+    {
+      "aspect": "Clarity slider response curve (strength per slider unit)",
+      "lightroom_behavior": "Clarity is usable across its whole range: +10 to +25 is the normal working range recommended by Adobe and every tutorial, and the change from 0 to +25 is plainly visible. Adobe's own instruction (\"increase the setting until you see halos near the edge details, then reduce slightly\") only makes sense if small/medium values already do visible work. Negative clarity for portraits is likewise used at -10..-45.",
+      "our_behavior": "The detail gain is `1 + gain\u00b7(1/alpha \u2212 1)` with `gain = |c|/100`, `alpha = 1 \u2212 0.6\u00b7gain` (ClarityMapping.swift:119-124, :54-55, :95). That is strongly convex, so the first half of the slider is nearly dead: local-contrast slope is 1.002 at +5, 1.006 at +10, 1.044 at +25, 1.214 at +50, 1.614 at +75, 2.500 at +100 (and 0.983 / 0.917 / 0.750 / 0.333 on the negative side). Clarity +10 changes local contrast by 0.6% \u2014 invisible; the entire perceptual range is squeezed into roughly +60..+100. The README's own measurement (README.md:311-314) needed clarity +80 to get a 1.65x texture gain.",
+      "severity": "high",
+      "effort": "S",
+      "proposed_fix": "Make the effective lift roughly linear in the slider instead of the product of two ramps: e.g. `lift = kBoost \u00b7 a` with kBoost \u2248 1.5 (and `lift = \u2212kSmooth \u00b7 a` with kSmooth \u2248 0.67) in `ClarityMapping.Parameters.lift`, or equivalently `gain = a^0.4`. One expression in ClarityMapping.swift:95/119-124; `lift = 0` at c = 0 stays exact, monotonicity bound `|lift| < 2.24` still holds, and no shader change is needed. Then re-anchor \u00b1100 to \"clearly too much\" as in LR.",
+      "confidence": "inferred",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "https://digital-photography-school.com/four-ways-improve-photos-clarity-slider-lightroom/",
+        "https://photosolutions.co/posts/the-lightroom-only-orton-effect-that-actually-works-a-step-by-step-breakdown/"
+      ]
+    },
+    {
+      "aspect": "Clarity tonal weighting (midtone targeting)",
+      "lightroom_behavior": "Clarity is a midtone-targeted local contrast control. Adobe and all secondary sources describe it as adding contrast/depth to the midtones; highlights and deep shadows are protected, which is why heavy clarity does not blow highlights or crush blacks the way a global contrast push does, and why it \"will not add grain to the highlight or shadow areas.\"",
+      "our_behavior": "The lift is applied uniformly over the whole working range: the gamma grid spans \u22128..+3 EV with equal `lift` at every level (ClarityStage.swift:101-136, Clarity.metal:53-57), and the apply kernel scales by `amount` only, with no dependence on the pixel's tone (Clarity.metal:199-216). The only tonal shaping is the hard fade outside \u22128..+3 EV via weight clamping (ClarityMapping.swift:48-49, :183-186), which affects deep clipping levels, not midtone weighting. Bright textures near white and detail in deep shadows therefore get the same boost as midtones, and a positive clarity can push near-white detail over the clip point.",
+      "severity": "high",
+      "effort": "S",
+      "proposed_fix": "Multiply the per-pixel amount by a tone weight in `clarityApplyKernel`: `a *= w(l0)` with e.g. `w(x) = exp(\u2212((x \u2212 log2(0.18))/\u03c3_t)\u00b2/2)`, \u03c3_t \u2248 2.5-3 EV, clamped to a floor of ~0.2 so extremes are attenuated rather than switched off. Two lines in Clarity.metal:207-215 plus one uniform and a CPU mirror in ClarityMapping for tests. Free (no extra passes) and works identically for the masked case.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "https://digital-photography-school.com/lightrooms-clarity-slider-what-does-it-do/",
+        "https://www.lifepixel.com/photo-tutorials/use-clarity-slider-adobe-lightroom-classic-cc",
+        "https://petapixel.com/2021/01/05/understanding-the-differences-between-clarity-texture-and-dehaze/"
+      ]
+    },
+    {
+      "aspect": "Clarity spatial frequency band (fine detail / noise amplification)",
+      "lightroom_behavior": "Clarity is the mid/large-radius local-contrast control \u2014 \"thicker edges\", a larger radius than Texture. Texture is the mid-frequency control and was explicitly engineered to spare the finest high-frequency content so it does not amplify noise; Clarity sits coarser still. Neither is a sharpening/noise amplifier at pixel scale.",
+      "our_behavior": "The fast local Laplacian lifts every Laplacian level with the same slope, including level 0 (Clarity.metal:167-180 accumulates `w_k \u00b7 lap` at every level with no per-level weighting; ClarityStage.swift:125-135 loops `l in 0..<levels-1`). Level 0 is pixel-scale detail, i.e. sensor noise: at clarity +100 grain is multiplied by 2.5x exactly like real texture. The README already flags this (README.md:517-519) as a noise issue, but it is also a band mismatch \u2014 our clarity behaves like Clarity+Texture+a bit of sharpening in one slider.",
+      "severity": "medium",
+      "effort": "S",
+      "proposed_fix": "Add a per-level scale weight to the lift: pass `levelGain[l]` in `ClarityUniforms` and scale `u.lift` by it inside `grClarityRemap`/the accumulate pass, with e.g. gain 0 at level 0, ~0.4 at level 1 and 1.0 from level 2 up. Structurally this is one extra uniform in Clarity.metal + one array in ClarityStage.swift:101-136; it also makes room for a future Texture slider that uses the complementary weights.",
+      "confidence": "documented",
+      "sources": [
+        "https://theblog.adobe.com/from-the-acr-team-introducing-the-texture-control/",
+        "https://petapixel.com/2019/05/14/adobe-adds-texture-control-slider-to-lightroom-and-camera-raw/",
+        "https://photoshopcafe.com/texture-clarity-and-dehaze-in-lightroom-acr-explained-the-ultimate-comparision/"
+      ]
+    },
+    {
+      "aspect": "Clarity edge behaviour / halos at high settings",
+      "lightroom_behavior": "LR's Clarity produces visible halos at high settings \u2014 Adobe's own help text tells you to push it until halos appear and then back off. Much of the \"clarity look\" in B&W (broad tonal gradients hugging strong edges, the HiRaLoAm look) comes precisely from that large-radius, non-edge-aware component.",
+      "our_behavior": "The Gaussian-windowed remap is deliberately halo-free: detail more than ~3 stops from the local mean passes through untouched (Clarity.metal:47-57, ClarityMapping.swift:147-150). Measured in README.md:311-314: 4 px from a 4-stop edge the flat region moves 0.0006 stops, versus 0.042 stops for an equivalent USM \u2014 65x less. At high clarity our image gains micro-texture but never the broad edge gradients LR gives, so it reads as flatter/less dramatic on high-contrast B&W subjects.",
+      "severity": "medium",
+      "effort": "M",
+      "proposed_fix": "Blend a small, deliberately non-edge-aware component into the boost: `L_out = L + lift\u00b7(detail_LLF) + haloAmount\u00b7(L \u2212 blur_\u03c3(L))` with \u03c3 \u2248 1-2% of the long edge and `haloAmount` a fraction of the clarity slider (0 at 0, ~0.15-0.25 at +100). One extra Gaussian (the existing pyramid can supply it: `L \u2212 upsample(G[3])`) plus one term in `clarityApplyKernel`. Keep it out of the negative side.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "https://community.adobe.com/t5/photoshop/what-exactly-is-clarity/td-p/8957968"
+      ]
+    },
+    {
+      "aspect": "Negative clarity character (glow vs. detail flattening)",
+      "lightroom_behavior": "Negative Clarity is a glow/bloom: light bleeds across edges, midtones lift slightly (\"blurs out fine contrast in the midtones while adding white to the midtones\"), and the result is the dreamy soft-focus/Orton look used for portraits at -10..-45. Edges stay defined but are surrounded by a halo of spilled light.",
+      "our_behavior": "Negative clarity is the exact mirror of the positive case: the same Gaussian-windowed remap with a negative lift (ClarityMapping.swift:122, Clarity.metal:53-57), which *compresses* detail toward the local mean while explicitly leaving large edges alone and preserving the local mean. So there is no light spill across edges and no midtone lift \u2014 it reads as waxy/plastic detail removal, not glow. At -100 the detail slope is only 0.333 (and -25 gives 0.917, i.e. almost nothing; see the response-curve entry).",
+      "severity": "high",
+      "effort": "M",
+      "proposed_fix": "Give the negative side its own operator instead of reusing the mirrored remap: for c < 0 compute `L_glow = max(L, blur_\u03c3(L))` (or a screen blend of L with a Gaussian-blurred L, \u03c3 \u2248 1% of long edge) and set `L_out = mix(L, L_glow, k\u00b7|c|/100)` combined with a mild detail attenuation. That is one extra blur (the Gaussian pyramid is already built) and a separate branch in `clarityApplyKernel`; it also gives the midtone lift LR has. Keeps the positive path untouched.",
+      "confidence": "community-measured",
+      "sources": [
+        "https://photosolutions.co/posts/the-lightroom-only-orton-effect-that-actually-works-a-step-by-step-breakdown/",
+        "https://photographylife.com/orton-effect-in-lightroom",
+        "https://parkerphotographic.com/how-to-use-lightroom-clarity/"
+      ]
+    },
+    {
+      "aspect": "Local clarity with opposite sign to the global slider (negative-clarity skin brush under positive global clarity)",
+      "lightroom_behavior": "Each mask's Clarity is independent of the global Clarity and of every other mask. Global Clarity +30 with a -60 Clarity brush on skin is a canonical portrait recipe and produces genuinely softened skin while the rest of the frame keeps its local contrast.",
+      "our_behavior": "Only one local-Laplacian variant is rendered per frame, of the dominant sign, and pixels whose accumulated clarity has the opposite sign are clamped to amount 0 (MaskRasterizer.swift:246-250, Mask.metal:145-154, Pipeline.swift:100-120). With global +30 and a -60 mask, the range is [-30, +30], the tie goes to the positive variant, and the masked pixels get amount 0: the skin is merely *excluded* from the global clarity, never softened. The behaviour is documented as deliberate (README.md:340-347) but it silently drops a slider the user moved.",
+      "severity": "high",
+      "effort": "M",
+      "proposed_fix": "Run the stage twice when `clarityRange` straddles zero: compute `L_boost` and `L_smooth`, build two amount maps (positive and negative side) and apply `L_out = L + a_pos\u00b7(L_boost \u2212 L) + a_neg\u00b7(L_smooth \u2212 L)`. `ClarityStage.encode` already takes an amount texture, so this is a second `encode` into a scratch texture plus a 4-input apply kernel. Cheaper alternative if the cost is unacceptable: only run the second pass when the minority-sign magnitude exceeds a threshold (e.g. 10), and warn otherwise.",
+      "confidence": "inferred",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/masking.html"
+      ]
+    },
+    {
+      "aspect": "Local clarity masks change the clarity rendering outside the mask",
+      "lightroom_behavior": "A local Clarity adjustment affects only the masked pixels. Adding a +20 Clarity mask never changes how the global Clarity renders elsewhere in the frame.",
+      "our_behavior": "`L_llf` is computed once at the frame's maximum |clarity| and blended linearly: `amount(x) = clamp(sign\u00b7c(x), 0, |c_max|)/|c_max|` (Mask.metal:145-154, MaskRasterizer.swift:225-233). Because the strength mapping is strongly nonlinear, a linear blend of a strong variant is not the weak variant. Concretely: global 25 with a +20 mask gives c_max = 45 and amount 25/45 outside the mask, which yields an effective detail slope of 1.093 \u2014 the same as clarity \u224835, not 25. Worse with disjoint masks: `clarityRange` sums *all* positive deltas regardless of overlap (MaskRasterizer.swift:225-233), so two disjoint +50 masks give c_max = 100 and each mask region renders at slope 1.75 instead of 1.214. The README measures only a 0.1% luminance shift (README.md:348-353) because its test image has low detail amplitude; in slider terms the error is 40%+.",
+      "severity": "medium",
+      "effort": "S",
+      "proposed_fix": "Make the amount map compensate for the nonlinearity instead of being linear in the slider: `amount(x) = lift(c(x)) / lift(c_max)` where `lift` is `ClarityMapping.Parameters.lift`. In the linearised regime this reproduces each pixel's own strength exactly. It is ~5 lines in `maskClarityAmountKernel` (Mask.metal:145-154) plus passing `lift(c_max)` as a uniform, and it subsumes the disjoint-mask over-estimate. (If the response curve is linearised per the first entry, this reduces to the current code \u2014 do that one first.)",
+      "confidence": "inferred",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/masking.html"
+      ]
+    },
+    {
+      "aspect": "Brush Flow \u2014 build-up across strokes",
+      "lightroom_behavior": "Flow is the rate of application and is cumulative *across* strokes: \"keep brushing and more is applied\"; with a low Flow \"it will take longer and require more passes\", and the adjustment \"does eventually reach its full strength\" (bounded by Density). This is the core dodge-and-burn mechanic \u2014 repeated light passes let you sculpt coverage.",
+      "our_behavior": "Each stroke is rasterised into its own buffer, clamped at density, then merged with `max(mask, stroke)` (MaskRasterizer.swift:132-166, Mask.metal:83-88). Over-compositing happens only *within* one stroke. Repainting the same area with the same brush therefore adds nothing: `max(x, x) = x`. Ten passes at flow 20 give exactly what one pass gives. Additionally the within-stroke build-up makes a *single* pass far stronger than LR's: with spacing 0.15\u00b7diameter, ~7 stamps overlap on the centreline, so one straight stroke at flow 20 / feather 50 already reaches 0.67 coverage (flow 10 \u2192 0.41, flow 50 \u2192 0.97). Flow is effectively a compressed one-shot opacity control rather than a rate.",
+      "severity": "high",
+      "effort": "S",
+      "proposed_fix": "Swap the two composite rules (the standard non-incremental paint model): within a stroke use `acc = max(acc, alpha)` (Mask.metal:83, MaskRasterizer.swift:151) so one pass deposits ~flow; across strokes over-composite toward the density cap, `m = min(m + acc\u00b7(1 \u2212 m), max(m, density))` for a paint stroke (Mask.metal:88, MaskRasterizer.swift:156-165). Erase keeps `m\u00b7(1 \u2212 acc)`. Same number of dispatches, no format changes; the existing GPU-vs-CPU parity test covers both sides.",
+      "confidence": "documented",
+      "sources": [
+        "https://fstoptraining.com/difference-between-flow-density/",
+        "https://asktimgrey.com/2025/06/20/density-versus-flow/",
+        "https://www.slrlounge.com/the-difference-between-brush-flow-and-brush-density-in-lightroom-4/",
+        "https://helpx.adobe.com/lightroom-classic/help/masking.html"
+      ]
+    },
+    {
+      "aspect": "Brush Density as an absolute ceiling",
+      "lightroom_behavior": "Density caps the maximum opacity that brushing can ever reach in an area, \"no matter how many times you stroke it\" \u2014 including across separate strokes and across the whole build-up sequence.",
+      "our_behavior": "Density is clamped per *stroke* buffer only (MaskRasterizer.swift:156-165, Mask.metal:85, Mask.swift:174-176 doc). With `max` merging that happens to bound the mask today, but it is the wrong invariant: as soon as cross-stroke build-up is added (previous entry) the cap must be applied to the merged mask, not the stroke. Also, LR's cap is a property of the brush at paint time \u2014 painting at density 40 over an area already at 0.8 must leave it at 0.8, not pull it down.",
+      "severity": "medium",
+      "effort": "S",
+      "proposed_fix": "Apply the ceiling at merge time as `m = min(m + acc\u00b7(1 \u2212 m), max(m, density))`, which both caps build-up at `density` and never lowers existing coverage. Land it together with the flow fix; it is the same two lines.",
+      "confidence": "documented",
+      "sources": [
+        "https://asktimgrey.com/2025/06/20/density-versus-flow/",
+        "https://fstoptraining.com/difference-between-flow-density/"
+      ]
+    },
+    {
+      "aspect": "Overlapping mask composition and range clamping",
+      "lightroom_behavior": "Each mask is an independent local adjustment; multiple masks over the same pixels compound. Stacking a second brush/mask over the same area to push past a single mask's \u00b14 EV limit is a standard technique, and there is no global ceiling on the combined result. Each mask's tone adjustment is applied as its own transform, not by adding slider numbers.",
+      "our_behavior": "All masks accumulate into two shared parameter textures and the *sum* is clamped once at \u00b14 EV / \u00b1100 (MaskStage.swift:113-155, Mask.metal:107-135, MaskRasterizer.swift:197-218, Mask.swift:81-82). Two overlapping +3 EV masks give +4 EV, not +6 EV; two +80 shadows masks give +100, not \"+80 applied twice\". The per-pixel delta vector is then evaluated once as a single curve delta (README.md:153-186), so local sliders are additive in slider units rather than composed \u2014 which is a different curve from LR's sequential application for anything but pure exposure.",
+      "severity": "medium",
+      "effort": "M",
+      "proposed_fix": "Two independent steps. (a) Cheap: raise or drop the accumulation ceiling \u2014 clamp exposure to something like \u00b18 EV (or not at all, letting the tone stage's own range limit it) rather than to the single-mask \u00b14 EV, so overlaps compound as in LR. That is the constants in Mask.swift:81-82 plus `MaskClampUniforms`. (b) Structural: to match LR's composition, evaluate masks sequentially (each mask's curve applied to the previous result) instead of summing deltas \u2014 that means either N tone passes or an ordered per-pixel loop, and is only worth it if (a) proves insufficient.",
+      "confidence": "inferred",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/masking.html",
+        "https://digital-photography-school.com/how-to-use-the-local-adjustments-tools-inside-lightroom/"
+      ]
+    },
+    {
+      "aspect": "Auto Mask (edge-aware brushing)",
+      "lightroom_behavior": "The brush has an Auto Mask option that \"confines brush strokes to areas of similar color\", with improved noise handling from PV4. It is what makes edge-following dodge/burn (skyline, horizon, subject outline) practical without a separate selection.",
+      "our_behavior": "Not implemented. Coverage depends only on stroke geometry (MaskRasterizer.swift:127-168, Mask.metal:62-90); there is no image-dependent term anywhere in the mask path, and README.md:510-516 lists \"no guided-filter edge snapping\" as a known limitation. Painting a brightening mask along a horizon spills across it and has to be cleaned up with an erase stroke.",
+      "severity": "medium",
+      "effort": "L",
+      "proposed_fix": "Post-process each mask's coverage with a guided filter (He et al.) using the tone-stage luminance as guide, gated by a per-stroke `autoMask` flag; or the cheaper LR-1.x-style variant: sample the guide luminance at the stroke's first point and multiply each stamp's alpha by a similarity kernel on |L(x) \u2212 L_ref|. The second version is a ~30-line shader change and needs the tone output bound into `maskStrokeKernel`, but the mask cache must then also key on the tone parameters.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/masking.html",
+        "https://helpx.adobe.com/camera-raw/using/process-versions.html"
+      ]
+    },
+    {
+      "aspect": "Clarity's effect on saturation",
+      "lightroom_behavior": "Clarity measurably changes saturation as well as luminance \u2014 it is not a pure luminance operation, which is one of the standard reasons cited for preferring Texture when you want detail without a colour shift.",
+      "our_behavior": "Clarity is applied as a pure multiplicative luminance ratio, `rgb' = rgb \u00b7 2^(L_out \u2212 L)` (Clarity.metal:199-216), which leaves channel ratios and therefore HSV saturation exactly unchanged by construction (README.md:205-216). In a B&W-only pipeline the direct visual effect is nil, but clarity runs *before* the saturation-weighted B&W mixer (Pipeline.swift:97-123), so in LR a clarity push slightly increases the mixer's authority in boosted regions and here it does not.",
+      "severity": "low",
+      "effort": "M",
+      "proposed_fix": "Probably leave as is \u2014 the hue/ratio-preserving design is a stated goal and the B&W-visible difference is second order. If matching is wanted, scale saturation by a small function of the applied `dL` in `clarityApplyKernel` (e.g. push rgb away from its luminance by `1 + kSat\u00b7dL`), which needs a saturation clamp to avoid gamut blow-ups.",
+      "confidence": "community-measured",
+      "sources": [
+        "https://photoshopcafe.com/texture-clarity-and-dehaze-in-lightroom-acr-explained-the-ultimate-comparision/",
+        "https://petapixel.com/2021/01/05/understanding-the-differences-between-clarity-texture-and-dehaze/"
+      ]
+    },
+    {
+      "aspect": "A/B brush presets",
+      "lightroom_behavior": "The brush offers two switchable presets, A and B, plus a separate Erase brush, each holding its own Size/Feather/Flow/Density \u2014 so you can flip between e.g. a big soft low-flow burn brush and a small hard detail brush without re-setting four sliders.",
+      "our_behavior": "One live `BrushParams` in the UI store (GrayroomUI/EditStateStore.swift:53, GrayroomApp/Sidebar.swift:337-354). `Stroke` already carries its own `BrushParams` (Mask.swift:133-160), so the model supports it; only the UI state and the switch are missing. Erase is a mode flag rather than a brush with its own settings.",
+      "severity": "low",
+      "effort": "S",
+      "proposed_fix": "Store three `BrushParams` in `EditStateStore` (A, B, Erase) plus a selected-slot enum, bind the sliders to the active slot, and add a keyboard toggle (LR uses `/`). No core change.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/masking.html",
+        "https://helpx.adobe.com/lightroom-classic/help/apply-local-adjustments.html"
+      ]
+    }
+  ],
+  "notes": "Scope: read-only audit of Sources/GrayroomCore/Shaders/Clarity.metal, Stages/ClarityMapping.swift, Stages/ClarityStage.swift, Masks/{Mask,MaskRasterizer,MaskStage}.swift, Shaders/Mask.metal, Engine/Pipeline.swift, plus the clarity/mask sections of Sources/GrayroomCore/README.md. Nothing was modified and no build/test was run.\n\nTwo numbers I computed rather than read (scripts in the scratchpad, both derived directly from the code's own formulas):\n1. Clarity detail-slope vs slider, from ClarityMapping.Parameters.lift: +5 -> 1.002, +10 -> 1.006, +25 -> 1.044, +50 -> 1.214, +75 -> 1.614, +100 -> 2.500; negative side 0.995 / 0.983 / 0.917 / 0.750 / 0.333. This is the single biggest calibration gap and it also amplifies the mask-amount error (entry \"Local clarity masks change the clarity rendering outside the mask\") - fixing the response curve first makes that one nearly disappear.\n2. Single-stroke centreline coverage from the stamp model (spacing 0.15*diameter -> ~7 overlapping stamps): feather 50 gives 0.41 / 0.67 / 0.83 / 0.97 / 1.00 at flow 10 / 20 / 30 / 50 / 100. Combined with max-merge across strokes this is why flow reads as a one-shot opacity instead of a rate.\n\nConfidence caveats worth flagging to the maintainer:\n- Adobe has never published Clarity's algorithm; the \"midtone-weighted\", \"larger radius than Texture\" and \"affects saturation\" claims come from Adobe help/blog wording plus consistent secondary reporting, not from a measurement. I marked the frequency-band and midtone entries \"documented\" because Adobe's own Texture write-up and help text support them, but the exact weighting curve is guesswork - any implementation should be tuned by eye against LR renders of the same file, not against a formula.\n- I could not find a published measurement of LR's absolute clarity strength at +-100, so I did not claim ours is \"stronger\" or \"weaker\" overall. The defensible statement is about the *shape* of the response (ours is dead below ~+40) and about the band (ours boosts pixel-scale detail, LR's does not), not the endpoint magnitude. Marked that entry \"inferred\".\n- LR's exact within-stroke build-up rule is not documented; sources agree only that (a) flow builds across passes and (b) density is a hard ceiling. The proposed max-within-stroke / over-composite-across-strokes model is the standard non-incremental paint model (GIMP calls it the \"Incremental\" toggle) and matches both documented facts, but a maintainer with LR available should verify a single straight stroke at flow 20 measures ~20% before committing to it.\n\nThings I deliberately did NOT report as deviations: the fused level-0 remap, the 16-level gamma grid, texture ping-ponging, r16Float coverage, the one-entry mask cache, and the 0.1% luminance drift the README already measures for the single-variant blend on its test image - all implementation detail or below any plausible visibility threshold. I also skipped preview-vs-export resolution dependence of the pyramid depth, since LR has the same class of behaviour."
+}

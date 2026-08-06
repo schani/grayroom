@@ -1,0 +1,179 @@
+{
+  "deviations": [
+    {
+      "aspect": "Baseline rendition: no camera-profile tone curve (\"images start too flat/dark\")",
+      "lightroom_behavior": "Opening a raw applies a camera profile (Adobe Color, or Adobe Monochrome when Treatment=B&W) whose baseline tone curve is deliberately non-linear: it \"brightens essentially all pixel values while increasing shadow contrast and decreasing highlight contrast\", targeting roughly the camera-JPEG rendition. All Basic sliders read 0 on top of that already-rendered starting point.",
+      "our_behavior": "RawDecoder.neutralize() zeroes Apple's entire look \u2014 Sources/GrayroomCore/Decode/RawDecoder.swift:92-102 (baselineExposure:93, shadowBias:94, boostAmount:95, boostShadowAmount:96, localToneMapAmount:97) \u2014 so the pipeline starts from scene-linear. I measured the gap on the repo's two Leica M10 DNGs (testdata/L1000003.DNG, L1000010.DNG) by rendering the same file with grayroom's neutralized settings vs. CIRAWFilter defaults. On L1000003: median linear luminance 0.0848 -> 0.1423 (+0.75 EV), p95 0.264 -> 0.524 (+0.99 EV), p99 0.312 -> 0.597; p05 0.0108 -> 0.0065. In display terms median sRGB 0.322 -> 0.413 and p99 0.595 -> 0.796. The p05..p95 span widens from 4.6 stops to 6.3 stops, i.e. our starting image has ~1.7 stops less display contrast and sits ~0.75-1.0 EV lower in the mids/uppers. Note that of the five neutralised knobs only boostAmount actually matters here: baselineExposure defaults to -0.05 (0.05 EV) and localToneMapAmount is 0/unsupported for these files, so re-enabling boostAmount alone reproduces the full Apple default look bit-for-bit in my test (0.1932 mean both ways).",
+      "severity": "high",
+      "effort": "S",
+      "proposed_fix": "Smallest fix: add an EditState field (e.g. `baselineRendition: .linear | .standard`, default .standard) that, when .standard, leaves `f.boostAmount = 1` and `f.boostShadowAmount = 0.9` alone in RawDecoder.neutralize() (RawDecoder.swift:95-96) instead of zeroing them. That is a two-line change plus a sidecar field and one sidebar toggle. Caveat to be explicit about: with boostAmount on, the decoded texture is no longer scene-linear, so \"exposure +1 EV doubles linear luminance\" stops being a statement about scene light (the stage math still holds, and the golden tests operate on synthetic textures so they are unaffected). If keeping scene-linearity is non-negotiable, the alternative (effort M) is to keep the decode neutral and apply a fixed baseline curve as the first term of ToneCurve \u2014 i.e. bake a ~+0.75 EV midtone lift plus a medium S-curve into g(x) as the identity \u2014 which keeps EV semantics and makes the curve inspectable, but you have to hand-fit it to match. Shipping without is the option I would not take: the flatness is not subtle, it is ~1.7 stops of contrast and a stop of brightness that the user has to dial in on every single frame.",
+      "confidence": "community-measured",
+      "sources": [
+        "https://helpx.adobe.com/lightroom/web/edit-photos/apply-effects/use-profiles.html",
+        "https://goodlight.us/linear-profiles.html",
+        "https://www.rawdigger.com/howtouse/overriding-raw-converter-default-adjustments-settings",
+        "measured locally: CIRAWFilter neutralized vs default on testdata/L1000003.DNG and L1000010.DNG"
+      ]
+    },
+    {
+      "aspect": "Clipping indicator threshold (0.1% of frame vs. essentially any clipped pixel)",
+      "lightroom_behavior": "The histogram's clipping triangles light as soon as the image contains clipped pixels \u2014 Adobe documents the indicator state (white when all channels clip, coloured when 1-2 clip) but no percentage threshold; in practice a handful of blown pixels lights it. That is what makes \"push Whites until the triangle just lights\" a usable white-point procedure.",
+      "our_behavior": "Sources/GrayroomUI/HistogramModel.swift:14 sets `clipWarningFraction = 0.001` and HistogramModel.swift:16-17 gate the triangles on it. On the 2560px preview (~3 MP) that is ~3,000 clipped pixels before the triangle lights; on a full-res 24 MP export it would be ~24,000. Specular highlights, a small blown sky patch, or a blown light source will never light the indicator, so the indicator says \"clean\" on images that are visibly clipped. The clip *predicate* itself is right and matches Lightroom (Shaders/Histogram.metal:23,26 test min-channel <= 0.5/255 and max-channel >= 254.5/255, i.e. \"one or more channels at 0/255\").",
+      "severity": "high",
+      "effort": "S",
+      "proposed_fix": "Drop the threshold by ~2 orders of magnitude, or better make it an absolute pixel count independent of resolution (e.g. `shadowClippedPixels > 32`), since the preview and the export have different pixel counts and a fraction makes the indicator resolution-dependent. Changing the one constant in HistogramModel.swift:14 is the whole fix; the counters already exist.",
+      "confidence": "community-measured",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "https://jkost.com/blog/2024/08/using-the-basic-panel-and-histogram-to-exposure-and-contrast-in-lightroom-classic.html"
+      ]
+    },
+    {
+      "aspect": "No in-image clipping overlay (Lightroom's J key / clicking the histogram triangles)",
+      "lightroom_behavior": "Clicking either histogram triangle, or pressing J, overlays the image itself: blue where one or more channels is pure black (0), red where one or more channels is pure white (255). This is the primary tool for placing the black and white point, and it matters more in B&W than in colour because there is no chroma cue that a highlight has gone.",
+      "our_behavior": "Nothing. Sources/GrayroomApp/HistogramView.swift:50-70 draws the two triangles as a passive lit/unlit indicator with only a tooltip percentage (HistogramView.swift:16-19); there is no way to see *where* the clipping is. Sources/GrayroomCanvas/CanvasNSView.swift:301-320 has no J binding, and Sources/GrayroomCanvas/CanvasShaders.swift's fragment shader has no clipping branch.",
+      "severity": "high",
+      "effort": "M",
+      "proposed_fix": "The canvas fragment shader already samples the output-referred (sRGB-encoded, clamped) texture \u2014 the same image the histogram tap counts \u2014 so the overlay is ~6 lines there: after fetching `rgb`, `if (u.clipHi > 0.5 && max3(rgb) >= 254.5/255) rgb = float3(1,0,0); else if (u.clipLo > 0.5 && min3(rgb) <= 0.5/255) rgb = float3(0,0,1);`. Add two floats to CanvasUniforms, a `J` case in CanvasNSView.keyDown (CanvasNSView.swift:313-319) plus tap targets on the two triangles in HistogramView. Sample with `nearest` for the overlay test so bilinear interpolation does not smear the clip decision at low zoom.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "https://jkost.com/blog/2024/08/using-the-basic-panel-and-histogram-to-exposure-and-contrast-in-lightroom-classic.html",
+        "https://www.lightroomqueen.com/downloads/shortcuts/lightroom_shortcuts_classic.pdf"
+      ]
+    },
+    {
+      "aspect": "Capture sharpening is silently different between preview and export",
+      "lightroom_behavior": "Lightroom applies capture sharpening (raw defaults Amount 40/150, Radius 1.0, Detail 25, Masking 0) as a user-visible, user-controllable stage, at a consistent strength; output sharpening is a separate export-time option. Adobe's advice is to judge it at 100%, but the amount does not change with zoom.",
+      "our_behavior": "RawDecoder.neutralize() (RawDecoder.swift:101) deliberately leaves Apple's per-camera sharpening default alone. For these Leica DNGs that default is `sharpnessAmount = 0.9` on a 0...1 scale \u2014 very strong. I measured Laplacian-of-log-luminance RMS on a 512x512 centre crop: at scaleFactor 1.0 it goes 0.2536 (amount 0) -> 0.3139 (0.27) -> 0.4631 (0.9), i.e. Apple's default adds ~83% high-frequency energy. But when `scaleFactor < 1` the sharpening is disabled entirely: at scaleFactor 0.5 and 0.25 the RMS is identical to four decimals across amounts 0, 0.27 and 0.9. The GUI previews at 2560px (Sources/GrayroomApp/RenderService.swift:19, set as maxDimension -> scaleFactor at RawDecoder.swift:172-175) and exports at full res (RenderService.swift:137, maxDimension: nil). So the on-screen image has no capture sharpening at all and the exported file has a strong, uncontrollable one \u2014 and clarity runs downstream of it, amplifying halos that were never visible while editing.",
+      "severity": "high",
+      "effort": "S",
+      "proposed_fix": "Make the two paths agree, which is a one-line decision in neutralize(): either set `f.sharpnessAmount = 0` unconditionally (honest: no capture sharpening anywhere, matching the \"sharpening deferred\" line in PLAN.md) or pin it to a fixed Lightroom-comparable value (~0.27) *and* accept that it is a no-op below full res. Zero is the smaller, safer fix and removes the WYSIWYG break; a real Amount/Radius/Detail/Masking stage is the deferred M5 work. While there, note `colorNoiseReductionAmount` also defaults to 0.5 vs Lightroom's raw default of 25/100 \u2014 roughly 2x more chroma NR than LR, which for B&W mostly costs fine detail with no upside since chroma noise is about to be collapsed into luminance anyway.",
+      "confidence": "community-measured",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/retouch-photos.html",
+        "measured locally: CIRAWFilter sharpnessAmount 0/0.27/0.9 at scaleFactor 1.0/0.5/0.25 on testdata/L1000003.DNG"
+      ]
+    },
+    {
+      "aspect": "No Option-drag threshold clipping view on Whites/Blacks",
+      "lightroom_behavior": "Alt/Option-dragging Whites, Blacks (and Exposure) replaces the image with a threshold view \u2014 black except for the pixels that are about to clip white, or white except for the pixels about to clip black \u2014 so you can set the endpoints precisely. Alt-drag on the Detail panel sliders gives the analogous grayscale visualisations. For B&W endpoint placement this is arguably the single most-used LR gesture.",
+      "our_behavior": "No modifier handling at all on the tone sliders. Sources/GrayroomApp/Sidebar.swift's SliderRow has only `onBegin`/`onEnd` callbacks and no modifier state; there is no canvas mode that could render the threshold view.",
+      "severity": "medium",
+      "effort": "M",
+      "proposed_fix": "Once the J overlay above exists, this is mostly plumbing: add an `optionDragging: Bool` to SliderRow's drag handling, route it to the canvas as a third uniform mode, and in the fragment shader render `max3(rgb) >= threshold ? white : black` (Whites) / `min3(rgb) <= threshold ? black : white` (Blacks). The one real design question is that our tone curve deliberately never hard-clips (Sources/GrayroomCore/README.md:97-103), so a Whites threshold view driven off the *output* clamp only shows anything once exposure has already pushed pixels past 1.0 \u2014 which is the correct behaviour, but means Whites +100 alone may show an empty threshold view where Lightroom would show clipping.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "https://www.lightroomqueen.com/downloads/shortcuts/lightroom_shortcuts_classic.pdf"
+      ]
+    },
+    {
+      "aspect": "White balance: no presets and no eyedropper",
+      "lightroom_behavior": "For a raw file the WB control is a preset menu (As Shot, Auto, Daylight, Cloudy, Shade, Tungsten, Fluorescent, Flash, Custom) plus the White Balance Selector eyedropper (W), which sets temp/tint by clicking a neutral in the image. In B&W treatment these still matter: temp/tint change the channel mix feeding the B&W mixer, so they change the gray rendition, not just \"colour\".",
+      "our_behavior": "Sources/GrayroomApp/Sidebar.swift:60-93 offers exactly two numeric sliders plus an \"As Shot\" reset button (Sidebar.swift:66). No presets, no Auto, no eyedropper.",
+      "severity": "medium",
+      "effort": "S",
+      "proposed_fix": "The eyedropper is nearly free because CIRAWFilter already implements it: `f.neutralLocation = CGPoint(x:y:)` in image pixel coordinates, then read back `f.neutralTemperature`/`f.neutralTint` and store those in EditState. That is a ~15-line addition to RawDecoder (a `whiteBalance(from location:)` helper) plus a canvas cursor mode. Presets are a static table of (K, tint) pairs written into the same two fields. Auto is the only one that needs real work.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "Apple CIRAWFilter.h (macOS SDK): neutralLocation / neutralTemperature / neutralTint"
+      ]
+    },
+    {
+      "aspect": "White balance is not interactive \u2014 every temp/tint change re-decodes the RAW",
+      "lightroom_behavior": "Temp and Tint drag at preview frame rates; WB is a matrix multiply inside the render pipeline, not a re-decode.",
+      "our_behavior": "WB is pushed into CIRAWFilter (Sources/GrayroomCore/Decode/RawDecoder.swift:163-169), so any WB change invalidates the decode. Sources/GrayroomUI/RenderInvalidation.swift:20 correctly classifies it as `.decode`, and DecodeKey (RenderInvalidation.swift:36-47) is keyed only on WB, so no *other* slider re-decodes \u2014 but the WB path itself costs a full CIRAWFilter run. I measured 296 ms for the 2560px preview decode and 322 ms full-res on this machine (best of 3, -O build, M-series). That is ~3 fps while dragging Temp, against Lightroom's continuous feedback. Sources/GrayroomCore/README.md:525 already flags \"decode results are not cached yet\", and there is a single-entry cache in AppModel.swift:254.",
+      "severity": "medium",
+      "effort": "L",
+      "proposed_fix": "Two tiers. Cheap (effort M): during an active drag, decode at a much lower maxDimension (e.g. 800px) and only re-decode at 2560 on `onEnd`; a small LRU of recent DecodeKeys also makes A/B-ing two WB settings instant. Proper (effort L, and the right answer eventually): decode once at a fixed reference WB, recover the camera-neutral chromaticity, and implement temp/tint as a 3x3 white-point adaptation in a Metal stage before `tone` \u2014 which is also what Lightroom does and what would let per-mask Temp/Tint exist later.",
+      "confidence": "inferred",
+      "sources": [
+        "measured locally: CIRAWFilter decode timing on testdata/L1000003.DNG at 2560px and 5952px"
+      ]
+    },
+    {
+      "aspect": "No pixel value readout",
+      "lightroom_behavior": "Hovering the image shows the pixel value as R/G/B percentages directly beneath the histogram (right-click switches to Lab). For zone-style B&W work \u2014 \"put this face at 45%\", \"this shadow at 12%\" \u2014 this is how you check placement numerically instead of by eye.",
+      "our_behavior": "No readout anywhere. Grepping GrayroomApp/GrayroomCanvas/GrayroomUI for readout/pixelValue/sampleColor finds only an unrelated comment in BrushSizing.swift:25. HistogramView.swift shows only the two clip percentages as tooltips.",
+      "severity": "medium",
+      "effort": "S",
+      "proposed_fix": "The canvas already computes the image texel under the cursor (`u.cursor` is passed into CanvasShaders and the fragment shader inverts the transform). Keep a CPU-side copy of the output-referred preview (or do a 1x1 blit readback on mouse-move, throttled) and show `round(100 * value)` under the histogram. For a neutral B&W image one number suffices; show three when toning is active.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html"
+      ]
+    },
+    {
+      "aspect": "8-bit output is not dithered \u2014 banding in smooth gray gradients",
+      "lightroom_behavior": "Lightroom dithers when quantising to 8 bits on export, which is why LR JPEGs of smooth skies do not band at the level naive rounding would produce.",
+      "our_behavior": "Sources/GrayroomCore/Shaders/Output.metal:3-10 encodes to sRGB with no dither, and Sources/GrayroomCore/Export/ImageWriter.swift:120-129 quantises with a bare `(clamp(v,0,1) * 255).rounded()`. Sources/GrayroomCore/README.md:528 already lists this as a known limitation. It bites harder here than in a colour app: a monochrome sky has no chroma noise to break up the contours, and the pipeline's tone/clarity stages are smooth analytic functions that produce very clean gradients, so the banding is unusually visible.",
+      "severity": "medium",
+      "effort": "S",
+      "proposed_fix": "Add triangular-PDF dither of amplitude 1 LSB at the quantisation point. Cheapest correct version: in ImageWriter.makeCGImage's 8-bit branch (ImageWriter.swift:120-129), `v*255 + (rand1 - rand2)` with two hashed uniforms per component before rounding; do the same in the canvas fragment shader (a `fract(sin(dot(gid, k)) * 43758.5453)` hash is fine) so the preview shows the same thing. Do not dither inside outputKernel \u2014 the histogram tap reads that texture, and you would be adding noise to the clip counters.",
+      "confidence": "community-measured",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/export-photos-disk-cd.html"
+      ]
+    },
+    {
+      "aspect": "Canvas is not colour-managed to the display profile",
+      "lightroom_behavior": "Lightroom converts its internal working image through the monitor profile before drawing, so what you see on a P3/wide-gamut display matches what the exported sRGB file looks like in a colour-managed viewer.",
+      "our_behavior": "The pipeline writes sRGB-encoded values (Output.metal:3-10) and the canvas hands them straight to a `bgra8Unorm` drawable \u2014 Sources/GrayroomCanvas/CanvasNSView.swift:104 sets the pixel format and nothing ever sets the CAMetalLayer's `colorspace`, which means no colour matching and the values are interpreted in the display's own space. On a P3 or wider display, sRGB values are therefore rendered as if they were P3. For a purely neutral B&W frame this is invisible (R=G=B is the same neutral in any RGB space), but any toning is drawn noticeably more saturated on the canvas than in the exported sRGB PNG \u2014 so the split-toning sliders lie about the result. The comment at CanvasShaders.swift:16-19 (\"what you see is what ImageWriter would put in a PNG\") is only true on an sRGB display.",
+      "severity": "medium",
+      "effort": "S",
+      "proposed_fix": "Set `(layer as? CAMetalLayer)?.colorspace = CGColorSpace(name: CGColorSpace.sRGB)` next to CanvasNSView.swift:104. That makes the system colour-match the drawable to the display profile and restores WYSIWYG for toned images. (If you later want EDR previews, this is also the hook you would change rather than remove.)",
+      "confidence": "inferred",
+      "sources": [
+        "Apple: CAMetalLayer.colorspace \u2014 a nil colorspace means content is not colour matched"
+      ]
+    },
+    {
+      "aspect": "Output clamp is per-channel with no rolloff \u2014 toned highlights shift hue at the clip",
+      "lightroom_behavior": "Lightroom renders through its wide-gamut working space into the destination profile with a proper gamut conversion, so a saturated toned highlight desaturates toward white as it approaches the top rather than having its brightest channel cut off first.",
+      "our_behavior": "grSRGBEncode clamps each channel independently (Sources/GrayroomCore/Shaders/Common.metal:21-25, called from Output.metal:9). Toning normalises its tint factor to luminance 1 (README \"Toning semantics\"), so a bright toned pixel can land at e.g. (1.05, 0.98, 0.62); the red channel clips alone and the resulting colour is not on the line from the intended hue to white \u2014 the tint visibly skews as tones approach the top end. The same clamp also means the transition from detail to paper-white is a hard edge, which is more noticeable here than elsewhere because the tone stage deliberately never clips (README.md:97-103), so the *only* nonlinearity near white is this clamp.",
+      "severity": "low",
+      "effort": "S",
+      "proposed_fix": "Before encoding, scale chroma rather than clipping it: `float m = max3(rgb); if (m > 1) rgb = mix(float3(grLuminance(rgb)), rgb, ...)` \u2014 or the cheaper `rgb = 1 - (1 - rgb/m)` style desaturate-to-white \u2014 so an out-of-range colour walks toward white along its own hue. Ten lines in Output.metal. Only matters once toning is in use; for untoned B&W the current clamp is exactly right.",
+      "confidence": "inferred",
+      "sources": []
+    },
+    {
+      "aspect": "Histogram is luminance-only; no per-channel layers, no all-channels-vs-some-channels indicator state",
+      "lightroom_behavior": "The histogram plots the red, green and blue channels layered (gray where all three overlap, coloured where they diverge), and the clipping triangle itself is white when all three channels clip and coloured when only one or two do \u2014 so you can tell \"the image is blown\" from \"only one channel is blown\".",
+      "our_behavior": "Sources/GrayroomCore/Shaders/Histogram.metal:16-19 bins a single weighted luminance into 256 bins; Sources/GrayroomCore/Engine/Histogram.swift:5-8 and Sources/GrayroomUI/HistogramModel.swift:7-9 carry one array; HistogramView.swift:32-41 draws one filled path, and the triangles at HistogramView.swift:50-70 are a fixed blue/red with only a lit/unlit state. For an untoned B&W frame this is exactly equivalent to Lightroom's display (R=G=B, so the three curves coincide and the weighted luminance equals the gray value). It diverges as soon as toning is on: you cannot see that the sepia highlights have pushed blue to zero, and the triangle cannot distinguish one clipped channel from three.",
+      "severity": "low",
+      "effort": "M",
+      "proposed_fix": "Widen the counter buffer to 3x256 plus separate per-channel clip counters (Histogram.metal is one dispatch, so this is three more atomic adds), carry three arrays through Histogram/HistogramModel, and draw them additively in HistogramView. Then colour the triangle by which channels clipped. Worth doing only after toning becomes something you actually use; for pure neutral work the current single curve is not wrong.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html"
+      ]
+    },
+    {
+      "aspect": "Histogram and clipping are measured on the 2560px preview, not on what gets exported",
+      "lightroom_behavior": "The Develop histogram and clipping warnings are computed from the render Lightroom is showing, but the clipping decision does not silently change between preview and export the way a downsample does for small blown features.",
+      "our_behavior": "The GUI histogram is always computed on the 2560px preview decode (Sources/GrayroomApp/RenderService.swift:19, AppModel.swift:254-258), while export renders full-resolution with `computeHistogram: false` (RenderService.swift:137). Downsampling averages away small specular highlights, so a preview can report 0% highlight clipping for a file whose full-res export contains genuinely blown pixels. Compounded by the 0.1%-of-frame threshold above (which is a *fraction*, so it also means different absolute pixel counts at the two resolutions), the clipping indicator is not a reliable statement about the exported file.",
+      "severity": "low",
+      "effort": "S",
+      "proposed_fix": "Switch the clip gate to an absolute pixel count (see the threshold item) so at least it is resolution-consistent in the direction that matters, and optionally compute the histogram on export too and warn if it disagrees materially with the preview. A full fix (sampling the full-res image for clipping while previewing small) is not worth it.",
+      "confidence": "inferred",
+      "sources": []
+    },
+    {
+      "aspect": "Export is always sRGB 3-channel; no colour space or output-sharpening choice",
+      "lightroom_behavior": "Export offers sRGB / AdobeRGB / ProPhoto / Display P3, 8 or 16 bit, and a separate Output Sharpening control (Screen / Matte / Glossy at Low / Standard / High) sized to the output dimensions.",
+      "our_behavior": "Sources/GrayroomCore/Export/ImageWriter.swift:54 hardcodes `CGColorSpace(name: .sRGB)` for every format including tiff16/png16 (ImageWriter.swift:150), and there is no output sharpening anywhere in the pipeline. For a 16-bit master intended for printing or further work, being pinned to sRGB primaries throws away headroom that the pipeline's linear Rec.709 working space could have carried; and an image resized for the web comes out softer than the Lightroom equivalent.",
+      "severity": "low",
+      "effort": "M",
+      "proposed_fix": "Colour space: add an export option and pass a different CGColorSpace at ImageWriter.swift:150, with a matching encode function in Output.metal (the pipeline is already linear Rec.709, so ProPhoto/AdobeRGB need a 3x3 before the transfer function). Output sharpening is genuinely deferred work \u2014 but note that until the capture-sharpening inconsistency above is resolved, adding output sharpening on top would compound the preview/export mismatch rather than fix it. Lowest severity item here for a personal B&W workflow that exports sRGB JPEGs.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/export-photos-disk-cd.html",
+        "https://helpx.adobe.com/lightroom-classic/help/retouch-photos.html"
+      ]
+    }
+  ],
+  "notes": "Things I checked that turned out NOT to be deviations, so the maintainer does not re-investigate them:\n\n1. Tint sign convention is correct. Apple's CIRAWFilter header (macOS SDK, CIRAWFilter.h:156-164) documents neutralTemperature/neutralTint ranges as exactly \"2000K..50000K, -150..150\" \u2014 identical to Lightroom's raw ranges, and identical to Sidebar.swift:75 and :85. I verified the sign empirically by rendering testdata/L1000003.DNG through the existing CLI binary with bwMix disabled at tint -100 / as-shot 7.53 / +100: mean G-(R+B)/2 came out +24.9 / -0.5 / -25.8, i.e. negative tint = green, positive = magenta, matching Adobe. No change needed.\n\n2. Temperature slider scaling. Sidebar.swift:77 uses SliderScale.logarithmic (SliderRow.swift:62-75), a pure log over 2000-50000K. That puts 5500K at 31% of the track, which is about where Lightroom's handle sits for daylight; a mired/reciprocal mapping would put it at 66%, which is clearly not what LR looks like. Log is the better match \u2014 leave it. Double-click-to-reset already targets as-shot (Sidebar.swift:76), matching LR.\n\n3. `isGamutMappingEnabled = false` (RawDecoder.swift:98) is a no-op in practice. I measured negative-channel pixel counts with it on and off on both test DNGs: 0.044% / 0.001% respectively, identical either way, with the worst negative at -0.005. It does not meaningfully change what the B&W mixer's HSV decomposition sees. Not worth a flag.\n\n4. `extendedDynamicRangeAmount = 0` (RawDecoder.swift:100) does not cost headroom. At exposure +3 EV the neutralized decode reaches max 3.15 with 42% of pixels above 1.0 and the value is bit-identical at EDR 0, 1 and 2 \u2014 the decode is not clamped at 1.0, so there is no highlight data being thrown away. Not a deviation.\n\n5. `baselineExposure` and `localToneMapAmount` are red herrings in the baseline-rendition story. baselineExposure defaults to only -0.05 on these Leica files (0.05 EV, invisible) and localToneMapAmount is already 0 with `isLocalToneMapSupported == false`. The entire \"flat\" gap is `boostAmount` (+ `boostShadowAmount`). If the maintainer only changes one thing from finding #1, it is boostAmount.\n\n6. The clipping *predicate* already matches Lightroom exactly. Histogram.metal:23,26 fire on \"one or more channels at 0 / at 255\", which is precisely how Adobe describes the overlay. Only the threshold gate and the missing overlay are wrong.\n\n7. Histogram x-axis semantics are fine for this workflow. We bin Rec.709-weighted luminance of the sRGB-encoded output; LR plots percentage in its working space. For a neutral B&W frame R=G=B so the two are the same number, and only toned images diverge (covered by the per-channel finding).\n\nMethod note: measurements were made with standalone swiftc programs in the scratchpad against CIRAWFilter directly plus the already-built ./.build/debug/grayroom binary. I did not run swift build or swift test and did not modify anything in the repo. Scripts are at /private/tmp/claude-501/-Users-schani-Work-grayroom/fbb5e5b5-b2b3-41b5-9921-e0034c4afd3e/scratchpad/{baseline,sharp,edr,gamut,timing}.swift if you want to re-run them.\n\nTriage suggestion: findings 1, 2 and 3 together are one coherent afternoon of work and would close most of the \"this does not feel like Lightroom\" gap \u2014 a baseline curve so the image starts in the right place, a clip threshold that actually fires, and a J overlay so you can see where. Finding 4 (sharpening) is a one-line change with a disproportionate payoff because it removes a preview/export mismatch that would otherwise make every other tuning decision untrustworthy."
+}

@@ -31,6 +31,21 @@ public final class EditStateStore {
     /// `true` between a mutation and the sidecar write that follows it.
     public private(set) var isDirty: Bool = false
 
+    /// Whether the Edit menu's Undo / Redo items should be live.
+    ///
+    /// These are **stored** mirrors of `UndoManager.canUndo` / `canRedo`, kept in
+    /// sync by `syncUndoAvailability()`. They are not computed properties, and
+    /// that is the point: the `UndoManager` is `@ObservationIgnored` (a reference
+    /// type outside Observation's reach), so a computed `undoManager.canUndo`
+    /// registers nothing with the observation machinery — anything that observed
+    /// it would be told about the value once and never hear of it again.
+    ///
+    /// Mirroring makes undo availability an ordinary observable value: SwiftUI
+    /// re-evaluates on change, and a headless test can assert on it (and on the
+    /// change notification) without an event loop.
+    public private(set) var canUndo: Bool = false
+    public private(set) var canRedo: Bool = false
+
     /// Which mask the mask panel is editing (and the brush paints into).
     public var selectedMaskID: UUID?
 
@@ -107,13 +122,13 @@ public final class EditStateStore {
             undoManager.removeAllActions()
             gestureSnapshot = nil
             edit = new
+            syncUndoAvailability()
             didChange(RenderInvalidation.between(old, new), dirty: false)
         }
     }
 
     private func registerUndo(restoring snapshot: EditState, named name: String) {
         undoManager.beginUndoGrouping()
-        defer { undoManager.endUndoGrouping() }
         undoManager.registerUndo(withTarget: self) { store in
             let current = store.edit
             store.edit = snapshot
@@ -122,6 +137,29 @@ public final class EditStateStore {
             store.registerUndo(restoring: current, named: name)
         }
         undoManager.setActionName(name)
+        // `canUndo` stays false until the group closes, so sync after, not in a
+        // `defer` that would run before the enclosing statement's observers see
+        // a consistent value.
+        undoManager.endUndoGrouping()
+        syncUndoAvailability()
+    }
+
+    /// Copies the undo manager's availability into the two observable mirrors.
+    ///
+    /// Polled at the four places that can move the stack — `registerUndo`,
+    /// `undo()`, `redo()` and the `removeAllActions()` in `replace` — rather than
+    /// driven by `NSUndoManager` notifications, because those are posted through
+    /// `NotificationCenter` and (for the checkpoint notification) coalesced with
+    /// the run loop: a headless test that never spins a run loop would see stale
+    /// values. `endGesture` needs no call of its own — it either returns early
+    /// without touching the stack, or goes through `registerUndo`.
+    ///
+    /// The `!=` guards matter: `@Observable` announces every *write*, equal or
+    /// not, and a spurious announcement would invalidate the menu (and any view
+    /// reading these) on changes that cannot affect them.
+    private func syncUndoAvailability() {
+        if canUndo != undoManager.canUndo { canUndo = undoManager.canUndo }
+        if canRedo != undoManager.canRedo { canRedo = undoManager.canRedo }
     }
 
     private func didChange(_ invalidation: RenderInvalidation, dirty: Bool = true) {
@@ -130,10 +168,20 @@ public final class EditStateStore {
         onChange?(invalidation)
     }
 
-    public var canUndo: Bool { undoManager.canUndo }
-    public var canRedo: Bool { undoManager.canRedo }
-    public func undo() { undoManager.undo() }
-    public func redo() { undoManager.redo() }
+    /// Undo one step. A no-op when there is nothing to undo, so the menu item
+    /// and its Cmd-Z can stay live without the caller having to check first —
+    /// `UndoManager.undo()` is only safe on a non-empty, fully closed stack.
+    public func undo() {
+        guard undoManager.canUndo else { return }
+        undoManager.undo()
+        syncUndoAvailability()
+    }
+
+    public func redo() {
+        guard undoManager.canRedo else { return }
+        undoManager.redo()
+        syncUndoAvailability()
+    }
 
     /// The autosave calls this once the sidecar is on disk.
     public func markSaved() { isDirty = false }

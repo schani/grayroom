@@ -18,6 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.center()
         }
         AppModel.shared.openInitialDocument()
+        // The menu bar exists by now; take over Undo/Redo (see UndoMenu.swift).
+        UndoMenuController.shared.adoptMenuItems(store: AppModel.shared.store)
         SelfTest.startIfRequested()
     }
 
@@ -46,19 +48,29 @@ struct GrayroomApp: App {
             CommandGroup(replacing: .saveItem) {
                 Button("Save Sidecar") { model.saveSidecarNow() }
                     .keyboardShortcut("s", modifiers: .command)
+                // No `.disabled(model.imageURL == nil)`: see the note below.
+                // `presentExportSheet()` already ignores the request when there
+                // is no image, and a disabled-at-launch item would kill Cmd-E
+                // for the whole session.
                 Button("Export…") { model.presentExportSheet() }
                     .keyboardShortcut("e", modifiers: .command)
-                    .disabled(model.imageURL == nil)
             }
             // The app owns its UndoManager (there is no document), so the menu
             // items are wired straight to it rather than to the responder chain.
+            //
+            // Deliberately *not* `.disabled(!model.store.canUndo)`. This builder
+            // runs exactly once, at launch (measured — see UndoMenu.swift), so a
+            // `.disabled` here freezes at its launch value, and SwiftUI compiles
+            // a disabled command into an `NSMenuItem` with a nil action, which
+            // AppKit's key-equivalent matching skips. That combination is what
+            // made Cmd-Z do nothing at all. `UndoMenuController` adopts these two
+            // items after launch and supplies live enablement via
+            // `validateMenuItem`; the actions below remain as a fallback.
             CommandGroup(replacing: .undoRedo) {
                 Button("Undo") { model.store.undo() }
                     .keyboardShortcut("z", modifiers: .command)
-                    .disabled(!model.store.canUndo)
                 Button("Redo") { model.store.redo() }
                     .keyboardShortcut("z", modifiers: [.command, .shift])
-                    .disabled(!model.store.canRedo)
             }
             // Not "View": SwiftUI already installs a View menu (Enter Full
             // Screen) and a second one with the same name is unaddressable.

@@ -5,9 +5,15 @@ import GrayroomCore
 import GrayroomUI
 import ImageIO
 import Metal
+import Observation
 import UniformTypeIdentifiers
 
-/// `GRAYROOM_SELFTEST=paint swift run GrayroomApp <file.DNG>`
+/// `GRAYROOM_SELFTEST=paint|undo swift run GrayroomApp <file.DNG>`
+///
+/// Two whole-app repros, each in its own process: `paint` (a stroke drawn with
+/// real mouse events) and `undo` (Cmd-Z / Cmd-Shift-Z pushed through the real
+/// menu-bar key-equivalent path). Both print PASS/FAIL lines and exit non-zero
+/// on failure.
 ///
 /// Repro (c): the whole app, in its own process, painting a stroke with real
 /// `NSEvent`s and then telling you — on stdout, in the sidecar and in a
@@ -21,9 +27,19 @@ import UniformTypeIdentifiers
 /// Nothing here is reachable without the environment variable, and the sidecar it
 /// writes goes next to whatever RAW it was pointed at — point it at a *copy*.
 enum SelfTest {
-    static var isRequested: Bool {
-        ProcessInfo.processInfo.environment["GRAYROOM_SELFTEST"] == "paint"
+    enum Mode: String {
+        /// Repro (c): a stroke painted with real `NSEvent`s.
+        case paint
+        /// Repro (d): Cmd-Z / Cmd-Shift-Z pushed through the real menu-bar key
+        /// equivalent path, which is where the undo bug actually lived.
+        case undo
     }
+
+    static var mode: Mode? {
+        ProcessInfo.processInfo.environment["GRAYROOM_SELFTEST"].flatMap(Mode.init(rawValue:))
+    }
+
+    static var isRequested: Bool { mode != nil }
 
     private static var outputDirectory: URL {
         let path = ProcessInfo.processInfo.environment["GRAYROOM_SELFTEST_OUT"] ?? "out"
@@ -50,7 +66,10 @@ enum SelfTest {
                 poll()
                 return
             }
-            run(canvas: canvas, model: model)
+            switch mode {
+            case .paint, nil: run(canvas: canvas, model: model)
+            case .undo: runUndo(canvas: canvas, model: model)
+            }
         }
     }
 
@@ -80,16 +99,31 @@ enum SelfTest {
 
     private static func run(canvas: CanvasNSView, model: AppModel) {
         guard let window = canvas.window else { fail("canvas has no window") }
-        let imageSize = model.previewSize
 
         // A clean slate: whatever sidecar was on disk must not colour the result.
+        prepareForPainting(model)
+        // So the screenshot *shows* where the paint landed, not just where the
+        // cursor was.
+        model.showMaskOverlay = true
+
+        let targets = paintStroke(canvas: canvas, window: window, model: model)
+        settle(model) { finish(canvas: canvas, window: window, model: model, targets: targets) }
+    }
+
+    /// Empty edit, one mask, brush tool — the starting point of both self-tests.
+    private static func prepareForPainting(_ model: AppModel) {
         model.store.replace(EditState(), named: nil)
         model.store.addMask()
         model.updateBrush { $0.size = 0.06; $0.feather = 50; $0.flow = 100; $0.density = 100 }
         model.tool = .brush
-        // So the screenshot *shows* where the paint landed, not just where the
-        // cursor was.
-        model.showMaskOverlay = true
+    }
+
+    /// Paints a diagonal across the image's top-left quadrant with synthesized
+    /// mouse events and returns the normalized points it aimed at.
+    @discardableResult
+    private static func paintStroke(canvas: CanvasNSView, window: NSWindow,
+                                    model: AppModel) -> [CGPoint] {
+        let imageSize = model.previewSize
 
         // --- Ground truth, computed from the window layout only -------------
         // Where the fitted image sits inside the canvas, in device pixels:
@@ -136,8 +170,7 @@ enum SelfTest {
         send(.leftMouseDown, at: windowPoint(normalized: targets[0]))
         for t in targets.dropFirst() { send(.leftMouseDragged, at: windowPoint(normalized: t)) }
         send(.leftMouseUp, at: windowPoint(normalized: targets.last!))
-
-        settle(model) { finish(canvas: canvas, window: window, model: model, targets: targets) }
+        return targets
     }
 
     private static func finish(canvas: CanvasNSView, window: NSWindow,
@@ -173,6 +206,184 @@ enum SelfTest {
         } && stroke.points.count == targets.count
         log("self-test: points match intent = \(ok)")
         exit(ok ? 0 : 3)
+    }
+
+    // MARK: - The undo test
+
+    /// `GRAYROOM_SELFTEST=undo swift run GrayroomApp <copy-of-file.DNG>`
+    ///
+    /// Paints a stroke, then drives **Cmd-Z / Cmd-Shift-Z as key events through
+    /// `NSApp.sendEvent`** — the same path a real keystroke takes, menu-bar key
+    /// equivalent matching and menu-item enablement included. That matters
+    /// because a disabled menu item swallows its shortcut silently: the bug
+    /// reproduces here and nowhere in the unit tests.
+    private static func runUndo(canvas: CanvasNSView, model: AppModel) {
+        guard let window = canvas.window else { fail("canvas has no window") }
+        let store = model.store
+        var failures: [String] = []
+
+        func check(_ ok: Bool, _ what: String) {
+            log("undo self-test: \(ok ? "PASS" : "FAIL") — \(what)")
+            if !ok { failures.append(what) }
+        }
+        func state(_ label: String) {
+            log("undo self-test: \(label): canUndo=\(store.canUndo) canRedo=\(store.canRedo) "
+                + "menuUndo=\(menuItemState("Undo")) menuRedo=\(menuItemState("Redo")) "
+                + "strokes=\(strokeCount(store)) exposure=\(store.edit.tone.exposure)")
+        }
+
+        trackUndoAvailability(store)
+        dumpMenus()
+        prepareForPainting(model)
+        state("after setup")
+        paintStroke(canvas: canvas, window: window, model: model)
+
+        let steps: [() -> Void] = [
+            {
+                state("after painting")
+                check(strokeCount(store) == 1, "a stroke was painted")
+                check(store.canUndo, "canUndo is true after painting")
+                check(menuItemState("Undo") == "enabled", "the Undo menu item is live")
+                check(menuItemState("Redo") == "DISABLED", "the Redo menu item is greyed out")
+                sendKey("z", modifiers: .command, window: window)
+            },
+            {
+                state("after Cmd-Z")
+                check(strokeCount(store) == 0, "Cmd-Z removed the stroke")
+                check(store.canRedo, "canRedo is true after undoing")
+                check(menuItemState("Redo") == "enabled", "the Redo menu item went live")
+                sendKey("z", modifiers: [.command, .shift], window: window)
+            },
+            {
+                state("after Cmd-Shift-Z")
+                check(strokeCount(store) == 1, "Cmd-Shift-Z restored the stroke")
+                // A slider-style change made through the store API, undone
+                // through the keyboard.
+                store.perform("Exposure") { $0.tone.exposure = 1.25 }
+            },
+            {
+                state("after the exposure change")
+                check(store.edit.tone.exposure == 1.25, "the exposure change applied")
+                sendKey("z", modifiers: .command, window: window)
+            },
+            {
+                state("after Cmd-Z")
+                check(store.edit.tone.exposure == 0, "Cmd-Z reverted the exposure change")
+                check(strokeCount(store) == 1, "…and left the stroke alone")
+            },
+        ]
+
+        runSteps(steps, model: model) {
+            if failures.isEmpty {
+                log("undo self-test: PASS (all \(steps.count) checkpoints)")
+                exit(0)
+            }
+            log("undo self-test: FAILED — \(failures.count) check(s): "
+                + failures.joined(separator: "; "))
+            exit(4)
+        }
+    }
+
+    private static func strokeCount(_ store: EditStateStore) -> Int {
+        store.edit.masks.reduce(0) { $0 + $1.strokes.count }
+    }
+
+    /// Runs each step with a settle (render/decode quiescence) in between.
+    private static func runSteps(_ steps: [() -> Void], model: AppModel,
+                                 then done: @escaping () -> Void) {
+        guard let first = steps.first else { done(); return }
+        first()
+        settle(model) { runSteps(Array(steps.dropFirst()), model: model, then: done) }
+    }
+
+    /// Pushes a real keystroke into the app.
+    ///
+    /// The event is built as a **`CGEvent`** and converted with
+    /// `NSEvent(cgEvent:)`, not with `NSEvent.keyEvent(with:…)`. That is not
+    /// incidental: AppKit's menu key-equivalent matching consults the event's
+    /// underlying CGEvent (key code plus the current keyboard layout), so a
+    /// hand-rolled `NSEvent` with the "right" character strings matches
+    /// differently from a real keystroke — measured here: a hand-rolled
+    /// Cmd-Shift-Z matched nothing at all, while the CGEvent-shaped one matches
+    /// Redo. A self-test that used the hand-rolled form would report a bug the
+    /// user does not have, or miss one they do.
+    ///
+    /// `NSApp.sendEvent` is the same entry point the window server uses, so this
+    /// goes through menu key-equivalent matching, item validation and all.
+    private static func sendKey(_ characters: String, modifiers: NSEvent.ModifierFlags,
+                                window: NSWindow) {
+        log("undo self-test: sending key \(describe(modifiers))\(characters)")
+        guard let source = CGEventSource(stateID: .privateState) else {
+            fail("could not make a CGEventSource")
+        }
+        var flags: CGEventFlags = []
+        if modifiers.contains(.command) { flags.insert(.maskCommand) }
+        if modifiers.contains(.shift) { flags.insert(.maskShift) }
+        for isDown in [true, false] {
+            guard let cg = CGEvent(keyboardEventSource: source, virtualKey: 6 /* Z */,
+                                   keyDown: isDown) else { fail("could not make a CGEvent") }
+            cg.flags = flags
+            guard let event = NSEvent(cgEvent: cg) else { fail("CGEvent -> NSEvent failed") }
+            if isDown {
+                log("undo self-test:   event characters='\(event.characters ?? "")' "
+                    + "ignoringModifiers='\(event.charactersIgnoringModifiers ?? "")' "
+                    + "flags=\(event.modifierFlags.rawValue)")
+            }
+            NSApp.sendEvent(event)
+        }
+    }
+
+    private static func describe(_ modifiers: NSEvent.ModifierFlags) -> String {
+        (modifiers.contains(.command) ? "Cmd-" : "") + (modifiers.contains(.shift) ? "Shift-" : "")
+    }
+
+    /// What the menu bar thinks of an item right now — the thing that decides
+    /// whether the key equivalent fires at all.
+    private static func menuItemState(_ title: String) -> String {
+        guard let main = NSApp.mainMenu else { return "no-main-menu" }
+        for top in main.items {
+            guard let submenu = top.submenu else { continue }
+            submenu.update()
+            if let item = submenu.items.first(where: { $0.title == title }) {
+                return item.isEnabled ? "enabled" : "DISABLED"
+            }
+        }
+        return "missing"
+    }
+
+    /// Every menu item AppKit currently has, with the facts that decide whether
+    /// a key equivalent fires: enablement, autoenabling, target and action.
+    private static func dumpMenus() {
+        guard let main = NSApp.mainMenu else {
+            log("undo self-test: NSApp.mainMenu is nil")
+            return
+        }
+        for top in main.items {
+            guard let submenu = top.submenu else { continue }
+            submenu.update()
+            log("undo self-test: menu '\(top.title)' autoenables=\(submenu.autoenablesItems)")
+            for item in submenu.items where !item.isSeparatorItem {
+                log("undo self-test:   item '\(item.title)' enabled=\(item.isEnabled) "
+                    + "key='\(item.keyEquivalent)' mask=\(item.keyEquivalentModifierMask.rawValue) "
+                    + "action=\(item.action.map(String.init(describing:)) ?? "nil") "
+                    + "target=\(item.target.map { String(describing: type(of: $0)) } ?? "nil")")
+            }
+        }
+    }
+
+    /// Logs every Observation notification for `canUndo` / `canRedo`, i.e. every
+    /// moment SwiftUI would re-evaluate the Edit menu's `.disabled(…)`.
+    private static func trackUndoAvailability(_ store: EditStateStore) {
+        withObservationTracking {
+            _ = store.canUndo
+            _ = store.canRedo
+        } onChange: {
+            DispatchQueue.main.async {
+                log("undo self-test: observation fired -> canUndo=\(store.canUndo) "
+                    + "canRedo=\(store.canRedo)")
+                trackUndoAvailability(store)
+            }
+        }
     }
 
     // MARK: - Output
@@ -234,6 +445,13 @@ enum SelfTest {
                                                          1, nil) else { return }
         CGImageDestinationAddImage(dest, image, nil)
         CGImageDestinationFinalize(dest)
+    }
+
+    /// A trace line from elsewhere in the app, printed only while a self-test is
+    /// running so the normal app stays silent.
+    static func note(_ message: String) {
+        guard isRequested else { return }
+        log("trace: " + message)
     }
 
     private static func log(_ message: String) {

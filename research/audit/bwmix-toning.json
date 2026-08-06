@@ -1,0 +1,115 @@
+{
+  "deviations": [
+    {
+      "aspect": "B&W mix authority: how far \u00b1100 can push a colour (and how saturation is weighted)",
+      "lightroom_behavior": "In LrC's B&W panel a channel at \u2212100 renders a saturated source colour essentially black and at +100 drives it to near-white/clipping \u2014 this is the whole point of the panel (the \"red filter\" sky effect: Blue/Aqua at \u2212100 turns an ordinary blue sky nearly black, and community guidance explicitly warns that \"pulling the Blue and Aqua sliders way down can increase noise\" and that large mixer moves produce banding/artifacts \u2014 Adobe added PV6 specifically to \"reduce banding when using the Color Mixer and B&W Mixer adjustments\"). The response is large enough on ordinary, only-moderately-saturated subjects (skies, foliage, skin) to restructure the whole tonal composition.",
+      "our_behavior": "gain = 1 + mixAmount \u00b7 0.008 \u00b7 sat, with sat = HSV saturation of the 1/2.2-gamma-encoded linear RGB (Sources/GrayroomCore/Shaders/BWMix.metal:48-53; constant at Sources/GrayroomCore/Engine/Uniforms.swift:102). Two compounding problems. (a) Even at sat = 1 the range is \u00d70.2 \u2026 \u00d71.8, i.e. \u22122.3 EV / +0.85 EV, and it is asymmetric in EV \u2014 the mixer can never brighten a colour by even one stop. (b) Gamma-encoding *lowers* HSV saturation (sat_enc = 1 \u2212 (mn/mx)^(1/2.2) < 1 \u2212 mn/mx), so real subjects get far less than the nominal authority. Worked example, a clear blue sky at linear (0.25, 0.45, 1.0): sat_enc \u2248 0.47, so Blue = \u2212100 gives gain 0.63 = \u22120.68 EV. Lightroom renders the same sky several stops darker. Foliage and skin (sat_enc \u2248 0.2\u20130.3) move by ~0.3 EV at full slider \u2014 the sliders feel inert.",
+      "severity": "high",
+      "effort": "S",
+      "proposed_fix": "Make the gain exponential and symmetric, and soften the saturation weight: gain = exp2(kEV \u00b7 (slider/100) \u00b7 w(sat)) with kEV \u2248 3 (tunable constant next to bwGainPerUnit, Uniforms.swift:102) and w(sat) = sat^0.6 (or use the saturation of the *linear* RGB, which is already larger). That gives \u00b13 EV at full saturation, \u2248 \u00b11.4 EV on a real blue sky, symmetric in stops, still exactly identity at sat = 0 and still monotone. Keep the existing neutral-invariance test; add a test that a saturated patch at \u2212100 lands below ~1/8 of its untouched luminance. Note TATBandMath.hueSaturation (Sources/GrayroomUI/TATBandMath.swift:86) duplicates the same encode and must move with it.",
+      "confidence": "inferred",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "https://helpx.adobe.com/camera-raw/using/process-versions.html",
+        "https://digital-photography-school.com/3-tips-for-better-black-and-white-conversion-using-lightroom/",
+        "https://scottdavenportphoto.com/blog/black-white-refinements-with-the-color-mixer"
+      ]
+    },
+    {
+      "aspect": "Split toning: neutral \"dead zone\" in the midtones \u2014 shadow and highlight weights do not sum to 1 at the crossover",
+      "lightroom_behavior": "Legacy Split Toning (and its Color Grading successor, where the legacy settings are remapped to the Shadows/Highlights wheels plus Blending \"to achieve a perfect match\") applies a continuous crossover: the shadow and highlight tints overlap through the midtones, with Blending (0\u2013100, default 50) controlling how much they overlap. Setting both wheels to the same hue and saturation gives a *uniform* single-colour tone (the classic sepia/selenium recipe); no tonal band is left neutral. Only the extreme shadows and extreme highlights stay black and white (Adobe: \"The extreme shadows and highlights remain black and white\").",
+      "our_behavior": "sw = 1 \u2212 smoothstep(0, pivot, t) and hw = smoothstep(pivot, 1, t) (Sources/GrayroomCore/Shaders/Toning.metal:39-40). Both are exactly 0 at t = pivot and both are small around it, so there is a wide untinted band through the midtones. At balance 0 (pivot 0.5, t = sqrt(Y)) the weights are: t = 0.3 \u2192 0.35, t = 0.4 \u2192 0.10, t = 0.5 \u2192 0.00, t = 0.6 \u2192 0.10, t = 0.7 \u2192 0.35. In sRGB terms everything between roughly 33 % and 73 % grey is essentially untinted, and mid-grey (\u224854 %) is *exactly* neutral. Peak shadow weight is only \u22480.93 and it sits at t \u2248 0.08 (Y \u2248 0.006, \u22489 % sRGB), so the shadow tint is squeezed into the deepest shadows. Consequence: setting both wheels to the same sepia hue produces a picture with tinted ends and a grey middle \u2014 visibly not what Lightroom does.",
+      "severity": "high",
+      "effort": "S",
+      "proposed_fix": "Make the two weights complementary instead of independent: w_h = smootherstep over a crossover of controllable width centred on the pivot, w_s = 1 \u2212 w_h, then apply the existing endpoint neutrality fades (Toning.metal:43-44) to both. Blend the two tints by weight (lerp between the shadow tint and the highlight tint by w_h) rather than multiplying two independent factors (Toning.metal:46-60), so equal hues collapse to one uniform tint by construction. Expose the crossover half-width as the Blending control later; hard-code \u22480.35 in t for now to match LR's Blending = 50 feel. Add a golden test: shadowHue == highlightHue, both sat 100 \u2192 resulting chroma is within a few percent across the whole tonal ramp.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "https://jkost.com/blog/2020/10/lightroom-classic-v10.html",
+        "https://thelenslounge.com/2020-lightroom-update-color-grading/"
+      ]
+    },
+    {
+      "aspect": "Split toning is exactly luminance-preserving; Lightroom's is not",
+      "lightroom_behavior": "Toning in LR/ACR changes brightness as well as colour. Adobe's own answer to this is the per-wheel Luminance slider added with Color Grading, and Adobe's tutorial material states the use case explicitly: \"You'll find the luminance slider helpful if, by adding a particular color to the shadows, for example, it brightens the image. In this case simply drag the luminance slider to the left to darken the color again.\" So hue+saturation alone shift luminance (typically lifting shadows toward the tint), which is a large part of why LR toning reads as film-like rather than as a pure hue overlay. Legacy Split Toning rendered through the same engine.",
+      "our_behavior": "Every tint is normalised to luminance 1 and the product is renormalised so dot(factor, kLuma) == 1 exactly (Sources/GrayroomCore/Shaders/Toning.metal:51, 58, 63; documented at Sources/GrayroomCore/README.md:488-491). Output luminance equals input luminance bit-for-bit modulo the sRGB clamp, so toning can never lift the blacks or warm-brighten the highlights. Practical effect: sepia/selenium looks come out flat \u2014 the colour is there but the tonal \"lift\" that makes them read as toned prints is missing. (The one place luminance *does* move is unintended: extreme tints push a channel past 1.0 and get clipped by the output transform, which lowers luminance.)",
+      "severity": "medium",
+      "effort": "S",
+      "proposed_fix": "Replace the hard renormalisation with a partial one: factor /= pow(dot(factor, kLuma), lumaPreserve) with lumaPreserve \u2248 0.5 as a constant next to StageConstants.toningStrength (Uniforms.swift:104). lumaPreserve = 1 is today's behaviour, 0 is the raw un-normalised tint; 0.5 gives roughly half the luminance excursion LR shows while keeping the stage well-behaved. Relax the existing 3 % luminance-invariance assertion to a bounded excursion (e.g. within 0.5 EV) rather than deleting it. Longer term the per-range Luminance sliders (see the Color Grading item) are the real answer.",
+      "confidence": "community-measured",
+      "sources": [
+        "https://www.adobe.com/learn/lightroom-cc/web/adjust-photo-tone-with-color-grading",
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "https://gregbenzphotography.com/photography-tips/split-toning-and-color-grading-in-lr-acr-13/"
+      ]
+    },
+    {
+      "aspect": "Split toning: what Saturation 0\u2013100 means, and its strong hue dependence",
+      "lightroom_behavior": "On the Color Grading wheels saturation is radius \u2014 0 % at the centre, 100 % at the rim \u2014 and the rim is a perceptually even ring, so Saturation 100 gives comparable colourfulness whatever hue you pick. It is a strong but still tonal tint; it does not turn shadows into a single near-pure channel.",
+      "our_behavior": "The tint is HSV-pure RGB for the hue, divided by its own luminance, mixed toward at up to 0.75 (Sources/GrayroomCore/Shaders/Toning.metal:50-59; StageConstants.toningStrength = 0.75 at Uniforms.swift:104). Because the luminance normaliser is per-hue, the resulting channel gains differ by an order of magnitude across the hue circle. Blue: pure (0,0,1) has Y = 0.0722, so the normalised tint is (0,0,13.9) and at saturation 100 the factor after renormalisation is \u2248(0.245, 0.245, 10.7) \u2014 the blue channel is multiplied by ~10.7 and the shadows go essentially pure blue (and clip). Yellow: pure (1,1,0) has Y = 0.928, factor \u2248 (1.06, 1.06, 0.25) \u2014 a comparatively gentle tint. So the same Saturation number is neon for blue/magenta/purple and mild for yellow/orange, and the far end of the slider is far more extreme than Lightroom's.",
+      "severity": "medium",
+      "effort": "M",
+      "proposed_fix": "Stop building the tint from an HSV-pure primary. Define the tint as a fixed-magnitude chroma offset in an opponent space: convert grey to a Lab-like or YCbCr-like representation, add chroma of magnitude s\u00b7Cmax at the wheel angle (Cmax a single constant, tuned so saturation 100 is strong-but-tonal), convert back and clip softly. That makes strength hue-independent by construction and removes the per-hue luminance normaliser entirely. Keep hue in degrees so the sidecar schema is unchanged. Cheap interim mitigation if the opponent-space rewrite is too much: divide the mix amount by the per-hue chroma of the normalised tint so all hues reach the same |factor \u2212 1|.",
+      "confidence": "inferred",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "https://gregbenzphotography.com/photography-tips/split-toning-and-color-grading-in-lr-acr-13/"
+      ]
+    },
+    {
+      "aspect": "Auto B&W Mix",
+      "lightroom_behavior": "The B&W panel has an Auto button that \"sets a grayscale mix that maximizes the distribution of gray tones\" and is the documented starting point for a conversion; a preference (Preferences > Presets > \"Apply auto mix when first converting to black and white\") can apply it automatically on conversion. It is deterministic, content-dependent and usually mild \u2014 it is a starting point, not a look.",
+      "our_behavior": "Not implemented anywhere \u2014 there is no auto path in the mix stage or the model (no hits for auto mix in Sources/; the mix stage is Sources/GrayroomCore/Shaders/BWMix.metal and the state is EditState.BWMix at Sources/GrayroomCore/EditState.swift:141-190). The user always starts from all-zero sliders, which for a low-contrast colour scene gives a noticeably flatter conversion than LR's default entry point.",
+      "severity": "medium",
+      "effort": "M",
+      "proposed_fix": "Headless, testable, no GPU work beyond a readback that already exists: render the pipeline up to the stage *before* bwMix at reduced resolution (Pipeline.render(upTo:) already supports this), then on the CPU accumulate per-band mass m_b = \u03a3 sat\u00b7w_b(hue) and mean pre-mix luminance L_b = \u03a3 sat\u00b7w_b\u00b7Y / m_b using the same grBandMix weights (BWMixBands.centers, Uniforms.swift:93). Set slider_b = clamp(k \u00b7 (log2(Ytarget_b) \u2212 log2(L_b)) / kEV, \u2212100, 100) where the targets spread the well-populated bands evenly over the tonal range (rank the bands by L_b and assign equally spaced target luminances between the image's 10th and 90th percentile), and damp bands with small m_b toward 0. That is a literal reading of \"maximises the distribution of gray tones\", is a pure function of a small histogram, and unit-tests trivially on synthetic colour wheels. Expose as `grayroom render --auto-bw-mix` / a Swift API before wiring a GUI button.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "https://helpx.adobe.com/lightroom-classic/kb/apply-auto-tone-mix-converting-black-white-preferences-removed.html"
+      ]
+    },
+    {
+      "aspect": "B&W mix hue band centres, especially purple and magenta",
+      "lightroom_behavior": "LrC's mixer has the three primaries, the three secondaries (yellow, magenta, and cyan renamed \"aqua\"), plus orange and purple. The TAT reports at most two colours for any pixel, confirming that LR blends only between the two bracketing bands \u2014 the same partition-of-unity model we use. Adobe does not publish the centres, and I could not find a credible measurement of them; the frequently repeated reading of the naming is that magenta sits at the secondary (300\u00b0) with purple between blue and magenta (~270\u2013285\u00b0).",
+      "our_behavior": "Centres are 0, 30, 60, 120, 180, 240, 280, 320 (Sources/GrayroomCore/Shaders/BWMix.metal:12, mirrored at Sources/GrayroomCore/Engine/Uniforms.swift:93, pinned by GPUStageTests.testBandCentresMatchTheShader). With magenta at 320 a *pure* magenta pixel (HSV 300\u00b0) gets a 50/50 blend of the Purple and Magenta sliders instead of landing on Magenta, and the whole 240\u2013360 sector is compressed relative to a secondary-at-300 layout. Visible as \"the wrong slider moves\" when a user drags on a magenta/violet subject, and as a mismatch when copying slider values from an LR edit.",
+      "severity": "low",
+      "effort": "S",
+      "proposed_fix": "Calibrate rather than guess: build a synthetic hue-ramp image, open it in LrC with Treatment = B&W, and walk the TAT across it \u2014 LrC names the (at most two) channels it will move at each hue, which reads the centres and the crossover points straight off. Then set BWMixBands.centers (Uniforms.swift:93) accordingly; the shader constant and the TAT math already follow from that one array plus the pinning test. If no measurement is ever made, moving purple/magenta to 285/330 (or 270/300) is a defensible one-line change; document it as an approximation in README.md:459-476 rather than as fact.",
+      "confidence": "inferred",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/color-mixer.html",
+        "https://community.adobe.com/t5/lightroom-classic-discussions/color-mixer-target-inspector-adjusting-multiple-colors/td-p/14461790",
+        "https://www.capturelandscapes.com/hsl-color-panel-in-lightroom/"
+      ]
+    },
+    {
+      "aspect": "Base grey conversion with all mixer sliders at zero",
+      "lightroom_behavior": "Setting Treatment = Black & White on a raw file applies the Adobe Monochrome profile (or the configured raw default) as the rendering base, and only then does the mixer modulate it. That base is a camera-profile rendering, not a Rec.709 luma weighting \u2014 so LR's \"all sliders zero\" conversion has its own characteristic response (notably it does not give greens the ~0.72 weight Rec.709 does).",
+      "our_behavior": "The base is exactly Rec.709/sRGB luma, Y = 0.2126R + 0.7152G + 0.0722B (grLuminance, Sources/GrayroomCore/Shaders/Common.metal:11-18, used at Sources/GrayroomCore/Shaders/BWMix.metal:45). Foliage renders unusually light and deep blues unusually dark relative to a Lightroom default conversion of the same file, so every image starts from a different place than LR \u2014 which also means LR slider values copied into Grayroom will not land in the same neighbourhood even if everything else matched.",
+      "severity": "medium",
+      "effort": "M",
+      "proposed_fix": "Decide and document a base explicitly rather than inheriting the display luma weights. Cheapest defensible option: add a `baseWeights` constant (a normalised 3-vector) used only by bwMixKernel, defaulting to something more panchromatic-film-like (e.g. ~0.30/0.55/0.15) so greens are less dominant, and leave grLuminance alone for the tone/clarity stages that legitimately want display luminance. Compare against an LR export of the same DNG at all-zero mixer to pick the numbers. Strictly this straddles the decode/profile area, so triage it together with whatever is decided about camera profiles.",
+      "confidence": "inferred",
+      "sources": [
+        "https://mastering-lightroom.com/black-white-profiles-lightroom-classic/",
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html"
+      ]
+    },
+    {
+      "aspect": "Color Grading: no midtones wheel, no global wheel, no Blending, no per-range Luminance (upgrade path, effort only)",
+      "lightroom_behavior": "Since LrC 10 the panel is four wheels \u2014 Shadows, Midtones, Highlights and Global \u2014 each with Hue (0\u2013360) and Saturation (0\u2013100) plus a Luminance slider (\u2212100..+100), a Blending slider (0\u2013100, default 50) that \"sets the amount of overlap between shadows and highlights\", and Balance (\u2212100..+100). Legacy Split Toning settings are remapped onto Shadows/Highlights (plus Blending) so old edits render identically.",
+      "our_behavior": "Two ranges only, hue+saturation only, fixed crossover width, no Global, no Luminance: EditState.Toning has exactly shadowHue/shadowSaturation/highlightHue/highlightSaturation/balance (Sources/GrayroomCore/EditState.swift:195-233), ToningUniforms mirrors it (Sources/GrayroomCore/Engine/Uniforms.swift:23-30, Pipeline.swift:146-152), and the shader hard-codes the crossover shape (Sources/GrayroomCore/Shaders/Toning.metal:37-44).",
+      "severity": "low",
+      "effort": "M",
+      "proposed_fix": "The 2-wheel \u2192 3-wheel + global path is additive and cheap if the crossover is fixed first (see the dead-zone item). (1) EditState.Toning gains midtoneHue/Sat, globalHue/Sat, blending and three luminance values, all decodeIfPresent-defaulted to 0/50 so existing sidecars still load and old edits still render \u2014 no schema version bump. (2) ToningUniforms grows to match; the kernel evaluates three weights w_s + w_m + w_h = 1 (a triangular midtone hat between two complementary crossovers whose width comes from blending, both shifted by balance), blends the three tints by weight, then applies the global tint at weight 1 on top. (3) Luminance per range is a weight-scaled EV offset applied before the tint. Roughly a day: one struct, one kernel rewrite, plus golden tests. Do it after the crossover and hue-independence fixes, not before \u2014 those change the same lines.",
+      "confidence": "documented",
+      "sources": [
+        "https://helpx.adobe.com/lightroom-classic/help/image-tone-color.html",
+        "https://jkost.com/blog/2020/10/lightroom-classic-v10.html",
+        "https://thelenslounge.com/2020-lightroom-update-color-grading/"
+      ]
+    }
+  ],
+  "notes": "Scope: Sources/GrayroomCore/Shaders/BWMix.metal, Shaders/Toning.metal, Shaders/Common.metal (grLuminance/grHueSat/grHueToRGB), Engine/Uniforms.swift, Engine/Pipeline.swift:132-160, EditState.swift (BWMix/Toning), GrayroomUI/TATBandMath.swift, and the corresponding README sections (Sources/GrayroomCore/README.md:459-491). Read-only; nothing was modified and no build/test was run.\n\nResearch limits, stated honestly: Adobe publishes behaviour, not math, for both the B&W Mixer and Color Grading, and I could not find any credible reverse-engineered measurement of (a) LR's eight hue band centres in degrees, (b) the mixer's slider-to-gain law, or (c) the split-toning tonal weighting curve. Searches across Adobe helpx, the Adobe community forums, pixls.us, Kost/Benz/Evening material and general photography sources turned up only qualitative statements. So the two \"how strong is it\" items are marked `inferred`: the *direction* and rough magnitude are solid (LR's mixer drives saturated colours to near-black/near-white; LR toning changes luminance and Adobe's own tutorials tell you to undo that with the Luminance slider), but the exact constants I propose are tuning targets, not measurements. Two of them are cheaply measurable by the maintainer with an LrC licence and a synthetic test chart, and I gave the procedure in the band-centres item.\n\nThings I deliberately did NOT report as deviations, because they are implementation detail with no distinct user-visible behaviour: the sqrt(Y) tonal domain vs. a proper L* (monotone, within a few percent of an sRGB-gamma domain over the relevant range); smoothstep vs. some other C1 blend between band centres (LR also blends between exactly two bands \u2014 confirmed by the TAT reporting at most two colours); the min(rgb, 64) guard before gamma encoding; the pivot clamp to [0.08, 0.92]; and the toning stage being skipped when both saturations are zero.\n\nOrdering note (not a deviation): our decode \u2192 tone \u2192 clarity \u2192 bwMix \u2192 toning matches the widely reported ACR order (tone \u2192 tone curve \u2192 HSL/B&W mix \u2192 color grading), so the stage sequence itself is fine.\n\nTwo of the fixes touch the same lines of Toning.metal (the crossover weights and the tint construction). If both are taken, do the crossover fix first, then the hue-independent tint, then reconsider the luminance-preservation constant \u2014 the last one is only meaningful once the first two are in."
+}

@@ -108,6 +108,75 @@ final class EditStateStoreTests: XCTestCase {
         XCTAssertFalse(store.isDirty)
     }
 
+    // MARK: - Undo availability
+
+    /// `canUndo` / `canRedo` are stored mirrors of the undo manager now; every
+    /// path that moves the stack has to keep them honest.
+    func testUndoAvailabilityTracksTheStack() {
+        let store = makeStore()
+        XCTAssertFalse(store.canUndo)
+        XCTAssertFalse(store.canRedo)
+
+        store.perform("A") { $0.tone.exposure = 1 }
+        XCTAssertTrue(store.canUndo)
+        XCTAssertFalse(store.canRedo)
+
+        store.perform("B") { $0.clarity = 40 }
+        XCTAssertTrue(store.canUndo)
+        XCTAssertFalse(store.canRedo, "a fresh edit ends the redo branch")
+
+        store.undo()
+        XCTAssertTrue(store.canUndo)
+        XCTAssertTrue(store.canRedo)
+
+        store.undo()
+        XCTAssertFalse(store.canUndo, "the stack is at the bottom")
+        XCTAssertTrue(store.canRedo)
+
+        store.redo()
+        XCTAssertTrue(store.canUndo)
+        XCTAssertTrue(store.canRedo)
+
+        store.redo()
+        XCTAssertTrue(store.canUndo)
+        XCTAssertFalse(store.canRedo, "the stack is at the top")
+    }
+
+    func testAvailabilityMirrorsTheUndoManagerAfterAGesture() {
+        let store = makeStore()
+        store.beginGesture()
+        store.update { $0.tone.exposure = 1 }
+        XCTAssertFalse(store.canUndo, "a gesture in progress is not yet undoable")
+        store.endGesture(named: "Exposure")
+        XCTAssertTrue(store.canUndo)
+        XCTAssertEqual(store.canUndo, store.undoManager.canUndo)
+        XCTAssertEqual(store.canRedo, store.undoManager.canRedo)
+    }
+
+    func testReplaceWithoutANameClearsBothDirections() {
+        let store = makeStore()
+        store.perform("A") { $0.tone.exposure = 1 }
+        store.undo()
+        XCTAssertTrue(store.canRedo)
+
+        store.replace(EditState(), named: nil)
+        XCTAssertFalse(store.canUndo)
+        XCTAssertFalse(store.canRedo)
+    }
+
+    /// A named replace is an ordinary undoable edit.
+    func testReplaceWithANameIsUndoable() {
+        let store = makeStore()
+        var loaded = EditState()
+        loaded.clarity = 30
+        store.replace(loaded, named: "Paste Settings")
+        XCTAssertTrue(store.canUndo)
+        store.undo()
+        XCTAssertEqual(store.edit, EditState())
+        XCTAssertFalse(store.canUndo)
+        XCTAssertTrue(store.canRedo)
+    }
+
     // MARK: - White balance
 
     func testAsShotIsShownWhenTheEditIsNil() {
