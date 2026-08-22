@@ -4,7 +4,8 @@ The imaging core. Everything here runs headlessly; the GUI (M4) will be a thin
 shell over these types.
 
 ```
-Decode/     CIRAWFilter -> linear scene-referred rgba16Float MTLTexture
+Decode/     CIRAWFilter (RAW) or CIImage (JPEG/TIFF/PNG/HEIC)
+            -> linear scene-referred rgba16Float MTLTexture
 Engine/     MetalContext (runtime-compiled shader library), Pipeline, Renderer, Histogram
 Stages/     CPU-side stage support (the tone curve + its LUT, the clarity mapping)
 Masks/      stroke model, CPU reference rasterizer, GPU rasterisation + param maps
@@ -21,6 +22,52 @@ The `.metal` files are declared as `.copy` resources in `Package.swift`, read as
 text at startup, concatenated (`Common.metal` first) and compiled with
 `MTLDevice.makeLibrary(source:options:)`. No metallib is produced or bundled, so
 `swift build && swift test` works from a plain terminal with no Xcode project.
+
+## Decode — two paths, one contract
+
+`ImageDecoder` dispatches on the file's UTType (`ImageFormat.isRAW`):
+
+**RAW** goes through `CIRAWFilter` with Apple's "pleasing rendering" zeroed
+(`neutralize()`: baseline exposure, shadow bias, boost, local tone map, gamut
+mapping and capture sharpening all off). Temp/tint set `neutralTemperature` /
+`neutralTint`, i.e. they choose which illuminant the sensor data is interpreted
+against.
+
+**Standard images** (JPEG, TIFF, PNG, HEIC) go through
+`CIImage(contentsOf:options: [.applyOrientationProperty: true])`, which honours
+the embedded ICC profile. Rendering through the shared `CIContext` — whose
+working space is extended linear sRGB — is what linearizes them: an sRGB code
+value of 128 lands at 0.2159, not 0.5 (measured; the sRGB EOTF gives 0.21586).
+Core Image applies no auto-enhance or tone mapping unless asked, and this does
+not ask.
+
+The two paths differ in what white balance *means*, and the difference is real
+rather than an implementation detail. A RAW has an illuminant to name. A JPEG has
+already been demosaiced and white-balanced once and is D65 by construction, so
+there is nothing left to name: temp/tint become a **relative** shift, applied
+with `CITemperatureAndTint` before the render, and `asShotTemperature` /
+`asShotTint` report 6500 / 0 so the UI's "As Shot" reset lands on no correction.
+
+The argument order in that filter is worth stating, because the obvious
+assignment is backwards. `CITemperatureAndTint` adapts *from* `neutral` *to*
+`targetNeutral`, so putting the slider value in `targetNeutral` makes a higher
+Kelvin **cool** the image — the opposite of `CIRAWFilter`, where raising
+`neutralTemperature` warms it (measured on a test DNG: R/B 0.18 at 3624 K, 0.84
+at 6040 K, 1.55 at 9665 K). A slider that reverses meaning depending on the
+file's format would be a bug, so the slider value goes in `neutral` and the D65
+reference in `targetNeutral`. Measured that way, the standard path tracks the RAW
+one on both axes: R/B 0.35 at 4000 K and 1.49 at 9000 K, and (R+B)/2G 0.68 at
+tint −60 and 1.59 at tint +80, against 0.70 and 1.61 from `CIRAWFilter`.
+
+Both paths share the reduction / origin / flip / render tail, so preview and
+export cannot drift apart between formats. Fields that only mean something for a
+RAW — decoder version, lens correction, a separate preview image — report their
+honest "not applicable" value for a standard image rather than a plausible
+fiction, and `ImageInfo.isRAW` says which path a file took.
+
+Because white balance is applied at decode time on **both** paths, `DecodeKey`
+still has to include temp/tint: changing them invalidates the decode cache, not
+just the pipeline.
 
 ## Pipeline order
 
@@ -143,7 +190,7 @@ Three things fall out of the EV-space choice:
 either: opening a raw applies a camera profile whose baseline tone curve
 "brightens essentially all pixel values while increasing shadow contrast and
 decreasing highlight contrast". Grayroom's decode is deliberately neutralised
-(`RawDecoder.neutralize()` zeroes Apple's boost), so before wave 1 the pipeline
+(`ImageDecoder.neutralize()` zeroes Apple's boost), so before wave 1 the pipeline
 started from scene-linear and every frame looked ~1 stop dark and ~1.7 stops
 flat.
 
@@ -1153,7 +1200,7 @@ of encoded values does.
 
 ### Capture sharpening
 
-`RawDecoder.neutralize` sets `sharpnessAmount = 0` (wave 3, audit `decode-output`
+`ImageDecoder.neutralize` sets `sharpnessAmount = 0` (wave 3, audit `decode-output`
 #3). Apple's per-camera default for the test Leicas is 0.9 — measured +83 %
 Laplacian-of-log-luminance RMS on a full-res centre crop — and CIRAWFilter
 silently disables it whenever `scaleFactor < 1`, so it is not a value the
@@ -1191,7 +1238,7 @@ photo_tags   photo_id -> photos, tag_id -> tags        PRIMARY KEY(photo_id, tag
 ```
 
 `Importer` hashes a file, probes it for capture date, camera and GPS through
-`RawDecoder.probe` (metadata only, no GPU), and upserts the photo and its
+`ImageDecoder.probe` (metadata only, no GPU), and upserts the photo and its
 location. A path whose bytes have changed is repointed at the photo they now
 hash to.
 

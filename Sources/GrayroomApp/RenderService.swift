@@ -27,7 +27,7 @@ final class RenderService {
 
     // MARK: - Probe / decode
 
-    func probe(url: URL, completion: @escaping (Result<RawInfo, Error>) -> Void) {
+    func probe(url: URL, completion: @escaping (Result<ImageInfo, Error>) -> Void) {
         run(queue) { try self.renderer.decoder.probe(url: url) } completion: { completion($0) }
     }
 

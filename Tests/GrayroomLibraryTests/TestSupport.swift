@@ -1,4 +1,7 @@
+import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 import XCTest
 @testable import GrayroomLibrary
 
@@ -22,6 +25,42 @@ final class TempLibrary {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         try contents.write(to: url)
+        return url
+    }
+
+    /// A real, ImageIO-written image in the sandbox — the importer's default
+    /// probe actually decodes these, so they cannot be made of arbitrary bytes
+    /// the way the RAW-stub tests' files are.
+    @discardableResult
+    func writeJPEG(_ name: String, width: Int, height: Int,
+                   type: UTType = .jpeg) throws -> URL {
+        let url = directory.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        for i in 0..<(width * height) {
+            // A gradient, so the encoder has something to chew on and two files
+            // of different sizes never collide on content hash.
+            let value = UInt8((i * 251) % 256)
+            bytes[i * 4] = value
+            bytes[i * 4 + 1] = value
+            bytes[i * 4 + 2] = value
+            bytes[i * 4 + 3] = 255
+        }
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue)
+        let provider = CGDataProvider(data: Data(bytes) as CFData)!
+        let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+                            bytesPerRow: width * 4, space: space, bitmapInfo: info,
+                            provider: provider, decode: nil, shouldInterpolate: false,
+                            intent: .defaultIntent)!
+        guard let destination = CGImageDestinationCreateWithURL(
+            url as CFURL, type.identifier as CFString, 1, nil)
+        else { throw XCTSkip("ImageIO cannot write \(type.identifier)") }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            throw XCTSkip("ImageIO could not finalize \(type.identifier)")
+        }
         return url
     }
 

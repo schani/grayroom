@@ -15,7 +15,7 @@ final class EndToEndTests: XCTestCase {
     func testProbeRealDNG() throws {
         let url = try requireDNG()
         let (ctx, _) = try TestGPU.require()
-        let info = try RawDecoder(metal: ctx).probe(url: url)
+        let info = try ImageDecoder(metal: ctx).probe(url: url)
         XCTAssertGreaterThan(info.nativeSize.width, 1000)
         XCTAssertGreaterThan(info.nativeSize.height, 1000)
         XCTAssertGreaterThan(info.asShotTemperature, 1500)
@@ -26,7 +26,7 @@ final class EndToEndTests: XCTestCase {
 
     func testNonRAWInputIsRejected() throws {
         let (ctx, _) = try TestGPU.require()
-        let decoder = RawDecoder(metal: ctx)
+        let decoder = ImageDecoder(metal: ctx)
         let file = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("not-a-raw-\(UUID().uuidString).txt")
         try Data("hello".utf8).write(to: file)
@@ -42,7 +42,7 @@ final class EndToEndTests: XCTestCase {
     func testDecodeIsLinearAndScaled() throws {
         let url = try requireDNG()
         let (ctx, _) = try TestGPU.require()
-        let decoded = try RawDecoder(metal: ctx).decode(url: url, maxDimension: 512)
+        let decoded = try ImageDecoder(metal: ctx).decode(url: url, maxDimension: 512)
         XCTAssertLessThanOrEqual(max(decoded.width, decoded.height), 512)
         XCTAssertGreaterThan(min(decoded.width, decoded.height), 100)
 
@@ -123,7 +123,7 @@ final class EndToEndTests: XCTestCase {
         // Core Graphics produces from the same CIImage.
         let url = try requireDNG()
         let (ctx, _) = try TestGPU.require()
-        let decoded = try RawDecoder(metal: ctx).decode(url: url, maxDimension: 256)
+        let decoded = try ImageDecoder(metal: ctx).decode(url: url, maxDimension: 256)
         let img = try TextureReadback.read(decoded.texture)
 
         guard let filter = CIRAWFilter(imageURL: url) else { throw XCTSkip("no RAW filter") }
@@ -135,17 +135,17 @@ final class EndToEndTests: XCTestCase {
         filter.isGamutMappingEnabled = false
         filter.scaleFactor = Float(256.0 / max(filter.nativeSize.width, filter.nativeSize.height))
         let ciImage = try XCTUnwrap(filter.outputImage)
-        let ciContext = CIContext(options: [.workingColorSpace: RawDecoder.workingColorSpace])
+        let ciContext = CIContext(options: [.workingColorSpace: ImageDecoder.workingColorSpace])
         let cg = try XCTUnwrap(ciContext.createCGImage(
             ciImage, from: ciImage.extent,
-            format: .RGBAh, colorSpace: RawDecoder.workingColorSpace))
+            format: .RGBAh, colorSpace: ImageDecoder.workingColorSpace))
 
         XCTAssertEqual(cg.width, img.width)
         XCTAssertEqual(cg.height, img.height)
 
         // Compare the mean luminance of the top and bottom eighth of both.
         var cgHalfs = [Float16](repeating: 0, count: cg.width * cg.height * 4)
-        let cs = RawDecoder.workingColorSpace
+        let cs = ImageDecoder.workingColorSpace
         let bmInfo = CGBitmapInfo.floatComponents.rawValue
             | CGBitmapInfo.byteOrder16Little.rawValue
             | CGImageAlphaInfo.premultipliedLast.rawValue

@@ -34,7 +34,7 @@ final class DecodeOutputTests: XCTestCase {
         for scale in [1.0, 0.5, 0.25] as [Float] {
             let f = try XCTUnwrap(CIRAWFilter(imageURL: url))
             f.scaleFactor = scale
-            RawDecoder.neutralize(f)
+            ImageDecoder.neutralize(f)
             XCTAssertEqual(f.sharpnessAmount, 0, "sharpening must be off at scaleFactor \(scale)")
             XCTAssertEqual(f.boostAmount, 0)
             XCTAssertEqual(f.baselineExposure, 0)
@@ -56,7 +56,7 @@ final class DecodeOutputTests: XCTestCase {
         let url = try requireDNG()
         let (ctx, _) = try TestGPU.require()
         let ciContext = CIContext(mtlCommandQueue: ctx.commandQueue,
-                                  options: [.workingColorSpace: RawDecoder.workingColorSpace,
+                                  options: [.workingColorSpace: ImageDecoder.workingColorSpace,
                                             .workingFormat: NSNumber(value: CIFormat.RGBAh.rawValue),
                                             .cacheIntermediates: false])
 
@@ -64,7 +64,7 @@ final class DecodeOutputTests: XCTestCase {
         func pixelScaleEnergy(scale: Float, sharpening: Float?) throws -> Double {
             let f = try XCTUnwrap(CIRAWFilter(imageURL: url))
             f.scaleFactor = scale
-            RawDecoder.neutralize(f)
+            ImageDecoder.neutralize(f)
             if let sharpening { f.sharpnessAmount = sharpening }
             let image = try XCTUnwrap(f.outputImage)
             let side = 512
@@ -76,7 +76,7 @@ final class DecodeOutputTests: XCTestCase {
                                                                      y: -originY)),
                              to: texture, commandBuffer: cb,
                              bounds: CGRect(x: 0, y: 0, width: side, height: side),
-                             colorSpace: RawDecoder.workingColorSpace)
+                             colorSpace: ImageDecoder.workingColorSpace)
             cb.commit()
             cb.waitUntilCompleted()
             let img = try TextureReadback.read(texture)
@@ -115,7 +115,7 @@ final class DecodeOutputTests: XCTestCase {
 
         // And grayroom's real decode path takes the unsharpened branch at full
         // resolution — the thing the export used to get wrong.
-        let decoder = RawDecoder(metal: ctx)
+        let decoder = ImageDecoder(metal: ctx)
         let decoded = try decoder.decode(url: url, maxDimension: nil)
         XCTAssertGreaterThan(max(decoded.width, decoded.height), 2560,
                              "precondition: this must be the full-resolution path")

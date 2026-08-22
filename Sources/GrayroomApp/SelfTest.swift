@@ -2,18 +2,20 @@ import AppKit
 import CoreGraphics
 import GrayroomCanvas
 import GrayroomCore
+import GrayroomLibrary
 import GrayroomUI
 import ImageIO
 import Metal
 import Observation
 import UniformTypeIdentifiers
 
-/// `GRAYROOM_SELFTEST=paint|undo swift run GrayroomApp <file.DNG>`
+/// `GRAYROOM_SELFTEST=paint|undo|import swift run GrayroomApp <file.DNG>`
 ///
-/// Two whole-app repros, each in its own process: `paint` (a stroke drawn with
-/// real mouse events) and `undo` (Cmd-Z / Cmd-Shift-Z pushed through the real
-/// menu-bar key-equivalent path). Both print PASS/FAIL lines and exit non-zero
-/// on failure.
+/// Whole-app checks, each in its own process: `paint` (a stroke drawn with real
+/// mouse events), `undo` (Cmd-Z / Cmd-Shift-Z pushed through the real menu-bar
+/// key-equivalent path) and `import` (the second window scene, its menu item,
+/// its grid and its selection commands). All print PASS/FAIL lines and exit
+/// non-zero on failure.
 ///
 /// Repro (c): the whole app, in its own process, painting a stroke with real
 /// `NSEvent`s and then telling you — on stdout, in the library and in a
@@ -33,6 +35,23 @@ enum SelfTest {
         /// Repro (d): Cmd-Z / Cmd-Shift-Z pushed through the real menu-bar key
         /// equivalent path, which is where the undo bug actually lived.
         case undo
+        /// The import window: the File › Import… item as AppKit sees it, the
+        /// second `Window` scene actually opening, thumbnails arriving in the
+        /// grid, and the selection commands moving the ring and the checkboxes.
+        ///
+        /// `GRAYROOM_SELFTEST_IMPORT_DIR` names the folder to scan (default
+        /// `testdata`). `GRAYROOM_SELFTEST_IMPORT_RUN=1` additionally presses
+        /// Import — which *writes to the library*, so run it with
+        /// `CFFIXED_USER_HOME` pointed at a throwaway directory:
+        ///
+        /// ```
+        /// CFFIXED_USER_HOME=$(mktemp -d) GRAYROOM_SELFTEST=import \
+        ///     GRAYROOM_SELFTEST_IMPORT_RUN=1 swift run GrayroomApp
+        /// ```
+        ///
+        /// `HOME` alone is not enough: Foundation resolves Application Support
+        /// from `CFFIXED_USER_HOME` or the passwd entry, not from `HOME`.
+        case importWindow = "import"
     }
 
     static var mode: Mode? {
@@ -50,8 +69,368 @@ enum SelfTest {
 
     static func startIfRequested() {
         guard isRequested else { return }
+        // The import window does not need a document, so it does not wait for
+        // one — pointing this mode at a RAW file just to get past the poll
+        // would be a decode the test has no use for.
+        if mode == .importWindow {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { runImportWindow() }
+            return
+        }
         log("self-test: waiting for the first render")
         poll()
+    }
+
+    // MARK: - The import-window test
+
+    private static func runImportWindow() {
+        var failures: [String] = []
+        func check(_ ok: Bool, _ what: String) {
+            log("import self-test: \(ok ? "PASS" : "FAIL") — \(what)")
+            if !ok { failures.append(what) }
+        }
+
+        dumpMenus()
+
+        // 1. The menu item exists, is live and carries Shift-Cmd-I. A disabled
+        //    item would swallow the shortcut silently (see UndoMenu.swift).
+        let item = findMenuItem(titled: "Import…")
+        check(item != nil, "File › Import… exists")
+        check(item?.isEnabled == true, "File › Import… is enabled")
+        check(item?.keyEquivalent == "i", "File › Import… key equivalent is 'i'")
+        check(item?.keyEquivalentModifierMask == [.command, .shift],
+              "File › Import… modifiers are Shift-Cmd")
+
+        // 2. A photo the library knows by hash but has no location for. Its
+        //    files are all gone, so offering to add one back is correct — this
+        //    is the case a path check and a naive hash check both get wrong.
+        let path = ProcessInfo.processInfo.environment["GRAYROOM_SELFTEST_IMPORT_DIR"] ?? "testdata"
+        // A JPEG alongside the RAWs: standard formats go through a different
+        // decode path, and the grid has to treat them identically.
+        let source = stageSourceWithAJPEG(URL(fileURLWithPath: path, isDirectory: true))
+        let orphaned = makeHashKnownButUnlocated(in: source)
+        if let orphaned { log("import self-test: orphaned by hash: \(orphaned.lastPathComponent)") }
+
+        // 3. Scan the folder. The real menu item runs an NSOpenPanel first,
+        //    which is modal and cannot be answered from inside the process, so
+        //    the panel's *result* is supplied here and everything after it is
+        //    the production path.
+        let model = AppModel.shared.importModel
+        let tasks = AppModel.shared.tasks
+        model.setSource(source)
+        log("import self-test: scanning \(source.path)")
+        check(tasks.tasks.contains { $0.title.hasPrefix("Scanning ") },
+              "a scan task appeared in the activity centre")
+        // The indicator only exists while something is running, so this is the
+        // one moment it can be photographed.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            // Not by title: the editor window renames itself to the open
+            // file. It is simply the visible window that is not the import one.
+            if let main = NSApp.windows.first(where: { $0.isVisible && $0.title != "Import" }) {
+                try? FileManager.default.createDirectory(at: outputDirectory,
+                                                         withIntermediateDirectories: true)
+                writeScreenshot(of: main, named: "selftest-activity.png")
+            }
+        }
+
+        // 4. Open the window the same way the Window menu does.
+        openImportWindow()
+        // Its bottom bar carries the same indicator; catch it before the scan
+        // of a small folder finishes.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            if let window = importWindow(), tasks.isBusy {
+                try? FileManager.default.createDirectory(at: outputDirectory,
+                                                         withIntermediateDirectories: true)
+                writeScreenshot(of: window, named: "selftest-import-scanning.png")
+            }
+        }
+
+        waitForImportGrid(model: model) { window in
+            check(window != nil, "the Import window opened")
+            check(!tasks.tasks.contains { $0.title.hasPrefix("Scanning ") },
+                  "the scan task went away when the scan finished")
+            check(!model.isScanning, "the model stopped reporting a scan")
+            if let orphaned,
+               let item = model.items.first(where: { $0.url.lastPathComponent
+                   == orphaned.lastPathComponent }) {
+                check(item.status == .new,
+                      "a hash the library knows with zero locations counts as NEW "
+                          + "(got \(item.status))")
+                check(item.checked, "…and it arrived checked")
+            } else if orphaned != nil {
+                check(false, "the orphaned file is in the grid")
+            }
+            check(model.items.allSatisfy { $0.status != .pending },
+                  "every entry resolved out of .pending")
+            if let jpeg = model.items.first(where: { $0.filename == "standard.jpg" }) {
+                check(jpeg.thumbnail != nil, "the JPEG got a thumbnail")
+                check(jpeg.status == .new, "the JPEG is new to the library")
+                check(jpeg.checked, "the JPEG arrived checked")
+                check(jpeg.captureDate != nil, "the JPEG's EXIF date was read")
+            } else {
+                check(false, "the JPEG is in the grid")
+            }
+            check(model.totalCount > 0, "the scan found importable images (\(model.totalCount))")
+            check(model.checkedCount > 0, "new files arrived checked (\(model.checkedCount))")
+            let withThumbnails = model.items.filter { $0.thumbnail != nil }.count
+            check(withThumbnails == model.totalCount,
+                  "every cell got a thumbnail (\(withThumbnails)/\(model.totalCount))")
+            for item in model.items {
+                let size = item.thumbnail.map { "\($0.width)x\($0.height)" } ?? "none"
+                log("import self-test:   \(item.filename) thumb=\(size) "
+                    + "date=\(item.captureDate.map(String.init(describing:)) ?? "nil") "
+                    + "checked=\(item.checked) already=\(item.alreadyImported)")
+            }
+            // 5. The commands the keyboard and the mouse drive, run through the
+            //    live model so the ring, the greying and the counter are what
+            //    the screenshot shows.
+            let visible = model.visibleItems
+            if visible.count >= 4 {
+                model.click(visible[1].url, modifiers: [])
+                model.click(visible[2].url, modifiers: .shift)
+                check(model.highlighted == [visible[1].url, visible[2].url],
+                      "shift-click highlighted a range of two")
+                let before = model.checkedCount
+                model.setCheckedForHighlighted(false)
+                check(model.checkedCount == before - 2, "U unchecked the highlighted range")
+                model.setCheckedForHighlighted(true)
+                check(model.checkedCount == before, "P rechecked it")
+                model.click(visible[1].url, modifiers: [])
+                model.moveHighlight(dx: 1, dy: 0, columns: 4)
+                check(model.highlighted == [visible[2].url], "the right arrow moved the highlight")
+                model.click(visible[1].url, modifiers: .command)
+                check(model.highlighted == [visible[1].url, visible[2].url],
+                      "cmd-click added to the highlight")
+            } else {
+                check(false, "at least four files to drive the commands with")
+            }
+
+            // 6. Let SwiftUI draw the result of all that, then photograph it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                if let window {
+                    try? FileManager.default.createDirectory(at: outputDirectory,
+                                                             withIntermediateDirectories: true)
+                    writeImportScreenshot(window: window)
+                }
+                // 7. Esc closes the window. This is the one bit of the window's
+                //    dismissal that is not obvious: a secondary `Window` scene
+                //    is closed through `@Environment(\.dismiss)`, and whether
+                //    that reaches AppKit is exactly the kind of thing a unit
+                //    test cannot say.
+                if let window {
+                    sendKey("escape", modifiers: [], window: window, virtualKey: 53)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    check(importWindow() == nil, "Esc closed the Import window")
+
+                    // 8. Pressing Import writes to the library, so it happens
+                    //    only on request — run it against a throwaway
+                    //    CFFIXED_USER_HOME.
+                    guard ProcessInfo.processInfo
+                        .environment["GRAYROOM_SELFTEST_IMPORT_RUN"] == "1"
+                    else { finishImport(failures) }
+                    runTheImport(model: model, check: check, failures: { failures })
+                }
+            }
+        }
+    }
+
+    private static func runTheImport(model: ImportModel,
+                                     check: @escaping (Bool, String) -> Void,
+                                     failures: @escaping () -> [String]) {
+        let expected = model.checkedCount
+        let app = AppModel.shared
+        app.importModel.runImport()
+        let importTask = app.tasks.tasks.first { $0.title == "Importing photos" }
+        check(importTask != nil, "pressing Import registered an import task")
+        check(importTask?.total == expected,
+              "the import task's total is the checked count (\(expected))")
+        waitForImportToFinish(app) { peak in
+            check(peak > 0, "the import task reported progress (reached \(peak))")
+            check(!app.tasks.tasks.contains { $0.title == "Importing photos" },
+                  "the import task went away when it finished")
+            check(!app.tasks.isBusy, "the activity centre is idle again")
+            // Not an exact string: the file the app reopened at launch is in
+            // the library by hash already, so the summary's "already in
+            // library" clause may or may not be there.
+            let status = app.statusMessage ?? "nil"
+            check(status.hasPrefix("Imported "),
+                  "the final status reports the import (got \(status))")
+            check(!status.contains("failed"), "no file failed to import (got \(status))")
+            log("import self-test: imported \(expected) checked file(s) -> \(status)")
+            // The editor's own decode path, on a standard image rather than a
+            // RAW: dispatch reaches the window, not just the grid.
+            guard let jpeg = model.items.first(where: { $0.filename == "standard.jpg" })?.url
+            else {
+                check(false, "a JPEG to open in the editor")
+                finishImport(failures())
+            }
+            app.open(url: jpeg)
+            waitForDecode(app) { size in
+                check(size == CGSize(width: 64, height: 48),
+                      "the editor decoded the JPEG (got \(size))")
+                finishImport(failures())
+            }
+        }
+    }
+
+    private static func waitForDecode(_ app: AppModel, then body: @escaping (CGSize) -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            if app.previewSize == .zero, Date() < deadline {
+                waitForDecode(app, then: body)
+            } else {
+                body(app.previewSize)
+            }
+        }
+    }
+
+    /// Copies the source folder into the output directory and drops a
+    /// synthetic JPEG in, so the run exercises both decode paths without
+    /// writing into `testdata/`.
+    private static func stageSourceWithAJPEG(_ original: URL) -> URL {
+        let staged = outputDirectory.appendingPathComponent("import-source", isDirectory: true)
+        try? FileManager.default.createDirectory(at: outputDirectory,
+                                                 withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: staged)
+        guard (try? FileManager.default.copyItem(at: original, to: staged)) != nil else {
+            log("import self-test: could not stage \(original.path); using it directly")
+            return original
+        }
+        let jpeg = staged.appendingPathComponent("standard.jpg")
+        let width = 64, height = 48
+        var bytes = [UInt8](repeating: 255, count: width * height * 4)
+        for i in 0..<(width * height) {
+            let value = UInt8((i * 7) % 256)
+            bytes[i * 4] = value
+            bytes[i * 4 + 1] = value
+            bytes[i * 4 + 2] = UInt8(255 - Int(value))
+        }
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+              let image = CGImage(width: width, height: height, bitsPerComponent: 8,
+                                  bitsPerPixel: 32, bytesPerRow: width * 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGBitmapInfo(
+                                      rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: false,
+                                  intent: .defaultIntent),
+              let destination = CGImageDestinationCreateWithURL(
+                  jpeg as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
+        else {
+            log("import self-test: could not build the synthetic JPEG")
+            return staged
+        }
+        let properties: [CFString: Any] = [
+            kCGImagePropertyExifDictionary: [
+                kCGImagePropertyExifDateTimeOriginal as String: "2021:03:09 08:15:00",
+                kCGImagePropertyExifOffsetTimeOriginal as String: "+00:00",
+            ],
+        ]
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        if !CGImageDestinationFinalize(destination) {
+            log("import self-test: could not write the synthetic JPEG")
+        }
+        return staged
+    }
+
+    /// Imports a *copy* of one of the source files and then removes the copy's
+    /// location row, leaving the library with a photo it knows by hash and has
+    /// no file for. Returns the original in `directory` that shares those bytes.
+    private static func makeHashKnownButUnlocated(in directory: URL) -> URL? {
+        guard let library = try? Library.openDefault(),
+              let urls = try? ImportScanner.scan(directory: directory, recursive: true),
+              let original = urls.first else { return nil }
+        let copy = outputDirectory.appendingPathComponent("orphan-" + original.lastPathComponent)
+        try? FileManager.default.createDirectory(at: outputDirectory,
+                                                 withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: copy)
+        guard (try? FileManager.default.copyItem(at: original, to: copy)) != nil,
+              let result = try? Importer(library: library).importFile(at: copy)
+        else { return nil }
+        for location in (try? library.locations(for: result.photoID)) ?? [] {
+            if let id = location.id { _ = try? library.removeLocation(id: id) }
+        }
+        try? FileManager.default.removeItem(at: copy)
+        try? library.close()
+        return original
+    }
+
+    /// Polls until the import task leaves the activity centre, reporting the
+    /// highest `completed` it ever saw — which is how the test knows progress
+    /// was reported rather than the task simply appearing and vanishing.
+    private static func waitForImportToFinish(_ app: AppModel, peak: Int = 0,
+                                              then body: @escaping (Int) -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            let task = app.tasks.tasks.first { $0.title == "Importing photos" }
+            let peak = max(peak, task?.completed ?? 0)
+            if task != nil, Date() < deadline {
+                waitForImportToFinish(app, peak: peak, then: body)
+            } else {
+                body(peak)
+            }
+        }
+    }
+
+    private static func finishImport(_ failures: [String]) -> Never {
+        if failures.isEmpty {
+            log("import self-test: PASS")
+            exit(0)
+        }
+        log("import self-test: FAILED — " + failures.joined(separator: "; "))
+        exit(5)
+    }
+
+    /// SwiftUI puts one item per `Window` scene in the Window menu; sending its
+    /// action is what `openWindow(id:)` does from inside a view.
+    private static func openImportWindow() {
+        if let item = findMenuItem(titled: "Import"), let action = item.action {
+            log("import self-test: opening via Window › Import")
+            NSApp.sendAction(action, to: item.target, from: item)
+        } else {
+            log("import self-test: no Window › Import menu item to open")
+        }
+    }
+
+    private static func importWindow() -> NSWindow? {
+        NSApp.windows.first { $0.title == "Import" && $0.isVisible }
+    }
+
+    private static func waitForImportGrid(model: ImportModel,
+                                          then body: @escaping (NSWindow?) -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            let done = !model.isScanning && model.totalCount > 0
+                && model.items.allSatisfy { $0.thumbnail != nil && $0.status != .pending }
+            if Date() < deadline, !(done && importWindow() != nil) {
+                waitForImportGrid(model: model, then: body)
+            } else {
+                body(importWindow())
+            }
+        }
+    }
+
+    private static func findMenuItem(titled title: String) -> NSMenuItem? {
+        guard let main = NSApp.mainMenu else { return nil }
+        for top in main.items {
+            guard let submenu = top.submenu else { continue }
+            submenu.update()
+            if let item = submenu.items.first(where: { $0.title == title }) { return item }
+        }
+        return nil
+    }
+
+    private static func writeImportScreenshot(window: NSWindow) {
+        writeScreenshot(of: window, named: "selftest-import.png")
+    }
+
+    private static func writeScreenshot(of window: NSWindow, named name: String) {
+        let url = outputDirectory.appendingPathComponent(name)
+        guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow,
+                                                  CGWindowID(window.windowNumber),
+                                                  [.boundsIgnoreFraming, .bestResolution]) else {
+            log("import self-test: CGWindowListCreateImage returned nil "
+                + "(screen-recording permission?)")
+            return
+        }
+        write(image, to: url)
+        log("import self-test: wrote \(url.path) (\(image.width)x\(image.height))")
     }
 
     // MARK: - Waiting
@@ -69,6 +448,7 @@ enum SelfTest {
             switch mode {
             case .paint, nil: run(canvas: canvas, model: model)
             case .undo: runUndo(canvas: canvas, model: model)
+            case .importWindow: break
             }
         }
     }
@@ -308,7 +688,7 @@ enum SelfTest {
     /// `NSApp.sendEvent` is the same entry point the window server uses, so this
     /// goes through menu key-equivalent matching, item validation and all.
     private static func sendKey(_ characters: String, modifiers: NSEvent.ModifierFlags,
-                                window: NSWindow) {
+                                window: NSWindow, virtualKey: CGKeyCode = 6 /* Z */) {
         log("undo self-test: sending key \(describe(modifiers))\(characters)")
         guard let source = CGEventSource(stateID: .privateState) else {
             fail("could not make a CGEventSource")
@@ -317,7 +697,7 @@ enum SelfTest {
         if modifiers.contains(.command) { flags.insert(.maskCommand) }
         if modifiers.contains(.shift) { flags.insert(.maskShift) }
         for isDown in [true, false] {
-            guard let cg = CGEvent(keyboardEventSource: source, virtualKey: 6 /* Z */,
+            guard let cg = CGEvent(keyboardEventSource: source, virtualKey: virtualKey,
                                    keyDown: isDown) else { fail("could not make a CGEvent") }
             cg.flags = flags
             guard let event = NSEvent(cgEvent: cg) else { fail("CGEvent -> NSEvent failed") }

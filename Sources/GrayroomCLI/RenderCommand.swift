@@ -18,7 +18,7 @@ struct Render: ParsableCommand {
     @OptionGroup var libraryOptions: LibraryOptions
     @OptionGroup var editOptions: EditOptions
 
-    @Argument(help: "Path to the RAW file.")
+    @Argument(help: "Path to the image file.")
     var input: String
 
     @Option(name: [.short, .customLong("output")], help: "Output file path.")

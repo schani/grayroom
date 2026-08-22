@@ -12,7 +12,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.first {
+        // By title, not `.first`: there is a second `Window` scene now, and
+        // whichever one AppKit happens to have created first is not necessarily
+        // the editor.
+        if let window = NSApp.windows.first(where: { $0.title == "Grayroom" })
+            ?? NSApp.windows.first {
             window.makeKeyAndOrderFront(nil)
             window.setContentSize(NSSize(width: 1440, height: 900))
             window.center()
@@ -44,6 +48,10 @@ struct GrayroomApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("Open…") { model.presentOpenPanel() }
                     .keyboardShortcut("o", modifiers: .command)
+                // A separate `View` so it can hold `@Environment(\.openWindow)`;
+                // the commands builder itself is not a view and has no
+                // environment to read it from.
+                ImportCommand()
             }
             CommandGroup(replacing: .saveItem) {
                 Button("Save") { model.saveNow() }
@@ -92,5 +100,25 @@ struct GrayroomApp: App {
                 Button("New Mask") { model.store.addMask(); model.tool = .brush }
             }
         }
+
+        Window("Import", id: "import") {
+            ImportWindow(model: model.importModel)
+        }
+        .defaultSize(width: 1100, height: 750)
+    }
+}
+
+/// File › Import… — the panel first, the window second, so the window never
+/// opens on an empty source.
+private struct ImportCommand: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Import…") {
+            guard let url = ImportModel.presentSourcePanel() else { return }
+            AppModel.shared.importModel.setSource(url)
+            openWindow(id: "import")
+        }
+        .keyboardShortcut("i", modifiers: [.command, .shift])
     }
 }

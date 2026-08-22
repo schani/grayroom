@@ -183,7 +183,7 @@ final class ImporterTests: XCTestCase {
         guard let url = testDataURL("L1000003.DNG") else {
             throw XCTSkip("testdata/L1000003.DNG not present (set GRAYROOM_TEST_DNG to override)")
         }
-        XCTAssertTrue(Importer.isRAW(url))
+        XCTAssertTrue(Importer.isSupportedImage(url))
         let result = try Importer(library: library).importFile(at: url)
         XCTAssertTrue(result.isNewPhoto)
 

@@ -65,6 +65,14 @@ final class AppModel {
     var statusMessage: String?
     var errorMessage: String?
 
+    /// Every long-running background job, with its progress and its cancel
+    /// button — see `ActivityIndicator`.
+    let tasks = TaskCenter()
+
+    // MARK: Import
+
+    let importModel = ImportModel()
+
     // MARK: Tools
 
     var tool: CanvasTool = .pan {
@@ -121,6 +129,8 @@ final class AppModel {
     /// The library work (hash, import, development lookup) runs here so a 50 MB read
     /// never lands on the main thread.
     private let libraryQueue = DispatchQueue(label: "grayroom.library", qos: .userInitiated)
+    /// The import in flight, if any — one at a time.
+    private var importTaskID: TaskCenter.BackgroundTask.ID?
 
     private struct TargetedSession {
         var baseline: [Double]
@@ -145,7 +155,81 @@ final class AppModel {
         store.onChange = { [weak self] invalidation in
             self?.editChanged(invalidation)
         }
+        importModel.tasks = tasks
+        // Identity in this library is the file's bytes, so "already imported"
+        // is a hash question, not a path question — and it takes both halves:
+        // a photo the library knows but has no location for is one whose files
+        // are all gone, and adding this one back is exactly right.
+        if let library {
+            importModel.isHashImported = { hex in
+                guard let photo = ((try? library.photo(withHashHexString: hex)) ?? nil),
+                      let photoID = photo.id
+                else { return false }
+                return ((try? library.locations(for: photoID)) ?? []).isEmpty == false
+            }
+        }
+        importModel.onImport = { [weak self] entries in self?.runImport(entries) }
     }
+
+    // MARK: - Import
+
+    /// Adds the chosen files to the library on `libraryQueue`, reporting into
+    /// the activity centre as it goes.
+    ///
+    /// The scan has already hashed every one of these files, so the hashes come
+    /// along rather than being recomputed — which is most of the work. It still
+    /// runs one file at a time (the bottleneck is the disk, not the CPU) and
+    /// checks the task's cancel flag between files.
+    func runImport(_ entries: [ImportEntry]) {
+        guard let library, !entries.isEmpty, importTaskID == nil else { return }
+        let urls = entries.map(\.url)
+        var hashes: [URL: String] = [:]
+        for entry in entries where entry.hash != nil {
+            hashes[entry.url.standardizedFileURL] = entry.hash
+        }
+        let taskID = tasks.begin(title: "Importing photos", total: urls.count, cancellable: true)
+        importTaskID = taskID
+        statusMessage = nil
+        libraryQueue.async { [weak self] in
+            let importer = Importer(library: library)
+            var added = 0
+            var existing = 0
+            var failed = 0
+            importer.importFiles(urls, precomputedHashes: hashes, progress: { finished, _, outcome in
+                switch outcome {
+                case .success(let result):
+                    if result.isNewPhoto { added += 1 } else { existing += 1 }
+                case .failure:
+                    failed += 1
+                }
+                DispatchQueue.main.async { [weak self] in
+                    self?.tasks.update(taskID, completed: finished,
+                                       detail: urls[finished - 1].lastPathComponent)
+                }
+            }, isCancelled: { [weak self] in
+                guard let self else { return true }
+                return self.tasks.isCancelled(taskID)
+            })
+            let cancelled = self?.tasks.isCancelled(taskID) ?? false
+            let summary = AppModel.importSummary(added: added, existing: existing, failed: failed)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.tasks.finish(taskID)
+                self.importTaskID = nil
+                self.statusMessage = cancelled ? "Import cancelled — " + summary : summary
+            }
+        }
+    }
+
+    static func importSummary(added: Int, existing: Int, failed: Int) -> String {
+        var message = "Imported \(added)"
+        var notes: [String] = []
+        if existing > 0 { notes.append("\(existing) already in library") }
+        if failed > 0 { notes.append("\(failed) failed") }
+        if !notes.isEmpty { message += " (" + notes.joined(separator: ", ") + ")" }
+        return message
+    }
+
 
     // MARK: - Canvas wiring
 
@@ -188,9 +272,11 @@ final class AppModel {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.message = "Open a RAW file"
-        var types: [UTType] = [.rawImage]
-        if let dng = UTType("com.adobe.raw-image") { types.append(dng) }
+        panel.message = "Open a photo"
+        var types: [UTType] = [.rawImage, .jpeg, .tiff, .png]
+        for identifier in ["com.adobe.raw-image", "public.heic", "public.heif"] {
+            if let type = UTType(identifier) { types.append(type) }
+        }
         panel.allowedContentTypes = types
         if let current = imageURL {
             panel.directoryURL = current.deletingLastPathComponent()
@@ -508,11 +594,16 @@ final class AppModel {
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
 
         isExporting = true
-        statusMessage = "Exporting \(outputURL.lastPathComponent)…"
+        statusMessage = nil
+        // Indeterminate: a full-resolution render reports nothing until it is
+        // done, and inventing a fake percentage would be worse than a bar that
+        // says only "still going".
+        let taskID = tasks.begin(title: "Exporting \(outputURL.lastPathComponent)")
         service.export(url: url, edit: store.edit, to: outputURL,
                        format: exportFormat, quality: exportQuality) { [weak self] result in
             guard let self else { return }
             self.isExporting = false
+            self.tasks.finish(taskID)
             switch result {
             case .success(let output):
                 self.statusMessage = "Exported \(outputURL.lastPathComponent) "

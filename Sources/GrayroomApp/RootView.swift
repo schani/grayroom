@@ -48,6 +48,10 @@ private struct Toolbar: View {
 
     var body: some View {
         HStack(spacing: 10) {
+            // Lightroom's spot for it: top-left, in the identity plate. Draws
+            // nothing at all when there is no background work.
+            ActivityIndicator(tasks: model.tasks)
+
             Button {
                 model.presentOpenPanel()
             } label: {

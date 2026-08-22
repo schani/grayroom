@@ -1,28 +1,35 @@
 import CoreGraphics
 import CoreImage
+import CoreImage.CIFilterBuiltins
 import Foundation
 import ImageIO
 import Metal
 
 public enum DecodeError: Error, CustomStringConvertible {
     case fileNotFound(URL)
-    case notRAW(URL)
+    case undecodable(URL)
     case emptyExtent
     case renderFailed
 
     public var description: String {
         switch self {
         case .fileNotFound(let u): return "file not found: \(u.path)"
-        case .notRAW(let u): return "not a decodable RAW file: \(u.path)"
-        case .emptyExtent: return "RAW decoded to an empty extent"
-        case .renderFailed: return "Core Image failed to render the decoded RAW"
+        case .undecodable(let u): return "not a decodable image: \(u.path)"
+        case .emptyExtent: return "the image decoded to an empty extent"
+        case .renderFailed: return "Core Image failed to render the decoded image"
         }
     }
 }
 
 /// Metadata reported by `grayroom probe`.
-public struct RawInfo {
+public struct ImageInfo {
     public var url: URL
+    /// Whether this file went down the `CIRAWFilter` path.
+    ///
+    /// Several fields below only mean something for a RAW: a rendered JPEG has
+    /// no decoder version to choose, no lens profile to apply and no separate
+    /// preview image, and its "as shot" white balance is by definition neutral.
+    public var isRAW: Bool
     public var nativeSize: CGSize
     public var orientation: CGImagePropertyOrientation
     public var orientedSize: CGSize
@@ -65,7 +72,7 @@ public struct DecodedImage {
 /// global/local tone curves and gamut mapping all off) so the pipeline gets a
 /// genuinely linear scene-referred image. Lens correction stays on and noise
 /// reduction keeps its per-camera defaults.
-public final class RawDecoder {
+public final class ImageDecoder {
     public let metal: MetalContext
     private let ciContext: CIContext
     /// Extended linear sRGB: linear transfer, Rec.709 primaries, values outside 0…1 allowed.
@@ -76,25 +83,39 @@ public final class RawDecoder {
         self.ciContext = CIContext(
             mtlCommandQueue: metal.commandQueue,
             options: [
-                .workingColorSpace: RawDecoder.workingColorSpace,
+                .workingColorSpace: ImageDecoder.workingColorSpace,
                 .workingFormat: NSNumber(value: CIFormat.RGBAh.rawValue),
                 .cacheIntermediates: false,
                 .highQualityDownsample: true,
             ])
     }
 
-    private static func makeFilter(url: URL) throws -> CIRAWFilter {
+    /// The RAW filter for this file, or `nil` when it is not a RAW and should
+    /// take the standard-image path.
+    ///
+    /// The type check comes first, but it is not trusted on its own: a file with
+    /// a RAW extension that `CIRAWFilter` cannot actually open falls through to
+    /// `CIImage` rather than failing outright. `CIRAWFilter` also happily hands
+    /// back a filter for non-RAW input, and a zero native size is the reliable
+    /// tell for that.
+    static func rawFilter(url: URL) throws -> CIRAWFilter? {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw DecodeError.fileNotFound(url)
         }
-        guard let filter = CIRAWFilter(imageURL: url) else { throw DecodeError.notRAW(url) }
-        // CIRAWFilter happily hands back a filter for non-RAW input; a zero
-        // native size is the reliable tell.
-        guard filter.nativeSize.width > 0, filter.nativeSize.height > 0 else {
-            throw DecodeError.notRAW(url)
-        }
+        guard ImageFormat.isRAW(url), let filter = CIRAWFilter(imageURL: url),
+              filter.nativeSize.width > 0, filter.nativeSize.height > 0
+        else { return nil }
         return filter
     }
+
+    /// The white balance a rendered image is defined to have been "shot" at.
+    ///
+    /// D65, the sRGB/Rec.709 white point — which is what an already-rendered
+    /// JPEG or PNG is encoded against. Reporting it as the as-shot value makes
+    /// the UI's "As Shot" reset land on no correction at all, which is the only
+    /// sensible neutral for a file that has already been white-balanced once.
+    public static let standardNeutralTemperature: Double = 6500
+    public static let standardNeutralTint: Double = 0
 
     /// Zeroes Apple's look so the output is linear scene-referred.
     ///
@@ -130,14 +151,16 @@ public final class RawDecoder {
 
     // MARK: - Probe
 
-    public func probe(url: URL) throws -> RawInfo {
-        try RawDecoder.probe(url: url)
+    public func probe(url: URL) throws -> ImageInfo {
+        try ImageDecoder.probe(url: url)
     }
 
     /// Metadata only — no GPU work, so the library importer can read a file's
     /// dimensions, capture date, camera and GPS without a `MetalContext`.
-    public static func probe(url: URL) throws -> RawInfo {
-        let f = try RawDecoder.makeFilter(url: url)
+    public static func probe(url: URL) throws -> ImageInfo {
+        guard let f = try ImageDecoder.rawFilter(url: url) else {
+            return try probeStandard(url: url)
+        }
         let native = f.nativeSize
         let orientation = f.orientation
         let swapped = orientation.rawValue >= 5
@@ -169,11 +192,12 @@ public final class RawDecoder {
             ?? (fileProperties[kCGImagePropertyExifDictionary as String] as? [String: Any])
         let gps = (f.properties[kCGImagePropertyGPSDictionary as String] as? [String: Any])
             ?? (fileProperties[kCGImagePropertyGPSDictionary as String] as? [String: Any])
-        let capturedAt = RawDecoder.captureDate(exif: exif)
-        let (lat, lon, alt) = RawDecoder.gpsPosition(gps: gps)
+        let capturedAt = ImageDecoder.captureDate(exif: exif)
+        let (lat, lon, alt) = ImageDecoder.gpsPosition(gps: gps)
 
-        return RawInfo(
+        return ImageInfo(
             url: url,
+            isRAW: true,
             nativeSize: native,
             orientation: orientation,
             orientedSize: oriented,
@@ -192,7 +216,84 @@ public final class RawDecoder {
             altitude: alt)
     }
 
+    /// The same metadata for an already-rendered image, entirely out of
+    /// ImageIO. Everything RAW-specific reports the honest "not applicable"
+    /// value rather than a plausible-looking fiction.
+    private static func probeStandard(url: URL) throws -> ImageInfo {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+              as? [String: Any]
+        else { throw DecodeError.undecodable(url) }
+
+        let pixelWidth = (properties[kCGImagePropertyPixelWidth as String] as? NSNumber)?
+            .doubleValue
+        let pixelHeight = (properties[kCGImagePropertyPixelHeight as String] as? NSNumber)?
+            .doubleValue
+        guard let pixelWidth, let pixelHeight, pixelWidth > 0, pixelHeight > 0 else {
+            throw DecodeError.undecodable(url)
+        }
+        // Un-oriented, to match what `CIRAWFilter.nativeSize` reports.
+        let native = CGSize(width: pixelWidth, height: pixelHeight)
+        let rawOrientation = (properties[kCGImagePropertyOrientation as String] as? NSNumber)?
+            .uint32Value
+        let orientation = rawOrientation
+            .flatMap(CGImagePropertyOrientation.init(rawValue:)) ?? .up
+        let swapped = orientation.rawValue >= 5
+        let oriented = swapped ? CGSize(width: pixelHeight, height: pixelWidth) : native
+
+        let tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any]
+        let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any]
+        let gps = properties[kCGImagePropertyGPSDictionary as String] as? [String: Any]
+        let (lat, lon, alt) = ImageDecoder.gpsPosition(gps: gps)
+
+        let thumbnailOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
+            kCGImageSourceCreateThumbnailFromImageAlways: false,
+            kCGImageSourceThumbnailMaxPixelSize: 512,
+        ]
+        let hasThumb = CGImageSourceCreateThumbnailAtIndex(
+            source, 0, thumbnailOptions as CFDictionary) != nil
+
+        return ImageInfo(
+            url: url,
+            isRAW: false,
+            nativeSize: native,
+            orientation: orientation,
+            orientedSize: oriented,
+            asShotTemperature: ImageDecoder.standardNeutralTemperature,
+            asShotTint: ImageDecoder.standardNeutralTint,
+            // No decoder version to pick and no lens profile to apply: the file
+            // is already a rendering, and this app does not pretend it can undo
+            // one.
+            decoderVersion: "ImageIO",
+            supportedDecoderVersions: [],
+            hasEmbeddedThumbnail: hasThumb,
+            // The image *is* the preview; there is no second, smaller rendition
+            // the way a RAW carries one.
+            hasPreviewImage: false,
+            lensCorrectionSupported: false,
+            cameraMake: tiff?[kCGImagePropertyTIFFMake as String] as? String,
+            cameraModel: tiff?[kCGImagePropertyTIFFModel as String] as? String,
+            capturedAt: ImageDecoder.captureDate(exif: exif),
+            latitude: lat,
+            longitude: lon,
+            altitude: alt)
+    }
+
     // MARK: - EXIF / GPS
+
+    /// The file's capture date read straight from ImageIO's property
+    /// dictionary — no `CIRAWFilter`, so this costs a header read rather than a
+    /// decoder set-up, which is what the import grid needs for a few thousand
+    /// files.
+    public static func captureDate(url: URL) -> Date? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+              as? [String: Any]
+        else { return nil }
+        return captureDate(exif: properties[kCGImagePropertyExifDictionary as String]
+            as? [String: Any])
+    }
 
     /// EXIF `DateTimeOriginal` (`"yyyy:MM:dd HH:mm:ss"`, no zone) plus
     /// `OffsetTimeOriginal` (`"+02:00"`) when present; local time otherwise.
@@ -204,7 +305,7 @@ public final class RawDecoder {
         fmt.locale = Locale(identifier: "en_US_POSIX")
         fmt.dateFormat = "yyyy:MM:dd HH:mm:ss"
         if let offset = exif[kCGImagePropertyExifOffsetTimeOriginal as String] as? String,
-           let seconds = RawDecoder.utcOffsetSeconds(offset) {
+           let seconds = ImageDecoder.utcOffsetSeconds(offset) {
             fmt.timeZone = TimeZone(secondsFromGMT: seconds)
         } else {
             fmt.timeZone = TimeZone.current
@@ -255,8 +356,10 @@ public final class RawDecoder {
     public func decode(url: URL,
                        edit: EditState = EditState(),
                        maxDimension: Int? = nil) throws -> DecodedImage {
-        let f = try RawDecoder.makeFilter(url: url)
-        RawDecoder.neutralize(f)
+        guard let f = try ImageDecoder.rawFilter(url: url) else {
+            return try decodeStandard(url: url, edit: edit, maxDimension: maxDimension)
+        }
+        ImageDecoder.neutralize(f)
 
         let asShotTemp = Double(f.neutralTemperature)
         let asShotTint = Double(f.neutralTint)
@@ -275,10 +378,100 @@ public final class RawDecoder {
             f.scaleFactor = Float(max(0.01, min(1.0, CGFloat(maxDim) / longestNative)))
         }
 
-        guard var image = f.outputImage else { throw DecodeError.renderFailed }
-        guard !image.extent.isEmpty, !image.extent.isInfinite else { throw DecodeError.emptyExtent }
-
+        guard let image = f.outputImage else { throw DecodeError.renderFailed }
         // `outputImage` already has orientation applied.
+        let texture = try render(image, maxDimension: maxDimension)
+
+        return DecodedImage(texture: texture,
+                            temperature: temperature,
+                            tint: tint,
+                            asShotTemperature: asShotTemp,
+                            asShotTint: asShotTint,
+                            nativeSize: native)
+    }
+
+    /// The already-rendered path: JPEG, TIFF, PNG, HEIC.
+    ///
+    /// These files carry no sensor data and no as-shot white balance — they have
+    /// already been demosaiced, white-balanced and encoded once. So there is
+    /// nothing to neutralise and nothing to undo; the honest job is to get the
+    /// pixels into the working space *linearly* and leave them alone.
+    ///
+    /// `CIImage(contentsOf:options:)` honours the embedded ICC profile by
+    /// default, and rendering through `ciContext` — whose working space is
+    /// extended linear sRGB — is what undoes the file's transfer function. An
+    /// sRGB code value of 128 therefore lands at its linear equivalent, not at
+    /// 0.5. No auto-enhance, no tone mapping: Core Image applies neither unless
+    /// asked, and this does not ask.
+    ///
+    /// White balance is a *relative* shift here, not an absolute one. A RAW has
+    /// a real illuminant to name; a JPEG's white is already D65 by construction,
+    /// so temp/tint move the image away from that reference rather than picking
+    /// a new interpretation of the sensor data.
+    private func decodeStandard(url: URL, edit: EditState,
+                                maxDimension: Int?) throws -> DecodedImage {
+        guard var image = CIImage(contentsOf: url,
+                                  options: [.applyOrientationProperty: true])
+        else { throw DecodeError.undecodable(url) }
+        guard !image.extent.isEmpty, !image.extent.isInfinite else {
+            throw DecodeError.emptyExtent
+        }
+        // Un-oriented, to match the RAW path's `nativeSize`.
+        let oriented = image.extent.size
+        let info = try? ImageDecoder.probe(url: url)
+        let native = info?.nativeSize ?? oriented
+
+        let asShotTemp = ImageDecoder.standardNeutralTemperature
+        let asShotTint = ImageDecoder.standardNeutralTint
+        let temperature = edit.whiteBalance.temperature ?? asShotTemp
+        let tint = edit.whiteBalance.tint ?? asShotTint
+        if edit.whiteBalance.temperature != nil || edit.whiteBalance.tint != nil {
+            image = ImageDecoder.applyTemperatureAndTint(image, temperature: temperature,
+                                                         tint: tint)
+        }
+
+        let texture = try render(image, maxDimension: maxDimension)
+        return DecodedImage(texture: texture,
+                            temperature: temperature,
+                            tint: tint,
+                            asShotTemperature: asShotTemp,
+                            asShotTint: asShotTint,
+                            nativeSize: native)
+    }
+
+    /// Temp/tint for an already-rendered image, in the same direction as the
+    /// RAW slider.
+    ///
+    /// The argument order is the part worth stating, because the obvious
+    /// assignment is backwards. `CITemperatureAndTint` adapts *from* `neutral`
+    /// *to* `targetNeutral`, so putting the slider value in `targetNeutral`
+    /// makes a higher Kelvin cool the image — the opposite of `CIRAWFilter`,
+    /// where raising `neutralTemperature` warms it (measured on a test DNG:
+    /// R/B 0.18 at 3624 K, 0.84 at 6040 K, 1.55 at 9665 K). A slider that
+    /// reverses meaning depending on the file's format would be a bug, so the
+    /// slider value goes in `neutral` and the D65 reference in `targetNeutral`.
+    /// Measured that way on a neutral grey patch, this path tracks the RAW one
+    /// on both axes: R/B 0.35 at 4000 K and 1.49 at 9000 K, and (R+B)/2G 0.68
+    /// at tint −60 and 1.59 at tint +80, against 0.70 and 1.61 from
+    /// `CIRAWFilter`.
+    static func applyTemperatureAndTint(_ image: CIImage, temperature: Double,
+                                        tint: Double) -> CIImage {
+        let filter = CIFilter.temperatureAndTint()
+        filter.inputImage = image
+        filter.neutral = CIVector(x: temperature, y: tint)
+        filter.targetNeutral = CIVector(x: ImageDecoder.standardNeutralTemperature,
+                                        y: ImageDecoder.standardNeutralTint)
+        return filter.outputImage ?? image
+    }
+
+    /// Optional reduction, then origin/flip normalisation, then the render into
+    /// a working texture. Shared by both decode paths so preview and export
+    /// cannot drift apart between formats.
+    private func render(_ input: CIImage, maxDimension: Int?) throws -> MTLTexture {
+        var image = input
+        guard !image.extent.isEmpty, !image.extent.isInfinite else {
+            throw DecodeError.emptyExtent
+        }
         if let maxDim = maxDimension {
             let longest = max(image.extent.width, image.extent.height)
             if longest > CGFloat(maxDim) {
@@ -307,21 +500,17 @@ public final class RawDecoder {
             by: CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: CGFloat(height)))
 
         let texture = try metal.makeWorkingTexture(width: width, height: height)
-        guard let cb = metal.commandQueue.makeCommandBuffer() else { throw DecodeError.renderFailed }
+        guard let cb = metal.commandQueue.makeCommandBuffer() else {
+            throw DecodeError.renderFailed
+        }
         ciContext.render(image,
                          to: texture,
                          commandBuffer: cb,
                          bounds: CGRect(x: 0, y: 0, width: width, height: height),
-                         colorSpace: RawDecoder.workingColorSpace)
+                         colorSpace: ImageDecoder.workingColorSpace)
         cb.commit()
         cb.waitUntilCompleted()
         if cb.error != nil { throw DecodeError.renderFailed }
-
-        return DecodedImage(texture: texture,
-                            temperature: temperature,
-                            tint: tint,
-                            asShotTemperature: asShotTemp,
-                            asShotTint: asShotTint,
-                            nativeSize: native)
+        return texture
     }
 }

@@ -5,13 +5,13 @@ import Metal
 /// end-to-end tests so both exercise the same path.
 public final class Renderer {
     public let metal: MetalContext
-    public let decoder: RawDecoder
+    public let decoder: ImageDecoder
     public let pipeline: Pipeline
     public let downsampler: Downsampler
 
     public init() throws {
         metal = try MetalContext()
-        decoder = RawDecoder(metal: metal)
+        decoder = ImageDecoder(metal: metal)
         pipeline = try Pipeline(context: metal)
         downsampler = try Downsampler(context: metal)
     }

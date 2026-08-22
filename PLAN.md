@@ -1,15 +1,25 @@
-# Grayroom — a native macOS B&W RAW developer
+# Grayroom — a native macOS B&W photo developer
 
-A personal, focused subset of Lightroom Classic: B&W processing of RAW files only.
-macOS only, Apple Silicon, macOS 14+. Organization (M6) is a SQLite library, not a
-folder browser.
+A personal, focused subset of Lightroom Classic: B&W processing of RAW files and
+standard images (JPEG, TIFF, PNG, HEIC). macOS only, Apple Silicon, macOS 14+.
+Organization (M6) is a SQLite library, not a folder browser.
 
 Research background (with sources) lives in `research/`.
 
 ## V1 feature set (agreed)
 
-1. Open a RAW file → linear scene-referred color → display with zoom/pan
-2. White balance (temp/tint) + Exposure / Contrast / Highlights / Shadows / Whites / Blacks
+1. Open a RAW file or a standard image (JPEG / TIFF / PNG / HEIC) → linear
+   scene-referred color → display with zoom/pan. RAW goes through `CIRAWFilter`
+   with Apple's look neutralized; a standard image is read with `CIImage`
+   honouring its embedded ICC profile and linearized by the extended-linear-sRGB
+   working space.
+2. White balance (temp/tint) + Exposure / Contrast / Highlights / Shadows / Whites / Blacks.
+   On a RAW, temp/tint pick the illuminant the sensor data is interpreted
+   against. A standard image has already been white-balanced once and is D65 by
+   construction, so there is no illuminant left to name: temp/tint are instead a
+   **relative** Core Image `CITemperatureAndTint` shift away from a 6500 K / 0
+   reference, in the same direction as the RAW slider (higher Kelvin warms).
+   "As Shot" on a standard image therefore means no correction at all.
 3. 8-channel B&W mix (red, orange, yellow, green, aqua, blue, purple, magenta) with
    click-and-drag targeted adjustment on the image
 4. **Clarity via fast local Laplacian pyramid** (Aubry et al. approximation, as in

@@ -4,7 +4,7 @@ import GrayroomCore
 /// What an edit change costs.
 ///
 /// The whole interactive loop hangs off this: white balance is applied inside
-/// `CIRAWFilter` (see `RawDecoder`), so temp/tint are the *only* edit fields
+/// `CIRAWFilter` (see `ImageDecoder`), so temp/tint are the *only* edit fields
 /// that force a re-decode. Everything else re-runs the Metal pipeline on the
 /// already-decoded linear texture, which is the cheap path.
 public enum RenderInvalidation: Int, Comparable, Sendable {
@@ -31,7 +31,7 @@ public enum RenderInvalidation: Int, Comparable, Sendable {
 /// a cache hit lets a slider drag skip the decode entirely.
 ///
 /// `nil` temperature/tint mean "as shot", which is a *different* key from the
-/// numerically equal explicit values only in principle — `RawDecoder` leaves the
+/// numerically equal explicit values only in principle — `ImageDecoder` leaves the
 /// filter untouched when both are nil — so they are kept distinct here too.
 public struct DecodeKey: Hashable, Sendable {
     public let path: String

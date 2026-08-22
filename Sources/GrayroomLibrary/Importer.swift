@@ -1,7 +1,6 @@
 import Foundation
 import GRDB
 import GrayroomCore
-import UniformTypeIdentifiers
 
 /// What the importer needs to know about a file beyond its bytes.
 public struct PhotoMetadata: Equatable, Sendable {
@@ -62,6 +61,40 @@ public struct ImportResult: Equatable, Sendable {
     }
 }
 
+/// Finding the importable images under a directory, without touching the
+/// library.
+///
+/// Split out of `Importer` because the import window has to show the user what
+/// it found *before* anything is imported — scanning is a question about the
+/// filesystem, importing is a change to the library, and only the second one
+/// needs a `Library`.
+public enum ImportScanner {
+    /// Every importable image under `directory`, sorted by path.
+    ///
+    /// - Throws: `LibraryError.notADirectory` when `directory` is not one.
+    public static func scan(directory: URL, recursive: Bool) throws -> [URL] {
+        let fm = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+              isDirectory.boolValue
+        else { throw LibraryError.notADirectory(directory) }
+
+        var options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles]
+        if !recursive { options.insert(.skipsSubdirectoryDescendants) }
+        guard let enumerator = fm.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .contentTypeKey],
+            options: options)
+        else { return [] }
+
+        var urls: [URL] = []
+        for case let file as URL in enumerator where Importer.isSupportedImage(file) {
+            urls.append(file.standardizedFileURL)
+        }
+        return urls.sorted { $0.path < $1.path }
+    }
+}
+
 /// Hash → upsert photo → upsert location.
 ///
 /// Identity is the SHA-256 of the whole file, so the same file at two paths is
@@ -79,9 +112,10 @@ public final class Importer {
         self.probe = probe
     }
 
-    /// The real probe: CIRAWFilter + ImageIO, no GPU work.
+    /// The real probe: CIRAWFilter (RAW) or ImageIO (everything else), no GPU
+    /// work.
     public static func probeRAW(_ url: URL) throws -> PhotoMetadata {
-        let info = try RawDecoder.probe(url: url)
+        let info = try ImageDecoder.probe(url: url)
         return PhotoMetadata(
             width: Int(info.orientedSize.width.rounded()),
             height: Int(info.orientedSize.height.rounded()),
@@ -93,11 +127,17 @@ public final class Importer {
             altitude: info.altitude)
     }
 
+    /// - Parameter precomputedHash: the file's SHA-256, hex, when the caller
+    ///   already has it. The import window's scan hashes every file to decide
+    ///   what is new, and hashing 200 frames a second time would double the
+    ///   slowest part of the whole operation. The caller is asserting the bytes
+    ///   have not changed since it looked.
     @discardableResult
-    public func importFile(at url: URL) throws -> ImportResult {
+    public func importFile(at url: URL, precomputedHash: String? = nil) throws -> ImportResult {
         let standardized = url.standardizedFileURL
         let path = standardized.path
-        let hash = try FileHash.sha256(of: standardized)
+        let hash = try precomputedHash.flatMap(FileHash.data(fromHexString:))
+            ?? FileHash.sha256(of: standardized)
 
         // Hashing already happened outside the transaction; only look at
         // metadata when the bytes are actually new to the library.
@@ -150,44 +190,48 @@ public final class Importer {
         }
     }
 
-    /// Imports every RAW file in a directory, skipping anything else.
+    /// Imports a list of files one at a time.
+    ///
+    /// A file that fails is reported through `progress` and skipped — one
+    /// unreadable frame does not abandon the other 199. `precomputedHashes` is
+    /// keyed by standardized URL and lets a caller that has already hashed the
+    /// files skip doing it twice. `progress` is called
+    /// once per file with `(filesFinished, total, outcome)`, on whatever thread
+    /// this runs on; `isCancelled` is consulted before each file, so a
+    /// cancelled run stops between files rather than mid-write.
+    @discardableResult
+    public func importFiles(_ urls: [URL],
+                            precomputedHashes: [URL: String] = [:],
+                            progress: ((Int, Int, Result<ImportResult, Error>) -> Void)? = nil,
+                            isCancelled: () -> Bool = { false }) -> [ImportResult] {
+        var results: [ImportResult] = []
+        let total = urls.count
+        for (index, url) in urls.enumerated() {
+            if isCancelled() { break }
+            let outcome = Result {
+                try importFile(at: url,
+                               precomputedHash: precomputedHashes[url.standardizedFileURL])
+            }
+            if case .success(let result) = outcome { results.append(result) }
+            progress?(index + 1, total, outcome)
+        }
+        return results
+    }
+
+    /// Imports every importable image in a directory, skipping anything else.
     ///
     /// Files that fail to import (unreadable, undecodable) are skipped rather
     /// than aborting the run.
     @discardableResult
     public func importDirectory(at url: URL, recursive: Bool = true) throws -> [ImportResult] {
-        let fm = FileManager.default
-        var isDirectory: ObjCBool = false
-        guard fm.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue
-        else { throw LibraryError.notADirectory(url) }
-
-        var options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles]
-        if !recursive { options.insert(.skipsSubdirectoryDescendants) }
-        guard let enumerator = fm.enumerator(
-            at: url,
-            includingPropertiesForKeys: [.isRegularFileKey, .contentTypeKey],
-            options: options)
-        else { return [] }
-
-        var results: [ImportResult] = []
-        for case let file as URL in enumerator {
-            guard Importer.isRAW(file) else { continue }
-            if let result = try? importFile(at: file) { results.append(result) }
-        }
-        return results
+        importFiles(try ImportScanner.scan(directory: url, recursive: recursive))
     }
 
-    /// `UTType.dng` needs macOS 15; the package deploys to 14.
-    private static let dng = UTType("com.adobe.raw-image")
-
-    /// Camera RAW by content type, with DNG called out because it is what this
-    /// project actually shoots.
-    public static func isRAW(_ url: URL) -> Bool {
-        guard let type = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType
-            ?? UTType(filenameExtension: url.pathExtension)
-        else { return false }
-        if type.conforms(to: .rawImage) { return true }
-        if let dng = Importer.dng, type.conforms(to: dng) { return true }
-        return false
+    /// Everything the decoder will open: camera RAW plus the standard still
+    /// formats (JPEG, TIFF, PNG, HEIC). The predicate itself lives in
+    /// `GrayroomCore` next to the decoder that dispatches on it, so the scanner
+    /// and the decoder cannot disagree about what is openable.
+    public static func isSupportedImage(_ url: URL) -> Bool {
+        ImageFormat.isSupported(url)
     }
 }

@@ -6,19 +6,20 @@ import GrayroomCore
 struct Probe: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "probe",
-        abstract: "Print decode metadata for a RAW file.")
+        abstract: "Print decode metadata for a RAW or standard image file.")
 
-    @Argument(help: "Path to the RAW file.")
+    @Argument(help: "Path to the image file.")
     var input: String
 
     func run() throws {
         let url = URL(fileURLWithPath: input)
         let metal = try MetalContext()
-        let decoder = RawDecoder(metal: metal)
+        let decoder = ImageDecoder(metal: metal)
         let info = try decoder.probe(url: url)
 
         var out = ""
         out += "file:                 \(info.url.path)\n"
+        out += "raw:                  \(info.isRAW ? "yes" : "no")\n"
         if let make = info.cameraMake { out += "make:                 \(make)\n" }
         if let model = info.cameraModel { out += "model:                \(model)\n" }
         out += "nativeSize:           \(Int(info.nativeSize.width)) x \(Int(info.nativeSize.height))\n"
