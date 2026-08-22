@@ -65,6 +65,16 @@ public struct EditState: Codable, Equatable, Sendable {
     /// The masks that can actually change a pixel.
     public var activeMasks: [Mask] { masks.filter { !$0.isIdentity } }
 
+    /// `true` when some part of the frame asks for clarity — a positive global
+    /// amount, or an active mask with a nonzero delta. This is exactly the
+    /// condition under which `Pipeline` runs the clarity stage, and it is by far
+    /// the most expensive thing the pipeline can do, so the interactive loop
+    /// consults it to decide whether a render needs a draft pass.
+    public var clarityActive: Bool {
+        if clarity > 0 { return true }
+        return activeMasks.contains { $0.adjustments.clarity != 0 }
+    }
+
     // MARK: - Nested types
 
     /// `nil` means "use the camera as-shot value".

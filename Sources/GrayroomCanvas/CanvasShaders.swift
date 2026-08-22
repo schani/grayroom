@@ -14,6 +14,14 @@ import GrayroomCore
 /// canvas transform per pixel to find the image texel, so zoom and pan cost
 /// nothing and the drawable is always exactly window-sized.
 ///
+/// The image texture arrives with a mip pyramid (`Pipeline.render`'s
+/// `generateDisplayMipmaps`) and is sampled at an **explicit** level, computed
+/// on the CPU by `CanvasTransform.displayLOD`. It has to be explicit: the uv is
+/// hand-computed and used inside a branch, so the implicit derivatives a sampler
+/// would pick its own level from are undefined. Without it a 24 MP frame fitted
+/// to a laptop window is point-sampled through a bilinear filter — roughly every
+/// fourth pixel of the render — with all the aliasing that implies.
+///
 /// The image texture holds **output-referred, sRGB-encoded** values (the
 /// pipeline's `output` stage did that) and the drawable is a `bgra8Unorm` whose
 /// layer is tagged **sRGB** (`CanvasNSView.init`), so the window server colour-
@@ -38,6 +46,7 @@ enum CanvasShaders {
         float  cursorRadius;  // device pixels; <= 0 hides the brush cursor
         float  cursorInner;   // full-opacity radius (the feather ring)
         float  nearest;       // 1 = nearest sampling (pixel peeping)
+        float  lod;           // explicit mip level for the image sample
     };
 
     struct Varyings {
@@ -61,7 +70,7 @@ enum CanvasShaders {
                                    constant CanvasUniforms &u [[buffer(0)]])
     {
         constexpr sampler linearSampler(coord::normalized, filter::linear,
-                                        address::clamp_to_edge);
+                                        mip_filter::linear, address::clamp_to_edge);
         constexpr sampler nearestSampler(coord::normalized, filter::nearest,
                                          address::clamp_to_edge);
 
@@ -74,10 +83,14 @@ enum CanvasShaders {
 
         if (img.x >= 0.0 && img.y >= 0.0 && img.x < u.imageSize.x && img.y < u.imageSize.y) {
             float2 uv = img / u.imageSize;
-            rgb = (u.nearest > 0.5) ? image.sample(nearestSampler, uv).rgb
-                                    : image.sample(linearSampler, uv).rgb;
+            // Explicit level: the uv here is hand-computed inside a branch, so
+            // the sampler has no derivatives to work from. u.lod is 0 whenever
+            // the image is magnified, and grows as it is minified.
+            rgb = (u.nearest > 0.5) ? image.sample(nearestSampler, uv, level(0.0)).rgb
+                                    : image.sample(linearSampler, uv, level(u.lod)).rgb;
             if (u.overlay > 0.5) {
-                float cov = clamp(coverage.sample(linearSampler, uv).r, 0.0, 1.0);
+                // The coverage map is soft and never mipmapped; level 0 always.
+                float cov = clamp(coverage.sample(linearSampler, uv, level(0.0)).r, 0.0, 1.0);
                 rgb = mix(rgb, float3(1.0, 0.15, 0.15), 0.5 * cov);
             }
         }

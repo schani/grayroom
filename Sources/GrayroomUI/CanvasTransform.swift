@@ -70,6 +70,24 @@ public struct CanvasTransform: Equatable {
     /// Magnification as a percentage, the number the title bar shows.
     public var zoomPercent: Double { zoom * 100 }
 
+    /// Explicit mip level for sampling the displayed texture.
+    ///
+    /// The canvas draws one full-screen quad and computes its texture
+    /// coordinate by inverting this transform per fragment, inside a branch that
+    /// tests whether the fragment is on the image at all — so the implicit
+    /// derivatives a sampler would use for its own LOD are undefined there. The
+    /// level is computed here instead and passed in.
+    ///
+    /// `textureScale` is the displayed texture's width over the image width: 1
+    /// for a full-resolution render, less for a draft. One texel therefore spans
+    /// `1/textureScale` image pixels, so `zoom / textureScale` is device pixels
+    /// per texel and the matching level is `log2` of its reciprocal —
+    /// magnification never goes below level 0.
+    public static func displayLOD(zoom: Double, textureScale: Double = 1) -> Double {
+        let pixelsPerTexel = max(zoom / max(textureScale, 1e-6), 1e-6)
+        return max(0, log2(1 / pixelsPerTexel))
+    }
+
     /// Clamps a zoom request to the allowed range. The fit zoom is always
     /// reachable even for an image so large that fit is below `minZoom`.
     public func clampZoom(_ z: Double) -> Double {

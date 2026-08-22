@@ -14,10 +14,6 @@ import Metal
 /// export does not freeze the preview loop (and does not evict the preview's
 /// mask cache, which is keyed by resolution).
 final class RenderService {
-    /// Long edge of the interactive preview decode. 2560 is ~3 MP at 3:2, which
-    /// renders the whole pipeline in a few ms on Apple Silicon.
-    static let previewMaxDimension = 2560
-
     private let queue = DispatchQueue(label: "com.grayroom.render", qos: .userInitiated)
     private let exportQueue = DispatchQueue(label: "com.grayroom.export", qos: .utility)
     private let renderer: Renderer
@@ -35,11 +31,32 @@ final class RenderService {
         run(queue) { try self.renderer.decoder.probe(url: url) } completion: { completion($0) }
     }
 
-    func decode(url: URL, edit: EditState, maxDimension: Int?,
-                completion: @escaping (Result<DecodedImage, Error>) -> Void) {
-        run(queue) {
-            try self.renderer.decoder.decode(url: url, edit: edit, maxDimension: maxDimension)
+    /// A decode plus the reduced copy the draft pass renders from. `draft` is
+    /// `nil` when the frame is already at or below `draftLongEdge`.
+    struct DecodeResult {
+        let image: DecodedImage
+        let draft: MTLTexture?
+    }
+
+    /// Decodes and, in the same hop, builds the draft input. Reducing costs a
+    /// couple of ms and is worth paying once per decode rather than once per
+    /// frame of a slider drag.
+    func decode(url: URL, edit: EditState, maxDimension: Int?, draftLongEdge: Int,
+                completion: @escaping (Result<DecodeResult, Error>) -> Void) {
+        run(queue) { () -> DecodeResult in
+            let image = try self.renderer.decoder.decode(url: url, edit: edit,
+                                                         maxDimension: maxDimension)
+            let draft = try self.renderer.downsampler.downsampled(image.texture,
+                                                                  longEdge: draftLongEdge)
+            return DecodeResult(image: image, draft: draft)
         } completion: { completion($0) }
+    }
+
+    /// Drops the rasterised mask maps, which at full resolution are the largest
+    /// thing the renderer holds between edits. Opening a different image is the
+    /// one moment they are certainly dead.
+    func clearMaskCache() {
+        queue.async { self.renderer.pipeline.clearMaskCache() }
     }
 
     // MARK: - Preview render
@@ -56,15 +73,21 @@ final class RenderService {
     /// Runs the pipeline on an already-decoded linear texture.
     ///
     /// - Parameter coverageMaskIndex: when non-nil the selected mask's coverage
-    ///   is rasterised too, for the canvas overlay.
+    ///   is rasterised too, for the canvas overlay — at `input`'s resolution, so
+    ///   that the overlay and the image it is drawn over always describe the
+    ///   same frame whether this is a draft or a refine.
+    /// - Parameter computeHistogram: off for a draft pass, whose numbers nobody
+    ///   would have time to read.
     func renderPreview(input: MTLTexture,
                        edit: EditState,
                        coverageMaskIndex: Int?,
+                       computeHistogram: Bool,
                        completion: @escaping (Result<PreviewResult, Error>) -> Void) {
         run(queue) { () -> PreviewResult in
             let t0 = CFAbsoluteTimeGetCurrent()
             let result = try self.renderer.pipeline.render(input: input, edit: edit,
-                                                           computeHistogram: true)
+                                                           computeHistogram: computeHistogram,
+                                                           generateDisplayMipmaps: true)
             var coverage: MTLTexture?
             if let i = coverageMaskIndex {
                 coverage = try self.renderer.pipeline.maskCoverageTexture(
@@ -81,7 +104,8 @@ final class RenderService {
     func renderDefaults(input: MTLTexture,
                         completion: @escaping (Result<MTLTexture, Error>) -> Void) {
         run(queue) {
-            try self.renderer.pipeline.render(input: input, edit: EditState()).texture
+            try self.renderer.pipeline.render(input: input, edit: EditState(),
+                                              generateDisplayMipmaps: true).texture
         } completion: { completion($0) }
     }
 

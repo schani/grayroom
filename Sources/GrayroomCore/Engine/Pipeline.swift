@@ -27,9 +27,33 @@ public final class Pipeline {
     let maskStage: MaskStage
 
     /// Rasterisation depends only on the strokes and the resolution, never on
-    /// the sliders, so moving a slider reuses the maps. One entry is enough for
-    /// the CLI and for the M4 GUI's single-image editing loop.
-    private var maskCache: (masks: [Mask], width: Int, height: Int, maps: MaskStage.Maps)?
+    /// the sliders, so moving a slider reuses the maps.
+    ///
+    /// Two entries, least-recently-used first: the interactive loop alternates a
+    /// draft render with a full-resolution refine of the *same* strokes, and a
+    /// single entry keyed by resolution would re-rasterise every stamp on every
+    /// frame of a slider drag.
+    private struct MaskCacheEntry {
+        var masks: [Mask]
+        var width: Int
+        var height: Int
+        var maps: MaskStage.Maps
+    }
+    private var maskCache: [MaskCacheEntry] = []
+    private static let maskCacheCapacity = 2
+
+    /// Test hook: the resolutions currently held by the mask cache, least
+    /// recently used first.
+    var maskCacheResolutions: [(width: Int, height: Int)] {
+        maskCache.map { ($0.width, $0.height) }
+    }
+
+    /// Drops the rasterised maps. At full resolution an entry is a 24 MP
+    /// `rgba16Float` plus an `r16Float` — ~240 MB — and two of them outlive any
+    /// reason to keep them the moment a different image is opened.
+    public func clearMaskCache() {
+        maskCache.removeAll()
+    }
 
     public init(context: MetalContext) throws {
         self.context = context
@@ -56,15 +80,26 @@ public final class Pipeline {
     }
 
     /// Runs the pipeline. `input` must be linear scene-referred rgba16Float.
+    ///
+    /// - Parameter generateDisplayMipmaps: allocate the working textures with a
+    ///   mip pyramid and fill the output's before the command buffer completes.
+    ///   Only the app's canvas wants this; file output paths leave it off and
+    ///   are unaffected, pixel for pixel.
     public func render(input: MTLTexture,
                        edit: EditState,
                        upTo lastStage: Stage = .output,
-                       computeHistogram: Bool = false) throws -> Result {
+                       computeHistogram: Bool = false,
+                       generateDisplayMipmaps: Bool = false) throws -> Result {
         let w = input.width, h = input.height
 
+        // Both working textures carry the pyramid: which of the two ends up
+        // holding the result depends on how many stages ran, and a mipmapped
+        // pair costs less than a mipmapped copy of a flat one.
         var src = input
-        var dst = try context.makeWorkingTexture(width: w, height: h)
-        let spare = try context.makeWorkingTexture(width: w, height: h)
+        var dst = try context.makeWorkingTexture(width: w, height: h,
+                                                 mipmapped: generateDisplayMipmaps)
+        let spare = try context.makeWorkingTexture(width: w, height: h,
+                                                   mipmapped: generateDisplayMipmaps)
         var pool = [spare]
 
         guard let commandBuffer = context.commandQueue.makeCommandBuffer() else {
@@ -99,7 +134,7 @@ public final class Pipeline {
         // bit-for-bit unchanged.
         let globalClarity = min(max(edit.clarity, 0), 100)
         let localClarity = maps != nil && masks.contains { $0.adjustments.clarity != 0 }
-        if runs(.clarity), globalClarity > 0 || localClarity {
+        if runs(.clarity), edit.clarityActive {
             if localClarity {
                 // One pyramid for the whole frame, always at the full-scale
                 // lift; the amount map scales it per pixel. A region whose
@@ -187,6 +222,15 @@ public final class Pipeline {
             histogramBuffer = buf
         }
 
+        // --- display mip pyramid ------------------------------------------------
+        if generateDisplayMipmaps, output !== input, output.mipmapLevelCount > 1 {
+            guard let blit = commandBuffer.makeBlitCommandEncoder() else {
+                throw MetalError.encoderFailed
+            }
+            blit.generateMipmaps(for: output)
+            blit.endEncoding()
+        }
+
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         if let err = commandBuffer.error { throw err }
@@ -212,11 +256,16 @@ public final class Pipeline {
                           masks: [Mask],
                           width: Int, height: Int) throws -> MaskStage.Maps? {
         guard !masks.isEmpty else { return nil }
-        if let c = maskCache, c.width == width, c.height == height, c.masks == masks {
-            return c.maps
+        if let i = maskCache.firstIndex(where: {
+            $0.width == width && $0.height == height && $0.masks == masks
+        }) {
+            let entry = maskCache.remove(at: i)
+            maskCache.append(entry)                      // most recently used last
+            return entry.maps
         }
         let maps = try maskStage.encodeMaps(cb, masks: masks, width: width, height: height)
-        maskCache = (masks, width, height, maps)
+        maskCache.append(MaskCacheEntry(masks: masks, width: width, height: height, maps: maps))
+        if maskCache.count > Pipeline.maskCacheCapacity { maskCache.removeFirst() }
         return maps
     }
 

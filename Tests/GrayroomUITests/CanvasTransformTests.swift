@@ -139,4 +139,44 @@ final class CanvasTransformTests: XCTestCase {
         // Left of the letterboxed image.
         XCTAssertFalse(t.containsImagePoint(view: CGPoint(x: 0, y: 0)))
     }
+
+    // MARK: - Display LOD
+
+    /// One mip level per halving, and never below level 0: magnifying must not
+    /// ask for a level that does not exist.
+    func testDisplayLODIsLog2OfTheMinification() {
+        XCTAssertEqual(CanvasTransform.displayLOD(zoom: 1), 0, accuracy: 1e-12)
+        XCTAssertEqual(CanvasTransform.displayLOD(zoom: 0.5), 1, accuracy: 1e-12)
+        XCTAssertEqual(CanvasTransform.displayLOD(zoom: 0.25), 2, accuracy: 1e-12)
+        XCTAssertEqual(CanvasTransform.displayLOD(zoom: 0.125), 3, accuracy: 1e-12)
+        XCTAssertEqual(CanvasTransform.displayLOD(zoom: 2), 0, accuracy: 1e-12)
+        XCTAssertEqual(CanvasTransform.displayLOD(zoom: 8), 0, accuracy: 1e-12)
+    }
+
+    func testDisplayLODIsContinuousBetweenLevels() {
+        XCTAssertEqual(CanvasTransform.displayLOD(zoom: 1 / 3.0), log2(3.0), accuracy: 1e-12)
+        XCTAssertEqual(CanvasTransform.displayLOD(zoom: 0.7), log2(1 / 0.7), accuracy: 1e-12)
+    }
+
+    /// A draft texture is narrower than the image the transform describes, so
+    /// the level has to be measured in *texels*: sampling a half-size draft at
+    /// fit zoom must not blur it by a whole extra level.
+    func testDisplayLODAccountsForADraftTexture() {
+        // A draft at half the image width shown at 50 % is 1:1 in texels.
+        XCTAssertEqual(CanvasTransform.displayLOD(zoom: 0.5, textureScale: 0.5), 0,
+                       accuracy: 1e-12)
+        // At 25 % it is minified 2x — one level, not the two the image-pixel
+        // zoom alone would have asked for.
+        XCTAssertEqual(CanvasTransform.displayLOD(zoom: 0.25, textureScale: 0.5), 1,
+                       accuracy: 1e-12)
+        XCTAssertEqual(CanvasTransform.displayLOD(zoom: 0.25), 2, accuracy: 1e-12)
+        // Magnified: a half-size draft at 100 % is 2x up, still level 0.
+        XCTAssertEqual(CanvasTransform.displayLOD(zoom: 1, textureScale: 0.5), 0,
+                       accuracy: 1e-12)
+    }
+
+    func testDisplayLODSurvivesADegenerateZoom() {
+        XCTAssertTrue(CanvasTransform.displayLOD(zoom: 0).isFinite)
+        XCTAssertGreaterThanOrEqual(CanvasTransform.displayLOD(zoom: 0), 0)
+    }
 }

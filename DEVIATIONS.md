@@ -70,15 +70,15 @@ decision, not a backlog: the rationale is the point of the column.
 | 9 | Canvas is not colour-managed to the display profile | done, wave 3 (`CAMetalLayer.colorspace = sRGB`) | — | medium / S |
 | 10 | Output clamp is per-channel with no rolloff | deferred | only reachable with heavy toning; a rolloff here would fight the tone stage's shoulder, which is where highlight behaviour is defined | low / S |
 | 11 | Histogram is luminance-only; no per-channel layers | deferred | for a B&W pipeline the two agree except under toning; wants the toning-aware channel view to be worth it | low / M |
-| 12 | Histogram/clipping measured on the preview, not the export | deferred | a full-res histogram pass per edit is the cost; wave 3's absolute clip threshold at least makes the *indicator* resolution-independent | low / S |
+| 12 | Histogram/clipping measured on the preview, not the export | done, full-resolution preview (the histogram runs on the refine pass, the same rendition the exporter writes; the draft pass skips it) | — | low / S |
 | 13 | Export is always sRGB 3-channel; no colour space or output sharpening | deferred | needs a real output-sharpening stage (M5) to be worth a dialog | low / M |
 
 ## Summary
 
 | | tone | bwmix/toning | clarity/local | decode/output | total |
 |---|---|---|---|---|---|
-| implemented | 5 | 4 | 6 | 5 | **20** |
-| deferred | 4 | 4 | 5 | 9 | **22** |
+| implemented | 5 | 4 | 6 | 6 | **21** |
+| deferred | 4 | 4 | 5 | 8 | **21** |
 | removed | 0 | 0 | 2 | 0 | **2** |
 
 Of the 16 items the audits rated *high* severity, 13 are implemented, two

@@ -24,6 +24,7 @@ let package = Package(
                 .copy("Shaders/Toning.metal"),
                 .copy("Shaders/Output.metal"),
                 .copy("Shaders/Histogram.metal"),
+                .copy("Shaders/Downsample.metal"),
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

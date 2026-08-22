@@ -41,6 +41,55 @@ skipped entirely and every downstream kernel takes exactly its pre-M3 path, so
 the output is bit-for-bit what it was — `MaskTests.testPipelineIsUnchanged-
 WithoutEffectiveMasks` asserts that on a full-pipeline render.
 
+The mask rasterisation cache holds **two** entries, keyed by strokes plus
+resolution. Two, not one, because the interactive loop alternates two
+resolutions of the same strokes (see *Draft and refine* below) and a single
+entry would re-stamp every brush dab on every frame of a drag.
+
+## Draft and refine
+
+The GUI decodes at **full resolution** — above 100 % the canvas shows the file's
+own pixels — so a preview render is a full-resolution render, and the full
+pipeline on a 24 MP frame costs far more than a frame's worth of time. Measured
+on an M2 Max, 3968x5952:
+
+| render | wall time |
+| --- | --- |
+| full, `clarity = 0`, with histogram | 34 ms |
+| full, `clarity = 59`, with histogram | 130 ms |
+| draft (1707x2560), `clarity = 59`, no histogram | 24 ms |
+| the one-off reduction that builds the draft input | 3 ms |
+
+130 ms is well past the point where a slider stops feeling attached to the
+mouse, so an expensive edit renders **twice**: a reduced draft while the gesture
+is live, then a refine of the same edit at full resolution as soon as nothing
+newer is pending. `PreviewStrategy` (in `GrayroomUI`) is the whole policy —
+
+* `draftLongEdge(fullSize:clarityActive:)` — draft at 2560 when clarity is
+  active, or when the frame is over 30 MP (where even the clarity-free pipeline
+  is too slow to drag against); otherwise `nil`, i.e. go straight to full.
+  `clarityActive` is `EditState.clarityActive`, *the same predicate the pipeline
+  uses to decide whether to run the clarity stage at all*, so the two can never
+  disagree about which frame is the expensive one.
+* `nextStep(hasPendingEdit:lastRenderWasDraft:draftLongEdge:)` — a newer edit
+  always beats an owed refine, so a fast drag never pays for a full-resolution
+  render it would have thrown away, and a drag settles on exactly one refine.
+
+The draft **input** is the decode reduced once per decode by
+`Downsampler` / `Downsample.metal` (four bilinear taps averaged, a box over the
+destination footprint). Nothing that reaches a file or a histogram goes through
+it: the draft pass skips the histogram, and the refine re-renders from the
+untouched decode. The refine also re-rasterises the mask coverage overlay, which
+is always produced at the resolution of the input it accompanies — overlay and
+image are addressed by the same normalised uv, so they cannot describe different
+extents.
+
+The targeted-adjustment tool samples the draft too. It runs the pipeline as far
+as `clarity` to read one neighbourhood's hue, and paying full resolution for
+that would put a visible hitch on the mouse-down that starts the drag; the
+stages ahead of the tap are ratio-preserving and the reduction is an average, so
+the hue is the same either way.
+
 ## Tone curve
 
 Retuned in **Lightroom-parity wave 1** (`research/audit/tone.json` deviations
@@ -965,19 +1014,58 @@ split-toning sliders lied about the result. A neutral B&W frame is unaffected
 either way (R = G = B is the same neutral in any RGB space), which is why it went
 unnoticed. This is also the hook to change for EDR previews.
 
+### Canvas display sampling
+
+The texture the canvas is handed carries a **mip pyramid**:
+`Pipeline.render(generateDisplayMipmaps:)` allocates the working textures
+mipmapped and encodes a blit `generateMipmaps` on the output in the same command
+buffer. Only the app's preview path passes it; export and the CLI leave it off
+and are unaffected pixel for pixel (`PreviewPathTests` asserts both the byte
+equality of level 0 and the absence of a pyramid on the file path).
+
+It is needed because the canvas fits a full-resolution render into a window: a
+24 MP frame at fit zoom on a laptop is a ~4x minification, and a bilinear
+sampler at that ratio is point sampling roughly every fourth pixel of the
+render, with all the aliasing that implies.
+
+The level is **explicit**, `CanvasTransform.displayLOD(zoom:textureScale:)`
+computed on the CPU and passed in as a uniform. It has to be: the fragment
+shader draws one full-screen quad, computes its texture coordinate by inverting
+the canvas transform, and does so inside a branch testing whether the fragment is
+on the image at all — so the implicit derivatives a sampler picks its own level
+from are undefined there. `textureScale` is the displayed texture's width over
+the image width, which is below 1 while a draft is up; without it a draft would
+be blurred by its own reduction factor a second time.
+
+Above 2x the canvas switches to a nearest sampler at level 0 — pixel peeping
+shows the actual pixels. That cutover is keyed on the *image* zoom, i.e. on what
+the user asked for and on what the refine is about to show, not on the texture's
+own magnification: a draft crosses 2x of its own texels while it is still being
+minified on screen, and keying on that would turn a shrunk frame blocky. The
+coverage overlay is never mipmapped and is always sampled at level 0; it is a
+soft mask, so aliasing in it is invisible.
+
+The pyramid is built on the **output** stage's result, which is sRGB-encoded, so
+each level is a box average in the encoded domain rather than in linear light.
+That is the conventional choice — it is what image viewers and Lightroom's own
+fit view do — but it is not energy-preserving: fine high-contrast texture mips
+slightly dark, and a pathological black/white checkerboard mips to encoded 0.5,
+which is 0.21 linear rather than 0.5. Generating the pyramid on the linear stage
+instead would mean moving the output transform into the canvas shader, where it
+would have to be reconciled with the dither and the sRGB-tagged drawable.
+
 ### Capture sharpening
 
 `RawDecoder.neutralize` sets `sharpnessAmount = 0` (wave 3, audit `decode-output`
 #3). Apple's per-camera default for the test Leicas is 0.9 — measured +83 %
-Laplacian-of-log-luminance RMS on a full-res centre crop — but CIRAWFilter
-silently disables sharpening whenever `scaleFactor < 1`, and the GUI previews at
-2560 px while export runs at full resolution. The on-screen image therefore had
-no capture sharpening and the exported file had a strong, uncontrollable one,
-with clarity running downstream amplifying halos that were never visible while
-editing. Pinning it to a fixed non-zero value cannot fix that (it is a no-op
-below full res either way), so 0 is the only value that makes the two agree. A
-real Amount/Radius/Detail/Masking stage is deferred (M5). NR keeps its per-camera
-defaults — measured scale-invariant, so it does not break the agreement.
+Laplacian-of-log-luminance RMS on a full-res centre crop — and CIRAWFilter
+silently disables it whenever `scaleFactor < 1`, so it is not a value the
+pipeline can rely on being applied at all. What it *is* reliably is
+uncontrollable: an unknown amount of edge gain ahead of clarity, which then
+amplifies the halos it produces. 0 is the only setting that makes the whole
+pipeline mean one thing at every resolution. A real Amount/Radius/Detail/Masking
+stage is deferred. NR keeps its per-camera defaults — measured scale-invariant,
+so it stays consistent either way.
 
 ## Known limitations (M1 + M2 + M3)
 
@@ -990,13 +1078,23 @@ defaults — measured scale-invariant, so it does not break the agreement.
 * There is no non-edge-aware halo component, so high positive clarity gains
   micro-texture but never the broad edge gradients LR gives (audit #3).
 * Clarity's band weighting is defined on *pyramid* levels, so "pixel scale"
-  means pixel scale of the rendition being computed: a 1024 px preview and a
-  full-resolution export exclude different real-world detail sizes. Measured at
-  clarity +60 on the reference frame, the coarse-band gain is the same either
-  way; what changes is how much resampled detail counts as level 0.
+  means pixel scale of the rendition being computed: a 2560 px draft and the
+  full-resolution refine of the same edit exclude different real-world detail
+  sizes, so the draft is not a preview of the refine's clarity, only of its
+  tonality. Measured at clarity +60 on the reference frame, the coarse-band gain
+  is the same either way; what changes is how much resampled detail counts as
+  level 0.
 * Mask rasterisation is brute force per stamp, at full pipeline resolution, and
-  re-runs whenever the strokes or the size change (one-entry cache). No
-  half-resolution mask, no guided-filter edge snapping.
+  re-runs whenever the strokes or the size change (two-entry cache: one draft
+  resolution and one full). At 24 MP the two entries are ~480 MB, held until a
+  different image is opened. No half-resolution mask, no guided-filter edge
+  snapping.
+* The mask coverage overlay bypasses that cache entirely: with the overlay on,
+  every render re-stamps the selected mask at its own input's resolution, in its
+  own command buffer. Measured ~10-25 ms on top of a 24 MP refine.
+* The display mip pyramid is built in the sRGB-encoded domain, so the fit-zoom
+  view of fine high-contrast texture is slightly darker than a linear-light
+  reduction would be (see *Canvas display sampling*).
 * Stroke interpolation is linear, not Catmull-Rom, so a sparse fast stroke has
   visibly straight segments.
 * Only drawn masks exist: no gradients, no radial shapes, no parametric or range
@@ -1004,9 +1102,15 @@ defaults — measured scale-invariant, so it does not break the agreement.
 * Clarity's gamma grid is fixed, not fitted to the image histogram, and its
   effective strength still varies by ~19% with tone across the grid.
 * The clarity stage allocates its pyramids per render (~280 MB at 24 MP) instead
-  of using a persistent pool.
+  of using a persistent pool, and `Pipeline.render` allocates its pair of working
+  textures per call — mipmapped for display, so ~510 MB at 24 MP. Interactive
+  full-resolution rendering pays that on every refine.
 * White balance is applied at decode time, so changing temp/tint forces a
-  re-decode. Decode results are not cached yet.
+  re-decode. Decode results are not cached yet. Each such decode also rebuilds
+  the before/after texture at full resolution (~34 ms and a retained 256 MB at
+  24 MP) whether or not anyone is holding `\` to look at it — small next to the
+  decode itself, but the largest thing the app holds for a feature that is off
+  most of the time.
 * The tone curve is never the identity: "all sliders zero" is the baseline
   rendition (see above). That invariant was retired on purpose in parity wave 1,
   and with it the "exposure +1 doubles linear luminance" statement above the
@@ -1025,9 +1129,10 @@ defaults — measured scale-invariant, so it does not break the agreement.
 * Export is always sRGB, 3 channels, no output-sharpening choice; there is no
   in-image clipping overlay (LR's `J`), no Option-drag threshold view on
   Whites/Blacks, no pixel readout, no WB presets or eyedropper, and the
-  histogram is luminance-only and measured on the preview rather than on what
-  gets exported (audit `decode-output` #2, 4, 5, 7, 10–13 — all deferred, see
-  `DEVIATIONS.md`).
+  histogram is luminance-only (audit `decode-output` #2, 4, 5, 7, 10–13 — all
+  deferred, see `DEVIATIONS.md`). The histogram is computed only on
+  full-resolution renders, so during a drag on an expensive edit it lags the
+  canvas by one refine.
 * Toning strength still depends strongly on hue: the tint is built from a fully
   saturated primary, so saturation 100 is much more forceful for blue than for
   yellow (audit bwmix-toning.json #3, deferred — it needs an opponent-space

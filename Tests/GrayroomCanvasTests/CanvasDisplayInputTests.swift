@@ -49,8 +49,8 @@ final class CanvasDisplayInputTests: XCTestCase {
 
     // MARK: - Marker texture
 
-    private func makeQuadrantTexture() throws -> MTLTexture {
-        let w = Int(imageSize.width), hgt = Int(imageSize.height)
+    private func makeQuadrantTexture(scale: CGFloat = 1) throws -> MTLTexture {
+        let w = Int(imageSize.width * scale), hgt = Int(imageSize.height * scale)
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
                                                          width: w, height: hgt,
                                                          mipmapped: false)
@@ -214,6 +214,56 @@ final class CanvasDisplayInputTests: XCTestCase {
         }
         XCTAssertGreaterThan(checked, 100)
         XCTAssertEqual(offCode, 0, "\(offCode)/\(checked) image pixels moved off their exact code")
+    }
+
+    /// A draft render is a *smaller* texture standing in for the same image, and
+    /// the canvas addresses it by the same normalised uv. Whatever the input
+    /// mapping says is under a view point must therefore still be what is drawn
+    /// — and the mask overlay, which is sampled by that same uv, keeps lining up
+    /// for free.
+    func testDisplayAgreesWithInputWhileADraftTextureIsUp() throws {
+        h.canvas.imageTexture = try makeQuadrantTexture(scale: 0.4)
+        XCTAssertLessThan(h.canvas.imageTexture!.width, Int(imageSize.width))
+        XCTAssertEqual(h.canvas.transform.imageSize, imageSize,
+                       "precondition: the transform still describes the full image")
+        try assertDisplayAgreesWithInput("draft texture, fit")
+        h.canvas.zoomToActualSize()
+        try assertDisplayAgreesWithInput("draft texture, 1:1")
+    }
+
+    /// The mip level is a property of the texture being sampled, not of the
+    /// transform: a draft at 40 % shown at 100 % is a 2.5x magnification of the
+    /// texture and must stay on level 0, however far the image-pixel zoom is
+    /// from it.
+    func testTheLODFollowsTheTextureNotJustTheZoom() throws {
+        h.canvas.zoomToActualSize()
+        XCTAssertEqual(h.canvas.currentUniforms().lod, 0, accuracy: 1e-6)
+        XCTAssertEqual(h.canvas.currentUniforms().nearest, 0)
+
+        // Fit zoom on the full-resolution texture minifies, so the level rises.
+        h.canvas.zoomToFit()
+        let full = h.canvas.currentUniforms()
+        XCTAssertGreaterThan(full.lod, 1)
+        XCTAssertEqual(Double(full.lod),
+                       CanvasTransform.displayLOD(zoom: h.canvas.transform.zoom),
+                       accuracy: 1e-5)
+
+        // The same view, showing a 40 % draft: minified 2.5x less.
+        h.canvas.imageTexture = try makeQuadrantTexture(scale: 0.4)
+        let draft = h.canvas.currentUniforms()
+        let scale = Double(h.canvas.imageTexture!.width) / Double(imageSize.width)
+        XCTAssertLessThan(draft.lod, full.lod)
+        XCTAssertEqual(Double(draft.lod),
+                       CanvasTransform.displayLOD(zoom: h.canvas.transform.zoom,
+                                                  textureScale: scale),
+                       accuracy: 1e-5)
+
+        // Magnifying that draft to 100 % of the *image* is 2.5x of the texture:
+        // level 0, and still interpolated — nearest is keyed on the image zoom,
+        // so the transient draft is not blown up into hard blocks.
+        h.canvas.zoomToActualSize()
+        XCTAssertEqual(h.canvas.currentUniforms().lod, 0, accuracy: 1e-6)
+        XCTAssertEqual(h.canvas.currentUniforms().nearest, 0)
     }
 
     func testDisplayAgreesWithInputAtActualSize() throws {

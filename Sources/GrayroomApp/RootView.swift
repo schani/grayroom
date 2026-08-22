@@ -108,21 +108,13 @@ private struct StatusBar: View {
             Text(model.imageURL?.lastPathComponent ?? "No image")
                 .font(.system(size: 11, weight: .medium))
             if model.previewSize != .zero {
-                Text(String(format: "preview %.0f×%.0f  ·  full %.0f×%.0f",
-                            model.previewSize.width, model.previewSize.height,
-                            model.fullSize.width, model.fullSize.height))
+                Text(String(format: "%.0f×%.0f",
+                            model.previewSize.width, model.previewSize.height))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
             if !model.cameraDescription.isEmpty {
                 Text(model.cameraDescription).font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            if model.isPreviewUpscaled {
-                Label("preview resolution", systemImage: "exclamationmark.triangle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.orange)
-                    .help("Above 100 % the canvas magnifies the preview decode; "
-                          + "full-resolution interactive rendering is M5.")
             }
             Spacer()
             if let error = model.errorMessage {

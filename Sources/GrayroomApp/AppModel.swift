@@ -21,7 +21,7 @@ import UniformTypeIdentifiers
 /// slider / stroke / undo
 ///     -> EditStateStore.onChange(invalidation)
 ///     -> requestRender()            coalescing: keep only the newest EditState
-///     -> [decode only if white balance changed]
+///     -> [decode only if white balance changed]     full resolution, always
 ///     -> Pipeline.render on the cached linear texture      (background queue)
 ///     -> canvas.imageTexture = result; setNeedsDisplay     (main)
 /// ```
@@ -29,7 +29,13 @@ import UniformTypeIdentifiers
 /// There is no timer and no fixed debounce interval. A render request that
 /// arrives while one is in flight replaces the pending one, so the loop
 /// self-limits to whatever the GPU can actually do and never queues up stale
-/// frames — which at preview resolution is a handful of milliseconds per frame.
+/// frames.
+///
+/// The decode is at **full resolution** — zoom above 100 % shows the file's own
+/// pixels — which makes a render expensive enough that an edit the pipeline
+/// cannot turn around in a frame is rendered twice: a reduced draft while the
+/// gesture is live, then a refine at full resolution the moment nothing newer is
+/// pending. `PreviewStrategy` owns that policy; `pump()` only executes it.
 @Observable
 final class AppModel {
     static let shared = AppModel()
@@ -80,12 +86,20 @@ final class AppModel {
     private weak var canvas: CanvasNSView?
 
     private var decoded: DecodedImage?
+    /// The decode reduced to `PreviewStrategy.draftLongEdge`, built once per
+    /// decode. `nil` when the frame is already that small.
+    private var draftTexture: MTLTexture?
     private var decodeKey: DecodeKey?
     private var currentTexture: MTLTexture?
     private var beforeTexture: MTLTexture?
     private var coverageTexture: MTLTexture?
 
     private var pendingEdit: EditState?
+    /// The edit the last render was of — what a refine pass re-renders.
+    private var lastRenderedEdit: EditState?
+    /// `true` when what the canvas is showing came from the draft pass, i.e. a
+    /// refine is owed as soon as the loop has nothing newer to do.
+    private var lastRenderWasDraft = false
     private var renderInFlight = false
     private var autosaveTask: Task<Void, Never>?
 
@@ -168,12 +182,16 @@ final class AppModel {
             return
         }
         autosaveTask?.cancel()
+        service.clearMaskCache()
         imageURL = url
         decoded = nil
+        draftTexture = nil
         decodeKey = nil
         currentTexture = nil
         beforeTexture = nil
         coverageTexture = nil
+        lastRenderedEdit = nil
+        lastRenderWasDraft = false
         histogram = .empty
         statusMessage = nil
         errorMessage = nil
@@ -212,19 +230,11 @@ final class AppModel {
         guard let imageURL else { return "Grayroom" }
         var parts = [imageURL.lastPathComponent]
         parts.append(String(format: "%.0f%%", zoomPercent))
-        if isPreviewUpscaled {
-            parts.append("preview res")
-        }
         if lastRenderMilliseconds > 0 {
             parts.append(String(format: "%.1f ms", lastRenderMilliseconds))
         }
         return parts.joined(separator: " — ")
     }
-
-    /// `true` when the canvas is magnifying the preview decode, i.e. the pixels
-    /// on screen are softer than the file's. Full-res interactive rendering is
-    /// M5; until then the title bar says so.
-    var isPreviewUpscaled: Bool { zoomPercent > 100.5 }
 
     // MARK: - Render loop
 
@@ -246,16 +256,36 @@ final class AppModel {
         pump()
     }
 
+    /// `true` when rendering `edit` at the decode's own resolution would be too
+    /// slow to drag against, so the loop should show a draft first.
+    private func shouldDraft(_ edit: EditState) -> Bool {
+        // `fullSize` (from the probe) stands in until the first decode lands.
+        let size = previewSize == .zero ? fullSize : previewSize
+        return PreviewStrategy.draftLongEdge(fullSize: size,
+                                             clarityActive: edit.clarityActive) != nil
+    }
+
+    private func nextStep() -> PreviewRenderStep {
+        let candidate = pendingEdit ?? lastRenderedEdit
+        let edge = candidate.flatMap { shouldDraft($0) ? PreviewStrategy.draftLongEdge : nil }
+        return PreviewStrategy.nextStep(hasPendingEdit: pendingEdit != nil,
+                                        lastRenderWasDraft: lastRenderWasDraft,
+                                        draftLongEdge: edge)
+    }
+
     private func pump() {
-        guard !renderInFlight, let service, let url = imageURL, let edit = pendingEdit else { return }
+        guard !renderInFlight, let service, let url = imageURL else { return }
+        let step = nextStep()
+        guard step != .idle, let edit = pendingEdit ?? lastRenderedEdit else { return }
         pendingEdit = nil
+        lastRenderedEdit = edit
         renderInFlight = true
 
-        let key = DecodeKey(url: url, edit: edit, maxDimension: RenderService.previewMaxDimension)
+        let key = DecodeKey(url: url, edit: edit, maxDimension: nil)
         if key != decodeKey || decoded == nil {
             isDecoding = true
-            service.decode(url: url, edit: edit,
-                           maxDimension: RenderService.previewMaxDimension) { [weak self] result in
+            service.decode(url: url, edit: edit, maxDimension: nil,
+                           draftLongEdge: PreviewStrategy.draftLongEdge) { [weak self] result in
                 guard let self else { return }
                 self.isDecoding = false
                 switch result {
@@ -263,8 +293,11 @@ final class AppModel {
                     self.errorMessage = "Decode failed: \(error)"
                     self.renderInFlight = false
                     self.pendingEdit = nil
-                case .success(let image):
+                    self.lastRenderWasDraft = false
+                case .success(let decode):
+                    let image = decode.image
                     self.decoded = image
+                    self.draftTexture = decode.draft
                     self.decodeKey = key
                     self.store.asShotTemperature = image.asShotTemperature
                     self.store.asShotTint = image.asShotTint
@@ -280,35 +313,45 @@ final class AppModel {
                             if self?.showBeforeAfter == true { self?.pushTextureToCanvas() }
                         }
                     }
-                    self.runPipeline(edit)
+                    // The frame's real size is only known now, so ask again.
+                    self.runPipeline(edit, draft: self.shouldDraft(edit))
                 }
                 self.pump()
             }
         } else {
-            runPipeline(edit)
+            runPipeline(edit, draft: step != .full)
         }
     }
 
-    private func runPipeline(_ edit: EditState) {
+    /// One pipeline run. A draft renders from the reduced input and skips the
+    /// histogram; a refine renders from the decode itself and computes it. Both
+    /// rasterise the overlay at *their* input's resolution, so the overlay never
+    /// covers a different extent than the image underneath it.
+    private func runPipeline(_ edit: EditState, draft: Bool) {
         guard let service, let decoded else {
             renderInFlight = false
             return
         }
+        let input = (draft ? draftTexture : nil) ?? decoded.texture
+        let isDraft = input !== decoded.texture
         isRendering = true
         let coverageIndex = showMaskOverlay ? store.selectedMaskIndex : nil
-        service.renderPreview(input: decoded.texture, edit: edit,
-                              coverageMaskIndex: coverageIndex) { [weak self] result in
+        service.renderPreview(input: input, edit: edit,
+                              coverageMaskIndex: coverageIndex,
+                              computeHistogram: !isDraft) { [weak self] result in
             guard let self else { return }
             self.isRendering = false
             self.renderInFlight = false
             switch result {
             case .failure(let error):
                 self.errorMessage = "Render failed: \(error)"
+                self.lastRenderWasDraft = false
             case .success(let preview):
                 self.currentTexture = preview.texture
                 self.coverageTexture = preview.coverage
                 self.lastRenderMilliseconds = preview.milliseconds
                 if let h = preview.histogram { self.histogram = HistogramModel(h) }
+                self.lastRenderWasDraft = isDraft
                 self.pushTextureToCanvas()
             }
             self.pump()
@@ -439,7 +482,14 @@ extension AppModel: CanvasInputHandler {
         guard let service, let decoded else { return }
         store.beginGesture()
         targeted = TargetedSession(baseline: store.edit.bwMix.sliderValues, hue: nil)
-        service.sampleLinearRGB(input: decoded.texture, edit: store.edit,
+        // The draft input, when there is one: this samples a small neighbourhood
+        // to get one hue out of it, and running the pipeline at full resolution
+        // for that would put a visible hitch on the mouse-down that starts the
+        // drag. It does widen the footprint — the fixed 5x5 tap covers ~12x12
+        // full-resolution pixels — which for the "what colour is this thing I
+        // clicked on" question this answers is if anything the better window.
+        let input = draftTexture ?? decoded.texture
+        service.sampleLinearRGB(input: input, edit: store.edit,
                                 normalized: p) { [weak self] result in
             guard let self, var session = self.targeted else { return }
             guard case .success(let rgb) = result else { return }

@@ -52,6 +52,7 @@ public struct CanvasUniforms {
     public var cursorRadius: Float = 0
     public var cursorInner: Float = 0
     public var nearest: Float = 0
+    public var lod: Float = 0
     public init() {}
 }
 
@@ -361,8 +362,21 @@ public final class CanvasNSView: MTKView {
         u.center = SIMD2<Float>(Float(transform.center.x), Float(transform.center.y))
         u.zoom = Float(transform.zoom)
         u.overlay = (showOverlay && coverageTexture != nil) ? 1 : 0
-        // Above 2x, show the actual preview pixels rather than a smoothed lie.
+        // Above 2x, show the actual image pixels rather than a smoothed lie.
+        // The threshold is on the *image* zoom, i.e. on what the user asked for
+        // and on what the refine is about to show — not on the texture's own
+        // magnification, which for a draft would cross 2x while the draft is
+        // still being *minified* on screen and turn a shrunk frame blocky.
         u.nearest = transform.zoom >= 2 ? 1 : 0
+        // The mip level, by contrast, is a property of the texture being
+        // sampled — a draft is narrower than the image the transform describes,
+        // and asking for the level the image-pixel zoom implies would blur it by
+        // the reduction factor twice over.
+        let textureScale = imageTexture.map {
+            Double($0.width) / max(Double(transform.imageSize.width), 1)
+        } ?? 1
+        u.lod = Float(CanvasTransform.displayLOD(zoom: transform.zoom,
+                                                 textureScale: textureScale))
         if tool == .brush, let cursor = cursorLocation {
             let r = BrushSizing.screenRadius(size: brushSize, transform: transform)
             u.cursor = SIMD2<Float>(Float(cursor.x), Float(cursor.y))

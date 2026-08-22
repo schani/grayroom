@@ -235,4 +235,39 @@ final class EditStateTests: XCTestCase {
             }
         }
     }
+
+    /// `clarityActive` is what both the pipeline (does the clarity stage run?)
+    /// and the preview loop (is this edit expensive enough to draft?) ask, so
+    /// the two can never disagree about the frame in front of them.
+    func testClarityActiveMatchesWhenTheStageWouldRun() {
+        XCTAssertFalse(EditState().clarityActive)
+
+        var global = EditState()
+        global.clarity = 1
+        XCTAssertTrue(global.clarityActive)
+
+        // A mask that would move clarity, but is identity overall, cannot.
+        var identityMask = EditState()
+        identityMask.masks = [Mask(name: "m")]
+        XCTAssertFalse(identityMask.clarityActive)
+
+        var local = EditState()
+        var mask = Mask(name: "m")
+        mask.adjustments.clarity = 40
+        mask.strokes = [Stroke(brush: BrushParams(), polyline: [(0.5, 0.5)])]
+        local.masks = [mask]
+        XCTAssertTrue(local.clarityActive)
+
+        // A negative delta still means the clarity stage runs (the mask carves
+        // a region out of a global lift), so it counts as active too.
+        var negative = local
+        negative.masks[0].adjustments.clarity = -40
+        XCTAssertTrue(negative.clarityActive)
+
+        // A mask with no clarity of its own does not make the stage run.
+        var toneOnly = local
+        toneOnly.masks[0].adjustments.clarity = 0
+        toneOnly.masks[0].adjustments.exposure = 1
+        XCTAssertFalse(toneOnly.clarityActive)
+    }
 }

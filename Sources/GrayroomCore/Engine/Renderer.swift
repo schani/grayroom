@@ -7,11 +7,13 @@ public final class Renderer {
     public let metal: MetalContext
     public let decoder: RawDecoder
     public let pipeline: Pipeline
+    public let downsampler: Downsampler
 
     public init() throws {
         metal = try MetalContext()
         decoder = RawDecoder(metal: metal)
         pipeline = try Pipeline(context: metal)
+        downsampler = try Downsampler(context: metal)
     }
 
     public struct Output {

@@ -37,7 +37,7 @@ public final class MetalContext {
     /// `Common.metal` is prepended to every stage source; the whole thing is
     /// compiled as one translation unit.
     static let shaderFiles = ["Common", "Tone", "BWMix", "Clarity", "Mask", "Toning",
-                              "Output", "Histogram"]
+                              "Output", "Histogram", "Downsample"]
 
     private var pipelineCache: [String: MTLComputePipelineState] = [:]
     private let cacheLock = NSLock()
@@ -87,9 +87,17 @@ public final class MetalContext {
 
     /// An `rgba16Float` working texture (shared storage: Apple Silicon unified
     /// memory makes readback free and keeps the export path simple).
-    public func makeWorkingTexture(width: Int, height: Int) throws -> MTLTexture {
+    ///
+    /// `mipmapped` allocates the full pyramid (+33 % memory) for a texture that
+    /// is going to be *displayed*: the canvas samples it with an explicit LOD so
+    /// that a frame shown below 100 % is minified through the mip chain instead
+    /// of point-sampled through a bilinear filter. Render paths that write files
+    /// leave it off.
+    public func makeWorkingTexture(width: Int, height: Int,
+                                   mipmapped: Bool = false) throws -> MTLTexture {
         let d = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba16Float, width: max(width, 1), height: max(height, 1), mipmapped: false)
+            pixelFormat: .rgba16Float, width: max(width, 1), height: max(height, 1),
+            mipmapped: mipmapped)
         d.usage = [.shaderRead, .shaderWrite, .renderTarget]
         d.storageMode = .shared
         guard let t = device.makeTexture(descriptor: d) else { throw MetalError.textureAllocationFailed }
