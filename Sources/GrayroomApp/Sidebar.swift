@@ -95,8 +95,8 @@ private struct WhiteBalancePanel: View {
     }
 
     /// `nil` in the edit means as-shot; the slider shows the as-shot number and
-    /// pins **both** fields as soon as either is touched, so the sidecar is never
-    /// half-specified.
+    /// pins **both** fields as soon as either is touched, so the stored edit is
+    /// never half-specified.
     private var temperature: Binding<Double> {
         Binding(get: { model.store.effectiveTemperature },
                 set: { v in

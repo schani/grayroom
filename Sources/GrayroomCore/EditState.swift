@@ -2,11 +2,10 @@ import Foundation
 
 /// The single source of truth for a develop session.
 ///
-/// `EditState` is a plain Codable value type. It is serialized to a
-/// pretty-printed JSON sidecar next to the RAW file
-/// (`IMG_1234.DNG.grayroom.json`). Decoding is deliberately tolerant: unknown
-/// keys are ignored and every missing key falls back to its default, so old and
-/// new sidecars can be read by the same binary.
+/// `EditState` is a plain Codable value type. It is encoded as pretty-printed
+/// JSON and stored in the library. Decoding is deliberately tolerant: unknown
+/// keys are ignored and every missing key falls back to its default, so a stored
+/// edit stays readable across schema changes in either direction.
 public struct EditState: Codable, Equatable, Sendable {
     public static let currentVersion = 1
 
@@ -23,14 +22,14 @@ public struct EditState: Codable, Equatable, Sendable {
     public var clarity: Double
     public var toning: Toning
     /// Brush-painted local adjustments (M3). Schema version stays 1: `masks` was
-    /// already part of it, so a sidecar with `"masks": []` still decodes.
+    /// already part of it, so a stored edit with `"masks": []` still decodes.
     public var masks: [Mask]
     /// Render for an EDR (HDR) display: the tone curve's shoulder asymptotes to
     /// `ToneCurve.hdrDisplayWhite` instead of SDR white, and the canvas shows the
     /// result on an extended-range drawable.
     ///
     /// It is a **tone** setting, not a display preference, which is why it lives
-    /// in the sidecar and is undoable: it changes the rendition above the
+    /// in the edit and is undoable: it changes the rendition above the
     /// shoulder knee. Below the knee the curve is identical either way.
     ///
     /// File export is always SDR, so exporting an HDR edit clips everything
@@ -67,14 +66,14 @@ public struct EditState: Codable, Equatable, Sendable {
         whiteBalance = try c.decodeIfPresent(WhiteBalance.self, forKey: .whiteBalance) ?? WhiteBalance()
         tone = try c.decodeIfPresent(Tone.self, forKey: .tone) ?? Tone()
         bwMix = try c.decodeIfPresent(BWMix.self, forKey: .bwMix) ?? BWMix()
-        // Lenient, not strict: sidecars written before clarity became
-        // positive-only (and `--set clarity=-50`) load with the value clamped
+        // Lenient, not strict: an edit stored before clarity became
+        // positive-only (and `--set clarity=-50`) loads with the value clamped
         // into 0…100 rather than failing.
         clarity = min(max(try c.decodeIfPresent(Double.self, forKey: .clarity) ?? 0, 0), 100)
         toning = try c.decodeIfPresent(Toning.self, forKey: .toning) ?? Toning()
         masks = try c.decodeIfPresent([Mask].self, forKey: .masks) ?? []
-        // Absent means SDR, so every sidecar written before EDR existed loads
-        // as exactly the render it described.
+        // Absent means SDR, so an edit stored without the key loads as exactly
+        // the render it described.
         hdr = try c.decodeIfPresent(Bool.self, forKey: .hdr) ?? false
     }
 

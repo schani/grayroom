@@ -147,7 +147,7 @@ public enum ClarityMapping {
     }
 
     /// Maps the 0…100 slider onto the remap parameters. Out-of-range values
-    /// clamp, so a negative clarity from an old sidecar is the identity.
+    /// clamp, so a negative clarity from an older stored edit is the identity.
     ///
     /// `a = clarity / 100`:
     ///

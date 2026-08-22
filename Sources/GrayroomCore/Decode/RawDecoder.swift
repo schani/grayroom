@@ -35,6 +35,14 @@ public struct RawInfo {
     public var lensCorrectionSupported: Bool
     public var cameraMake: String?
     public var cameraModel: String?
+    /// EXIF `DateTimeOriginal`, resolved against `OffsetTimeOriginal` when the
+    /// file carries one and against the local time zone otherwise.
+    public var capturedAt: Date?
+    /// EXIF GPS position, with the N/S, E/W and above/below-sea-level
+    /// references already applied.
+    public var latitude: Double?
+    public var longitude: Double?
+    public var altitude: Double?
 }
 
 /// A decoded, linear scene-referred image.
@@ -123,6 +131,12 @@ public final class RawDecoder {
     // MARK: - Probe
 
     public func probe(url: URL) throws -> RawInfo {
+        try RawDecoder.probe(url: url)
+    }
+
+    /// Metadata only — no GPU work, so the library importer can read a file's
+    /// dimensions, capture date, camera and GPS without a `MetalContext`.
+    public static func probe(url: URL) throws -> RawInfo {
         let f = try RawDecoder.makeFilter(url: url)
         let native = f.nativeSize
         let orientation = f.orientation
@@ -137,6 +151,7 @@ public final class RawDecoder {
         }
 
         var hasThumb = false
+        var fileProperties: [String: Any] = [:]
         if let src = CGImageSourceCreateWithURL(url as CFURL, nil) {
             let opts: [CFString: Any] = [
                 kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
@@ -144,7 +159,18 @@ public final class RawDecoder {
                 kCGImageSourceThumbnailMaxPixelSize: 512,
             ]
             hasThumb = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) != nil
+            fileProperties =
+                (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any]) ?? [:]
         }
+
+        // CIRAWFilter's own property dictionary is the primary source; the
+        // image source's is the fallback for files where it omits EXIF/GPS.
+        let exif = (f.properties[kCGImagePropertyExifDictionary as String] as? [String: Any])
+            ?? (fileProperties[kCGImagePropertyExifDictionary as String] as? [String: Any])
+        let gps = (f.properties[kCGImagePropertyGPSDictionary as String] as? [String: Any])
+            ?? (fileProperties[kCGImagePropertyGPSDictionary as String] as? [String: Any])
+        let capturedAt = RawDecoder.captureDate(exif: exif)
+        let (lat, lon, alt) = RawDecoder.gpsPosition(gps: gps)
 
         return RawInfo(
             url: url,
@@ -159,7 +185,63 @@ public final class RawDecoder {
             hasPreviewImage: f.previewImage != nil,
             lensCorrectionSupported: f.isLensCorrectionSupported,
             cameraMake: make,
-            cameraModel: model)
+            cameraModel: model,
+            capturedAt: capturedAt,
+            latitude: lat,
+            longitude: lon,
+            altitude: alt)
+    }
+
+    // MARK: - EXIF / GPS
+
+    /// EXIF `DateTimeOriginal` (`"yyyy:MM:dd HH:mm:ss"`, no zone) plus
+    /// `OffsetTimeOriginal` (`"+02:00"`) when present; local time otherwise.
+    static func captureDate(exif: [String: Any]?) -> Date? {
+        guard let exif,
+              let stamp = exif[kCGImagePropertyExifDateTimeOriginal as String] as? String
+        else { return nil }
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        if let offset = exif[kCGImagePropertyExifOffsetTimeOriginal as String] as? String,
+           let seconds = RawDecoder.utcOffsetSeconds(offset) {
+            fmt.timeZone = TimeZone(secondsFromGMT: seconds)
+        } else {
+            fmt.timeZone = TimeZone.current
+        }
+        return fmt.date(from: stamp)
+    }
+
+    /// `"+02:00"` / `"-05:30"` / `"Z"` → seconds from GMT.
+    static func utcOffsetSeconds(_ raw: String) -> Int? {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        if s == "Z" || s == "z" { return 0 }
+        guard let sign = s.first, sign == "+" || sign == "-" else { return nil }
+        let parts = s.dropFirst().split(separator: ":")
+        guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]) else { return nil }
+        let magnitude = h * 3600 + m * 60
+        return sign == "-" ? -magnitude : magnitude
+    }
+
+    static func gpsPosition(gps: [String: Any]?) -> (Double?, Double?, Double?) {
+        guard let gps else { return (nil, nil, nil) }
+        var lat = (gps[kCGImagePropertyGPSLatitude as String] as? NSNumber)?.doubleValue
+        var lon = (gps[kCGImagePropertyGPSLongitude as String] as? NSNumber)?.doubleValue
+        if let ref = gps[kCGImagePropertyGPSLatitudeRef as String] as? String,
+           ref.uppercased() == "S" {
+            lat = lat.map { -$0 }
+        }
+        if let ref = gps[kCGImagePropertyGPSLongitudeRef as String] as? String,
+           ref.uppercased() == "W" {
+            lon = lon.map { -$0 }
+        }
+        var alt = (gps[kCGImagePropertyGPSAltitude as String] as? NSNumber)?.doubleValue
+        // Altitude ref 1 means "below sea level".
+        if let ref = (gps[kCGImagePropertyGPSAltitudeRef as String] as? NSNumber)?.intValue,
+           ref == 1 {
+            alt = alt.map { -$0 }
+        }
+        return (lat, lon, alt)
     }
 
     // MARK: - Decode

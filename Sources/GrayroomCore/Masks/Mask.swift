@@ -129,7 +129,7 @@ public struct MaskAdjustments: Codable, Equatable, Sendable {
 /// One brush stroke: a polyline plus the brush it was painted with.
 ///
 /// Strokes are stored as **vector** data (darktable-style), not raster, so the
-/// sidecar stays tiny and the mask can be re-rasterised at any resolution.
+/// stored edit stays tiny and the mask can be re-rasterised at any resolution.
 public struct Stroke: Codable, Equatable, Sendable {
     public var brush: BrushParams
     /// `true` subtracts this stroke from the mask instead of adding it.

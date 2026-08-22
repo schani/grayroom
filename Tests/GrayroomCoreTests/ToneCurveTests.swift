@@ -403,8 +403,8 @@ final class ToneCurveTests: XCTestCase {
     /// The SDR LUT is **bit-identical to what it was before the ceiling became a
     /// parameter**. Pinned against literal values rather than against a second
     /// evaluation of the same code, so a refactor of the ceiling arithmetic that
-    /// happened to move SDR by an ulp fails here — and every existing sidecar
-    /// keeps rendering to the same bytes.
+    /// happened to move SDR by an ulp fails here — and every stored edit keeps
+    /// rendering to the same bytes.
     func testSDRLUTIsBitIdenticalToTheFixedCeiling() {
         let lut = ToneCurve.makeLUT(for: EditState.Tone())
         let pins: [(Int, Float)] = [

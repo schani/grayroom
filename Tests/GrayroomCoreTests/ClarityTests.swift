@@ -408,7 +408,7 @@ final class ClarityTests: XCTestCase {
 
     // MARK: - GPU: negative clarity is gone
 
-    /// Clarity is positive-only. A negative value — from an old sidecar, from
+    /// Clarity is positive-only. A negative value — from an older stored edit, from
     /// `--set clarity=-50`, from anywhere — renders exactly like clarity 0, and
     /// "exactly" means bit-identical: the negative operator does not exist, so
     /// there is nothing to run at reduced strength.
@@ -425,13 +425,13 @@ final class ClarityTests: XCTestCase {
         }
     }
 
-    /// The sidecar path is lenient rather than strict: an old sidecar holding a
-    /// negative clarity decodes to 0 and renders identically to one that says 0.
-    func testOldSidecarWithNegativeClarityClampsToZero() throws {
+    /// Decoding is lenient rather than strict: stored JSON holding a negative
+    /// clarity decodes to 0 and renders identically to JSON that says 0.
+    func testNegativeClarityInStoredJSONClampsToZero() throws {
         let old = Data(#"{"version": 1, "clarity": -80, "tone": {"contrast": 20}}"#.utf8)
         let decoded = try EditState.decode(from: old)
         XCTAssertEqual(decoded.clarity, 0)
-        XCTAssertEqual(decoded.tone.contrast, 20, "the rest of the sidecar must survive")
+        XCTAssertEqual(decoded.tone.contrast, 20, "the rest of the edit must survive")
         // Over-range positive values clamp too.
         XCTAssertEqual(try EditState.decode(from: Data(#"{"clarity": 250}"#.utf8)).clarity, 100)
 

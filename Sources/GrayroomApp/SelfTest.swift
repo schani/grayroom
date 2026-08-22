@@ -16,7 +16,7 @@ import UniformTypeIdentifiers
 /// on failure.
 ///
 /// Repro (c): the whole app, in its own process, painting a stroke with real
-/// `NSEvent`s and then telling you — on stdout, in the sidecar and in a
+/// `NSEvent`s and then telling you — on stdout, in the library and in a
 /// screenshot of its own window — where that stroke went.
 ///
 /// It exists because the unit tests can only prove that the canvas's *own* math
@@ -24,8 +24,8 @@ import UniformTypeIdentifiers
 /// the real toolbar/sidebar layout, the real decode and the real presented
 /// drawable, i.e. the thing the user actually reported on.
 ///
-/// Nothing here is reachable without the environment variable, and the sidecar it
-/// writes goes next to whatever RAW it was pointed at — point it at a *copy*.
+/// Nothing here is reachable without the environment variable, and it writes a
+/// development into the real library for whatever RAW it was pointed at.
 enum SelfTest {
     enum Mode: String {
         /// Repro (c): a stroke painted with real `NSEvent`s.
@@ -100,7 +100,7 @@ enum SelfTest {
     private static func run(canvas: CanvasNSView, model: AppModel) {
         guard let window = canvas.window else { fail("canvas has no window") }
 
-        // A clean slate: whatever sidecar was on disk must not colour the result.
+        // A clean slate: whatever edit was stored must not colour the result.
         prepareForPainting(model)
         // So the screenshot *shows* where the paint landed, not just where the
         // cursor was.
@@ -191,10 +191,7 @@ enum SelfTest {
 
         try? FileManager.default.createDirectory(at: outputDirectory,
                                                  withIntermediateDirectories: true)
-        model.saveSidecarNow()
-        if let url = model.imageURL {
-            log("self-test: sidecar = \(EditState.sidecarURL(forRAW: url).path)")
-        }
+        model.saveNow()
 
         writeWindowScreenshot(window: window)
         writeCanvasRender(canvas: canvas)

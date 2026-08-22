@@ -1,7 +1,8 @@
 # Grayroom — a native macOS B&W RAW developer
 
 A personal, focused subset of Lightroom Classic: B&W processing of RAW files only.
-No library/organization features. macOS only, Apple Silicon, macOS 14+.
+macOS only, Apple Silicon, macOS 14+. Organization (M6) is a SQLite library, not a
+folder browser.
 
 Research background (with sources) lives in `research/`.
 
@@ -17,17 +18,18 @@ Research background (with sources) lives in `research/`.
    exposure, contrast, highlights, shadows, clarity
 6. Two-tone toning: shadows hue+sat, highlights hue+sat, balance
 7. Histogram with clipping indicators, before/after toggle
-8. JSON sidecar persistence + undo, 16-bit TIFF / JPEG / PNG export
+8. Library persistence (SQLite) + undo, 16-bit TIFF / JPEG / PNG export
 
 Deferred: tone curve, texture/dehaze, grain, vignette, sharpening/NR, linear/radial
-gradients, range masks, AI masks, any browsing/catalog.
+gradients, range masks, AI masks.
 
 ## Non-negotiable engineering principle: headless first
 
 Everything in the imaging core must run and be verifiable **without the GUI**:
 
-- `grayroom` CLI can decode a DNG, apply an edit (from a sidecar JSON and/or
-  `--set key=value` overrides), and export PNG/JPEG/16-bit TIFF.
+- `grayroom` CLI can decode a DNG, apply an edit (from the library, an explicit
+  `--edit file.json`, and/or `--set key=value` overrides), and export PNG/JPEG/16-bit
+  TIFF.
 - `grayroom probe` prints decode metadata; `--histogram` dumps a luminance histogram
   as text; exit codes and stderr diagnostics are script-friendly.
 - `swift build && swift test` must pass on a plain terminal (no Xcode GUI).
@@ -58,13 +60,15 @@ out of v1), targets:
     text resources and compiled at runtime with `makeLibrary(source:)` (robust under
     SPM CLI builds; no metallib bundling issues).
   - `EditState.swift` — one Codable value-type struct, the single source of truth.
-    Versioned (`"version": 1`). Sidecar = pretty-printed JSON next to the RAW
-    (`IMG_1234.DNG.grayroom.json`).
+    Versioned (`"version": 1`). Persisted as a JSON blob in the library (see M6).
   - `Masks/` — brush strokes as vector polylines (points + per-point radius/pressure,
     feather/flow/density), stamp-model rasterizer into `r16Float` mask textures,
     parameter-delta accumulation (below).
   - `Export/` — ImageIO: 16-bit TIFF, PNG, JPEG with correct color space tagging.
-- **`grayroom`** (executable) — swift-argument-parser CLI: `render`, `probe`.
+- **`GrayroomLibrary`** (library) — the SQLite catalog (GRDB): hashing, schema,
+  import, developments, tags, colors. Depends on `GrayroomCore`; Core stays DB-free.
+- **`grayroom`** (executable) — swift-argument-parser CLI: `render`, `probe`,
+  library commands.
 - **`GrayroomApp`** (executable, M4) — SwiftUI shell + MTKView canvas.
 - **`GrayroomCoreTests`**.
 
@@ -118,6 +122,57 @@ neutral (Lightroom behavior).
   histogram + clipping, brush painting with A/B/eraser, targeted-adjustment drag for
   the B&W mixer, before/after, undo (EditState snapshots), sidecar autosave.
 - **M5 — polish.** EDR preview, performance passes, export sharpening if wanted.
+- **M6 — library.** See below.
+
+## M6 — Library (organization)
+
+A single SQLite database (GRDB, WAL) is the source of truth for edits and
+organization. There are no sidecars. Default location
+`~/Library/Application Support/Grayroom/library.sqlite`; every entry point accepts an
+explicit DB path so tests and the CLI can use throwaway databases.
+
+### Identity
+
+A photo is identified by the **SHA-256 of the whole file** (CryptoKit, streamed in
+1 MB chunks; disk-bound on Apple Silicon). The hash is the external identity (dedupe
+on import, CLI addressing); tables use integer rowid keys internally. The same file
+at two paths is one photo with two locations. Locations are trusted: we never
+re-stat or re-hash a stored path, and a missing file is simply an error at open time.
+
+### Schema (`PRAGMA user_version` migrations via GRDB)
+
+```
+cameras      id, make, model                          UNIQUE(make, model)
+photos       id, hash BLOB UNIQUE, byte_size, original_name, imported_at, captured_at,
+             camera_id → cameras (nullable), width, height,
+             latitude, longitude, altitude (nullable),
+             color INTEGER DEFAULT 0 (0 unlabeled, 1 red, 2 yellow, 3 green, 4 blue, 5 purple)
+locations    id, photo_id → photos (cascade), path TEXT UNIQUE
+developments id, photo_id → photos (cascade), ordinal, edit_json (json_valid, EditState),
+             created_at, updated_at                   UNIQUE(photo_id, ordinal)
+tags         id, name UNIQUE COLLATE NOCASE
+photo_tags   photo_id → photos, tag_id → tags          PRIMARY KEY(photo_id, tag_id)
+```
+
+A photo has any number of locations (including zero) and any number of
+**developments** (a development = one `EditState`; common counts are 0 and 1).
+Developments are JSON blobs because `EditState` already decodes tolerantly;
+`json_extract` is available if we ever need
+to query inside. Color is a single-valued Lightroom-style label (how winners are
+picked); tags are free-form many-to-many. No ratings for now.
+
+### Stages
+
+1. `GrayroomLibrary` target: GRDB dependency, `FileHash`, `Library` (open/migrate),
+   records (`Camera`, `Photo`, `Location`, `Development`, `Tag`), `Importer` (hash →
+   upsert photo/location, metadata incl. capture date, camera, GPS via the decoder's
+   probe), operations (tags, color, developments, queries). Tests on a temp DB.
+2. CLI: `import`, `ls` (filter by color/tag/camera), `tag`, `color`, `developments`;
+   `render` takes its edit from the library (`--development`) or `--edit file.json`.
+   Sidecar code removed entirely. App: `open` hashes, looks up/creates the photo,
+   loads/autosaves development #1 from the library.
+3. Browser UI (grid/filmstrip fed by `ValueObservation`), thumbnail cache keyed by
+   (photo, development). Later.
 
 ## Testing inputs
 

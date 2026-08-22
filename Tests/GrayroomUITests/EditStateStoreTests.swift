@@ -27,7 +27,7 @@ final class EditStateStoreTests: XCTestCase {
         XCTAssertEqual(store.revision, 3)
     }
 
-    func testDirtyFlagTracksTheSidecar() {
+    func testDirtyFlagTracksUnsavedChanges() {
         let store = makeStore()
         XCTAssertFalse(store.isDirty)
         store.update { $0.tone.contrast = 10 }
@@ -101,10 +101,10 @@ final class EditStateStoreTests: XCTestCase {
 
         XCTAssertFalse(store.canUndo)
         XCTAssertEqual(store.edit, loaded)
-        // Loading a sidecar must repaint...
+        // Loading a stored edit must repaint...
         XCTAssertEqual(seen, [.pipeline])
-        // ...but must not mark the file dirty, or opening an image would
-        // immediately rewrite its sidecar.
+        // ...but must not set the dirty flag, or opening an image would
+        // immediately queue a save of what was just loaded.
         XCTAssertFalse(store.isDirty)
     }
 
@@ -314,9 +314,9 @@ final class EditStateStoreTests: XCTestCase {
         XCTAssertTrue(store.edit.masks[0].strokes[0].erase)
     }
 
-    // MARK: - Sidecar interop
+    // MARK: - JSON interop
 
-    func testTheStoreRoundTripsThroughTheSidecarFormat() throws {
+    func testTheStoreRoundTripsThroughTheJSONFormat() throws {
         let store = makeStore()
         store.perform("Edit") {
             $0.tone.exposure = 0.4

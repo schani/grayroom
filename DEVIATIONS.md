@@ -33,7 +33,7 @@ decision, not a backlog: the rationale is the point of the column.
 | 3 | Toning saturation is strongly hue-dependent | deferred | needs an opponent-space tint rather than a fully saturated primary; a retune of the current form would only move the imbalance around | medium / M |
 | 4 | Auto B&W Mix | deferred | a feature, not a parity defect; wants a scene-analysis pass | medium / M |
 | 5 | Band centres, especially purple/magenta | done, wave 2 (280→270, 320→300) | — | low / S |
-| 6 | Base grey conversion is Rec.709 luma, not a monochrome camera profile | deferred | belongs with camera-profile support; changing it alone would re-anchor every existing sidecar | medium / M |
+| 6 | Base grey conversion is Rec.709 luma, not a monochrome camera profile | deferred | belongs with camera-profile support; changing it alone would re-anchor every stored edit | medium / M |
 | 7 | Color Grading: midtones/global wheels, Blending, per-range Luminance | deferred | additive once the crossover is right (it now is); scope, not risk | low / M |
 
 ## Clarity and local adjustments — `research/audit/clarity-local.json`

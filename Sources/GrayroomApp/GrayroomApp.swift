@@ -46,7 +46,7 @@ struct GrayroomApp: App {
                     .keyboardShortcut("o", modifiers: .command)
             }
             CommandGroup(replacing: .saveItem) {
-                Button("Save Sidecar") { model.saveSidecarNow() }
+                Button("Save") { model.saveNow() }
                     .keyboardShortcut("s", modifiers: .command)
                 // No `.disabled(model.imageURL == nil)`: see the note below.
                 // `presentExportSheet()` already ignores the request when there

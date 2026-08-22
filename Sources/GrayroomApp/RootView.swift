@@ -130,7 +130,7 @@ private struct StatusBar: View {
             Circle()
                 .fill(model.store.isDirty ? Color.orange : Color.green.opacity(0.6))
                 .frame(width: 7, height: 7)
-                .help(model.store.isDirty ? "Unsaved changes" : "Sidecar up to date")
+                .help(model.store.isDirty ? "Unsaved changes" : "Saved to the library")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 4)

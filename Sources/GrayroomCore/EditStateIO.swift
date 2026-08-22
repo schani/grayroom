@@ -17,15 +17,9 @@ public enum EditStateError: Error, CustomStringConvertible {
     }
 }
 
-// MARK: - Sidecar IO
+// MARK: - JSON IO
 
 extension EditState {
-    /// `IMG_1234.DNG` → `IMG_1234.DNG.grayroom.json`
-    public static func sidecarURL(forRAW url: URL) -> URL {
-        url.deletingLastPathComponent()
-            .appendingPathComponent(url.lastPathComponent + ".grayroom.json")
-    }
-
     public static func load(from url: URL) throws -> EditState {
         let data = try Data(contentsOf: url)
         return try decode(from: data)
@@ -78,8 +72,8 @@ extension EditState {
     ///
     /// Array elements are addressed with a bracket subscript:
     /// `masks[0].adjustments.exposure=1.5`. The mask must already exist —
-    /// `--set` edits masks, it does not create them (strokes come from the
-    /// sidecar JSON).
+    /// `--set` edits masks, it does not create them (strokes are painted, and
+    /// come in with the edit).
     ///
     /// Implemented as a JSON merge: encode → mutate the dictionary → decode.
     public func applying(settings: [String]) throws -> EditState {
@@ -107,9 +101,8 @@ extension EditState {
             if path.contains(where: { if case .index = $0 { return true } else { return false } }) {
                 // Array paths (`masks[0].adjustments.exposure`) are validated
                 // against the *actual* document: which indices exist depends on
-                // how many masks the sidecar holds, so a static key-path list
-                // cannot say. Creating masks with --set is not supported —
-                // masks come from the sidecar JSON.
+                // how many masks the edit holds, so a static key-path list
+                // cannot say. Creating masks with --set is not supported.
                 try EditState.validate(path: path[...], in: root, fullKey: key)
             } else {
                 guard valid.contains(key) else { throw EditStateError.unknownKeyPath(key) }

@@ -4,8 +4,8 @@ import GrayroomCore
 import Observation
 
 /// The GUI's copy of the `EditState`, plus the two things a value-type edit
-/// model needs around it: gesture-granular undo and a dirty flag for the sidecar
-/// autosave.
+/// model needs around it: gesture-granular undo and a dirty flag for the
+/// autosave to key off.
 ///
 /// It deliberately knows nothing about SwiftUI, Metal or AppKit — the app target
 /// binds to it and the test target drives it headlessly.
@@ -28,7 +28,7 @@ public final class EditStateStore {
     /// off it so it never has to diff the whole state.
     public private(set) var revision: Int = 0
 
-    /// `true` between a mutation and the sidecar write that follows it.
+    /// `true` between a mutation and the write to the library that follows it.
     public private(set) var isDirty: Bool = false
 
     /// Whether the Edit menu's Undo / Redo items should be live.
@@ -50,7 +50,7 @@ public final class EditStateStore {
     public var selectedMaskID: UUID?
 
     /// The brush the *next* stroke will use. Tool state, not edit state: it is
-    /// not undoable and is not written to the sidecar (each stroke carries its
+    /// not undoable and is not part of the stored edit (each stroke carries its
     /// own copy, which is what makes it re-editable).
     public var brush = BrushParams()
 
@@ -106,11 +106,11 @@ public final class EditStateStore {
         endGesture(named: name)
     }
 
-    /// Wholesale replacement (opening a file, loading a sidecar, undo/redo).
+    /// Wholesale replacement (opening a file, loading a stored edit, undo/redo).
     ///
-    /// `name == nil` means "this state came *from* disk": the undo stack is
+    /// `name == nil` means "this state came *from* storage": the undo stack is
     /// cleared rather than extended, and the dirty flag stays clear so that
-    /// merely opening an image does not rewrite its sidecar.
+    /// merely opening an image does not queue a write of what was just read.
     public func replace(_ new: EditState, named name: String?) {
         let old = edit
         if let name {
@@ -183,7 +183,7 @@ public final class EditStateStore {
         syncUndoAvailability()
     }
 
-    /// The autosave calls this once the sidecar is on disk.
+    /// The autosave calls this once the edit is stored in the library.
     public func markSaved() { isDirty = false }
 
     // MARK: - White balance
@@ -197,7 +197,7 @@ public final class EditStateStore {
     }
 
     /// Back to as-shot. Both fields go `nil` together: a half-set white balance
-    /// would make the sidecar ambiguous about what the decoder was told.
+    /// would make the stored edit ambiguous about what the decoder was told.
     public func resetWhiteBalanceToAsShot() {
         perform("As Shot White Balance") {
             $0.whiteBalance.temperature = nil

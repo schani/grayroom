@@ -1,0 +1,272 @@
+import Foundation
+import GRDB
+import GrayroomCore
+
+/// Every operation is synchronous and throwing: the library is a local SQLite
+/// file, and the callers (CLI, app model) already have their own concurrency.
+extension Library {
+
+    // MARK: - Photos
+
+    public func photo(withHash hash: Data) throws -> Photo? {
+        try dbPool.read { db in
+            try Photo.filter(Column("hash") == hash).fetchOne(db)
+        }
+    }
+
+    public func photo(withHashHexString hex: String) throws -> Photo? {
+        guard let data = FileHash.data(fromHexString: hex) else { return nil }
+        return try photo(withHash: data)
+    }
+
+    /// Every photo whose hash starts with `hex` (case-insensitive). The CLI
+    /// addresses photos by short hash prefixes, and needs to know when one is
+    /// ambiguous, so this returns all matches rather than the first.
+    public func photos(withHashPrefix hex: String) throws -> [Photo] {
+        let prefix = hex.uppercased()
+        guard !prefix.isEmpty, prefix.allSatisfy(\.isHexDigit) else { return [] }
+        return try dbPool.read { db in
+            try Photo.fetchAll(db,
+                               sql: "SELECT * FROM photos WHERE hex(hash) LIKE ? ORDER BY id",
+                               arguments: [prefix + "%"])
+        }
+    }
+
+    public func photo(id: Int64) throws -> Photo? {
+        try dbPool.read { db in try Photo.fetchOne(db, key: id) }
+    }
+
+    /// Filters compose (all of them are ANDed). Ordered by capture date, then
+    /// id, so photos with no EXIF date sort first but stay stable.
+    public func photos(color: ColorLabel? = nil,
+                       tag: String? = nil,
+                       cameraID: Int64? = nil) throws -> [Photo] {
+        var sql = "SELECT photos.* FROM photos"
+        var arguments: [DatabaseValueConvertible] = []
+        if tag != nil {
+            sql += """
+                 JOIN photo_tags ON photo_tags.photo_id = photos.id \
+                JOIN tags ON tags.id = photo_tags.tag_id
+                """
+        }
+        var conditions: [String] = []
+        if let tag {
+            conditions.append("tags.name = ?")
+            arguments.append(tag.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        if let color {
+            conditions.append("photos.color = ?")
+            arguments.append(color.rawValue)
+        }
+        if let cameraID {
+            conditions.append("photos.camera_id = ?")
+            arguments.append(cameraID)
+        }
+        if !conditions.isEmpty {
+            sql += " WHERE " + conditions.joined(separator: " AND ")
+        }
+        sql += " ORDER BY photos.captured_at, photos.id"
+        return try dbPool.read { db in
+            try Photo.fetchAll(db, sql: sql, arguments: StatementArguments(arguments))
+        }
+    }
+
+    /// Cascades: the photo's locations, developments and tag links go with it.
+    @discardableResult
+    public func deletePhoto(id: Int64) throws -> Bool {
+        try dbPool.write { db in try Photo.deleteOne(db, key: id) }
+    }
+
+    public func setColor(photoID: Int64, _ color: ColorLabel) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "UPDATE photos SET color = ? WHERE id = ?",
+                           arguments: [color.rawValue, photoID])
+            guard db.changesCount > 0 else { throw LibraryError.noSuchPhoto(photoID) }
+        }
+    }
+
+    // MARK: - Cameras
+
+    public func camera(id: Int64) throws -> Camera? {
+        try dbPool.read { db in try Camera.fetchOne(db, key: id) }
+    }
+
+    public func allCameras() throws -> [Camera] {
+        try dbPool.read { db in
+            try Camera.order(Column("make"), Column("model")).fetchAll(db)
+        }
+    }
+
+    /// Find-or-create by `(make, model)`, which is the table's unique key.
+    @discardableResult
+    public func camera(make: String, model: String) throws -> Camera {
+        try dbPool.write { db in try Library.findOrCreateCamera(db, make: make, model: model) }
+    }
+
+    static func findOrCreateCamera(_ db: Database, make: String, model: String) throws -> Camera {
+        if let existing = try Camera
+            .filter(Column("make") == make && Column("model") == model)
+            .fetchOne(db) {
+            return existing
+        }
+        var camera = Camera(make: make, model: model)
+        try camera.insert(db)
+        return camera
+    }
+
+    // MARK: - Locations
+
+    public func locations(for photoID: Int64) throws -> [Location] {
+        try dbPool.read { db in
+            try Location.filter(Column("photo_id") == photoID)
+                .order(Column("path"))
+                .fetchAll(db)
+        }
+    }
+
+    public func location(atPath path: String) throws -> Location? {
+        try dbPool.read { db in try Location.filter(Column("path") == path).fetchOne(db) }
+    }
+
+    /// The path is stored absolute and standardized. Adding a path a photo
+    /// already has is a no-op that returns the existing row.
+    @discardableResult
+    public func addLocation(photoID: Int64, path: String) throws -> Location {
+        try dbPool.write { db in
+            try Library.addLocation(db, photoID: photoID, path: path).location
+        }
+    }
+
+    static func addLocation(_ db: Database, photoID: Int64, path: String)
+        throws -> (location: Location, outcome: LocationOutcome) {
+        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+        if var existing = try Location.filter(Column("path") == standardized).fetchOne(db) {
+            let previous = existing.photoId
+            guard previous != photoID else { return (existing, .unchanged) }
+            // The bytes at this path changed since it was recorded. Import is
+            // the one moment we actually know that, so the row is repointed
+            // rather than left describing a file that no longer exists there.
+            existing.photoId = photoID
+            try existing.update(db)
+            return (existing, .repointed(fromPhotoID: previous))
+        }
+        var location = Location(photoId: photoID, path: standardized)
+        try location.insert(db)
+        return (location, .added)
+    }
+
+    @discardableResult
+    public func removeLocation(id: Int64) throws -> Bool {
+        try dbPool.write { db in try Location.deleteOne(db, key: id) }
+    }
+
+    // MARK: - Developments
+
+    public func developments(for photoID: Int64) throws -> [Development] {
+        try dbPool.read { db in
+            try Development.filter(Column("photo_id") == photoID)
+                .order(Column("ordinal"))
+                .fetchAll(db)
+        }
+    }
+
+    public func development(id: Int64) throws -> Development? {
+        try dbPool.read { db in try Development.fetchOne(db, key: id) }
+    }
+
+    /// Appends a development. Ordinals are 1-based and dense per photo, so the first
+    /// development of a photo is development #1.
+    @discardableResult
+    public func addDevelopment(photoID: Int64, edit: EditState) throws -> Development {
+        try dbPool.write { db in
+            guard try Photo.exists(db, key: photoID) else {
+                throw LibraryError.noSuchPhoto(photoID)
+            }
+            let next = try Int.fetchOne(
+                db,
+                sql: "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM developments WHERE photo_id = ?",
+                arguments: [photoID]) ?? 1
+            let now = Date()
+            var record = Development(photoId: photoID, ordinal: next, edit: edit,
+                               createdAt: now, updatedAt: now)
+            try record.insert(db)
+            return record
+        }
+    }
+
+    @discardableResult
+    public func updateDevelopment(id: Int64, edit: EditState) throws -> Development {
+        try dbPool.write { db in
+            guard var record = try Development.fetchOne(db, key: id) else {
+                throw LibraryError.noSuchDevelopment(id)
+            }
+            record.edit = edit
+            record.updatedAt = Date()
+            try record.update(db)
+            return record
+        }
+    }
+
+    @discardableResult
+    public func deleteDevelopment(id: Int64) throws -> Bool {
+        try dbPool.write { db in try Development.deleteOne(db, key: id) }
+    }
+
+    // MARK: - Tags
+
+    public func allTags() throws -> [Tag] {
+        try dbPool.read { db in try Tag.order(Column("name")).fetchAll(db) }
+    }
+
+    public func tags(for photoID: Int64) throws -> [Tag] {
+        try dbPool.read { db in
+            try Tag.fetchAll(db, sql: """
+                SELECT tags.* FROM tags \
+                JOIN photo_tags ON photo_tags.tag_id = tags.id \
+                WHERE photo_tags.photo_id = ? \
+                ORDER BY tags.name
+                """, arguments: [photoID])
+        }
+    }
+
+    /// Find-or-create, case-insensitively (`tags.name` is `COLLATE NOCASE`):
+    /// tagging a photo "Portrait" when "portrait" exists reuses that tag, and
+    /// tagging twice is idempotent. The first spelling seen wins.
+    @discardableResult
+    public func addTag(photoID: Int64, name: String) throws -> Tag {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw LibraryError.emptyTagName }
+        return try dbPool.write { db in
+            guard try Photo.exists(db, key: photoID) else {
+                throw LibraryError.noSuchPhoto(photoID)
+            }
+            let tag: Tag
+            if let existing = try Tag.filter(Column("name") == trimmed).fetchOne(db) {
+                tag = existing
+            } else {
+                var fresh = Tag(name: trimmed)
+                try fresh.insert(db)
+                tag = fresh
+            }
+            try db.execute(
+                sql: "INSERT OR IGNORE INTO photo_tags (photo_id, tag_id) VALUES (?, ?)",
+                arguments: [photoID, tag.id])
+            return tag
+        }
+    }
+
+    /// Unlinks the tag from the photo. The tag itself stays in the library even
+    /// when nothing carries it any more.
+    @discardableResult
+    public func removeTag(photoID: Int64, name: String) throws -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try dbPool.write { db in
+            try db.execute(sql: """
+                DELETE FROM photo_tags \
+                WHERE photo_id = ? \
+                AND tag_id IN (SELECT id FROM tags WHERE name = ?)
+                """, arguments: [photoID, trimmed])
+            return db.changesCount > 0
+        }
+    }
+}

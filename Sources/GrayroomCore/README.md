@@ -13,6 +13,8 @@ Export/     texture readback + ImageIO writers
 EditState.swift / EditStateIO.swift
 ```
 
+Edits are persisted by `GrayroomLibrary`, a sibling target — see *The library*.
+
 ## Shader loading
 
 The `.metal` files are declared as `.copy` resources in `Package.swift`, read as
@@ -146,8 +148,8 @@ started from scene-linear and every frame looked ~1 stop dark and ~1.7 stops
 flat.
 
 Rather than re-enabling Apple's opaque boost, the rendition is an explicit,
-inspectable curve in the tone stage — part of the fixed pipeline, not a sidecar
-field, so `bwMix.enabled=false` passthrough still shows it:
+inspectable curve in the tone stage — part of the fixed pipeline, not an
+`EditState` field, so `bwMix.enabled=false` passthrough still shows it:
 
 ```
 baseline(x) = x − 1.0 + 2.0 · smootherstep(−6.0, +0.8, x)          [EV]
@@ -553,7 +555,7 @@ selection, the sign-conflict rule in the mask contract, and the `isSmoothing`
 plumbing from `ClarityMapping` through `ClarityStage` to the amount kernel.
 
 Values outside 0…100 clamp rather than being rejected, at three places that
-agree: `EditState.init(from:)` (so an old sidecar with `"clarity": -80`, or
+agree: `EditState.init(from:)` (so a stored edit with `"clarity": -80`, or
 `--set clarity=-50`, loads as 0), `ClarityMapping.parameters(for:)` and
 `Pipeline` (which skips the stage when nothing asks for clarity).
 
@@ -680,8 +682,8 @@ shader change was needed for M3. What M3 actually put in it:
 `Masks/Mask.swift` is the model, `Masks/MaskRasterizer.swift` the pure CPU
 reference (stamp placement, profile, compositing, accumulation),
 `Masks/MaskStage.swift` the GPU orchestration and `Shaders/Mask.metal` the
-kernels. Strokes are stored as **vector** data in the sidecar (darktable-style),
-never raster: tiny to persist and re-rasterisable at any pipeline resolution.
+kernels. Strokes are stored as **vector** data (darktable-style), never raster:
+tiny to persist and re-rasterisable at any pipeline resolution.
 
 ```
 Mask             id, name, enabled, adjustments, strokes[]
@@ -793,16 +795,21 @@ one-entry array comparison.
 ### CLI
 
 ```
-grayroom render <raw> -o out.png --edit sidecar.json \
-    --set 'masks[0].adjustments.exposure=1.5'
-grayroom mask-preview <raw> -o mask.png --edit sidecar.json [--mask N] [--max-dimension N]
+grayroom render <raw> -o out.png --set 'masks[0].adjustments.exposure=1.5'
+grayroom mask-preview <raw> -o mask.png [--mask N] [--max-dimension N]
 ```
 
+Both take their base edit from the same three places, in order: `--edit
+file.json`, else the input file's development in the library (`--development N`
+picks another), else a default `EditState`. `--set` overrides apply on top
+either way, and `render --save` writes the result back to that development. See
+*The library*.
+
 `--set` reaches array elements with a bracket subscript; the mask must already
-exist (`--set` edits masks, it does not create them — strokes come from the
-sidecar). `mask-preview` writes the rasterised coverage as an 8-bit grayscale
-PNG, **linearly** (`round(255·coverage)`, no transfer function): it is data, not
-a picture. With no `--mask` it shows the union of every enabled mask.
+exist (`--set` edits masks, it does not create them — strokes are painted).
+`mask-preview` writes the rasterised coverage as an 8-bit grayscale PNG,
+**linearly** (`round(255·coverage)`, no transfer function): it is data, not a
+picture. With no `--mask` it shows the union of every enabled mask.
 
 ## B&W mix
 
@@ -1156,6 +1163,60 @@ amplifies the halos it produces. 0 is the only setting that makes the whole
 pipeline mean one thing at every resolution. A real Amount/Radius/Detail/Masking
 stage is deferred. NR keeps its per-camera defaults — measured scale-invariant,
 so it stays consistent either way.
+
+## The library
+
+`GrayroomLibrary` is a single SQLite database (GRDB, WAL) holding every edit and
+every piece of organization. Default location `~/Library/Application
+Support/Grayroom/library.sqlite`; every entry point takes an explicit path, and
+the CLI's `--library` / `$GRAYROOM_LIBRARY` override it.
+
+A photo is identified by the **SHA-256 of the whole file** (`FileHash`, streamed
+in 1 MB chunks), so the same file at two paths is one photo with two locations
+and re-importing a path costs a hash and nothing else. A photo has any number of
+**developments**; a development is one `EditState`, stored as JSON in
+`developments.edit_json`. Colour is a single-valued Lightroom-style label, tags
+are free-form many-to-many.
+
+```
+cameras      id, make, model                          UNIQUE(make, model)
+photos       id, hash BLOB UNIQUE, byte_size, original_name, imported_at, captured_at,
+             camera_id -> cameras (nullable), width, height,
+             latitude, longitude, altitude (nullable), color
+locations    id, photo_id -> photos (cascade), path TEXT UNIQUE
+developments id, photo_id -> photos (cascade), ordinal, edit_json (json_valid),
+             created_at, updated_at                   UNIQUE(photo_id, ordinal)
+tags         id, name UNIQUE COLLATE NOCASE
+photo_tags   photo_id -> photos, tag_id -> tags        PRIMARY KEY(photo_id, tag_id)
+```
+
+`Importer` hashes a file, probes it for capture date, camera and GPS through
+`RawDecoder.probe` (metadata only, no GPU), and upserts the photo and its
+location. A path whose bytes have changed is repointed at the photo they now
+hash to.
+
+### CLI
+
+```
+grayroom import <paths...> [--no-recursive]
+grayroom ls [--color red|yellow|green|blue|purple|unlabeled] [--tag name] [--camera id]
+grayroom show <photo>
+grayroom tag add|rm <photo> <name>
+grayroom color <photo> <label>
+grayroom developments ls <photo>              # `dev` is an alias for `developments`
+grayroom developments add <photo> [--edit file.json]
+grayroom developments rm <development-id>
+grayroom developments export <development-id> <out.json>
+grayroom developments set <development-id> key=value...
+```
+
+`<photo>` is a photo id, a hash prefix (which must be unique), or a path to the
+file (hashed and looked up). Ids win over hash prefixes, because ids are what
+`ls` prints.
+
+`developments set` takes the same dotted key paths as `render --set`, so the
+whole `--set` surface works against a stored development as well as against a
+render.
 
 ## Known limitations (M1 + M2 + M3)
 

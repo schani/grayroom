@@ -65,7 +65,7 @@ public enum BrushSizing {
     /// The rasteriser stamps every `0.15 · diameter` along the polyline and
     /// interpolates between authored points, so authoring at a quarter of a
     /// diameter loses nothing visually while keeping the point list — and
-    /// therefore the sidecar, the undo snapshot and the O(pixels × stamps)
+    /// therefore the stored edit, the undo snapshot and the O(pixels × stamps)
     /// rasterisation — an order of magnitude smaller than raw mouse events.
     public static func pointSpacingPixels(size: Double, imageSize: CGSize) -> Double {
         max(1, 0.25 * diameterPixels(size: size, imageSize: imageSize))

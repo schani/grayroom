@@ -3,13 +3,14 @@ import CoreGraphics
 import Foundation
 import GrayroomCanvas
 import GrayroomCore
+import GrayroomLibrary
 import GrayroomUI
 import Metal
 import Observation
 import UniformTypeIdentifiers
 
 /// The app's single coordinator: which file is open, the render loop, the tools,
-/// the sidecar autosave and the export.
+/// the library autosave and the export.
 ///
 /// Main-thread only by convention (like the rest of the UI); everything that
 /// touches the GPU goes through `RenderService`, which hops to its own queues
@@ -108,6 +109,19 @@ final class AppModel {
     private var renderInFlight = false
     private var autosaveTask: Task<Void, Never>?
 
+    /// The library, opened once at launch. `nil` means it could not be opened —
+    /// the app still edits, it just does not persist.
+    private var library: Library?
+    /// The development the open image's edits are written to, once it exists.
+    private var developmentID: Int64?
+    private var photoID: Int64?
+    /// Bumped on every `open(url:)`; a lookup that lands after the user has
+    /// moved on to another file is discarded.
+    private var openGeneration = 0
+    /// The library work (hash, import, development lookup) runs here so a 50 MB read
+    /// never lands on the main thread.
+    private let libraryQueue = DispatchQueue(label: "grayroom.library", qos: .userInitiated)
+
     private struct TargetedSession {
         var baseline: [Double]
         var hue: Double?
@@ -122,6 +136,11 @@ final class AppModel {
             service = try RenderService()
         } catch {
             errorMessage = "Metal is unavailable: \(error)"
+        }
+        do {
+            library = try Library.openDefault()
+        } catch {
+            errorMessage = "Could not open the library: \(error). Edits will not be saved."
         }
         store.onChange = { [weak self] invalidation in
             self?.editChanged(invalidation)
@@ -189,6 +208,9 @@ final class AppModel {
         autosaveTask?.cancel()
         service.clearMaskCache()
         imageURL = url
+        photoID = nil
+        developmentID = nil
+        openGeneration += 1
         decoded = nil
         draftTexture = nil
         decodeKey = nil
@@ -202,20 +224,10 @@ final class AppModel {
         errorMessage = nil
         UserDefaults.standard.set(url.path, forKey: AppModel.lastFileDefaultsKey)
 
-        // Sidecar first, so the very first decode already has the right WB.
-        let sidecar = EditState.sidecarURL(forRAW: url)
-        var edit = EditState()
-        if FileManager.default.fileExists(atPath: sidecar.path) {
-            do {
-                edit = try EditState.load(from: sidecar)
-                statusMessage = "Loaded \(sidecar.lastPathComponent)"
-            } catch {
-                errorMessage = "Could not read \(sidecar.lastPathComponent): \(error)"
-            }
-        }
-        store.replace(edit, named: nil)
-        store.selectedMaskID = edit.masks.first?.id
+        store.replace(EditState(), named: nil)
+        store.selectedMaskID = nil
         store.markSaved()
+        loadFromLibrary(url: url, generation: openGeneration)
 
         service.probe(url: url) { [weak self] result in
             guard let self else { return }
@@ -246,8 +258,8 @@ final class AppModel {
     private func editChanged(_ invalidation: RenderInvalidation) {
         guard invalidation != .none else { return }
         requestRender()
-        // A state that came from disk is not dirty, and rewriting the sidecar
-        // just because it was read would be silly.
+        // A state that came from the library is not dirty, and rewriting the
+        // development just because it was read would be silly.
         if store.isDirty { scheduleAutosave() }
     }
 
@@ -370,34 +382,86 @@ final class AppModel {
         canvas.showOverlay = showMaskOverlay && coverageTexture != nil && !showBeforeAfter
     }
 
-    // MARK: - Autosave
+    // MARK: - Library
 
-    private func scheduleAutosave() {
-        guard let url = imageURL else { return }
-        autosaveTask?.cancel()
-        let edit = store.edit
-        autosaveTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            guard !Task.isCancelled, let self else { return }
-            do {
-                try edit.save(to: EditState.sidecarURL(forRAW: url))
-                self.store.markSaved()
-            } catch {
-                self.errorMessage = "Could not write sidecar: \(error)"
+    /// Hash the file, import it if the library has never seen it, and adopt its
+    /// first development.
+    ///
+    /// All of that runs off the main thread: hashing a 50 MB RAW is tens of
+    /// milliseconds, which is a visible hitch on a window that is also trying to
+    /// start a decode. The consequence is that the first decode uses as-shot
+    /// white balance and a second one follows if the stored edit overrode it.
+    private func loadFromLibrary(url: URL, generation: Int) {
+        guard let library else { return }
+        libraryQueue.async {
+            let outcome = Result {
+                () -> (photoID: Int64, first: Development?) in
+                let hash = try FileHash.sha256(of: url)
+                let photoID: Int64
+                if let existing = try library.photo(withHash: hash), let id = existing.id {
+                    photoID = id
+                } else {
+                    photoID = try Importer(library: library).importFile(at: url).photoID
+                }
+                return (photoID, try library.developments(for: photoID).first)
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.openGeneration == generation else { return }
+                switch outcome {
+                case .failure(let error):
+                    self.errorMessage = "Could not read the library: \(error)"
+                case .success(let (photoID, first)):
+                    self.photoID = photoID
+                    self.developmentID = first?.id
+                    // An edit the user has already started beats a stored one:
+                    // the lookup lost the race, it does not get to win it.
+                    if let first, !self.store.isDirty {
+                        self.store.replace(first.edit, named: nil)
+                        self.store.selectedMaskID = first.edit.masks.first?.id
+                        self.store.markSaved()
+                        self.requestRender(force: true)
+                    } else if self.store.isDirty {
+                        self.persistEdit(announce: false)
+                    }
+                }
             }
         }
     }
 
-    /// Cmd-S: write the sidecar right now.
-    func saveSidecarNow() {
-        guard let url = imageURL else { return }
+    private func scheduleAutosave() {
+        guard imageURL != nil, library != nil else { return }
         autosaveTask?.cancel()
+        autosaveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.persistEdit(announce: false)
+        }
+    }
+
+    /// Cmd-S: write the edit to the library right now.
+    func saveNow() {
+        autosaveTask?.cancel()
+        persistEdit(announce: true)
+    }
+
+    /// Writes the current edit to the photo's development, creating development #1 the
+    /// first time there is something to store.
+    ///
+    /// A no-op while the library lookup is still in flight — it finishes by
+    /// calling back here if the edit is dirty by then.
+    private func persistEdit(announce: Bool) {
+        guard let library, imageURL != nil, let photoID else { return }
+        let edit = store.edit
         do {
-            try store.edit.save(to: EditState.sidecarURL(forRAW: url))
+            if let developmentID {
+                _ = try library.updateDevelopment(id: developmentID, edit: edit)
+            } else {
+                developmentID = try library.addDevelopment(photoID: photoID, edit: edit).id
+            }
             store.markSaved()
-            statusMessage = "Saved \(EditState.sidecarURL(forRAW: url).lastPathComponent)"
+            if announce { statusMessage = "Saved to the library" }
         } catch {
-            errorMessage = "Could not write sidecar: \(error)"
+            errorMessage = "Could not save the edit: \(error)"
         }
     }
 

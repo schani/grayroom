@@ -17,10 +17,10 @@ final class EditStateTests: XCTestCase {
         XCTAssertEqual(e.displayWhite, 1.0)
     }
 
-    /// `hdr` is an ordinary sidecar field: it round-trips, it defaults to
-    /// false when a sidecar predates it, and `--set hdr=true` reaches it
-    /// through the generic dotted-path merge with no special case.
-    func testHDRRoundTripsAndDefaultsOffForOldSidecars() throws {
+    /// `hdr` is an ordinary field: it round-trips, it defaults to false when the
+    /// stored JSON has no such key, and `--set hdr=true` reaches it through the
+    /// generic dotted-path merge with no special case.
+    func testHDRRoundTripsAndDefaultsOffWhenAbsent() throws {
         var e = EditState()
         e.hdr = true
         e.tone.exposure = 0.5
@@ -29,7 +29,7 @@ final class EditStateTests: XCTestCase {
         XCTAssertTrue(back.hdr)
         XCTAssertEqual(back.displayWhite, ToneCurve.hdrDisplayWhite)
 
-        // A sidecar written before EDR existed: every other field is honoured
+        // An edit stored without the `hdr` key: every other field is honoured
         // and the render stays SDR.
         let old = """
         {"version": 1, "tone": {"exposure": 1.5}, "clarity": 30}
@@ -61,26 +61,24 @@ final class EditStateTests: XCTestCase {
                                          polyline: [(0.1, 0.2), (0.9, 0.2)])])]
 
         let data = try e.jsonData()
-        // Pretty printed, as required for a human-editable sidecar.
+        // Pretty printed, as required for human-readable JSON.
         XCTAssertTrue(String(data: data, encoding: .utf8)!.contains("\n  \""))
         let back = try EditState.decode(from: data)
         XCTAssertEqual(e, back)
     }
 
-    func testSidecarFileRoundTrip() throws {
+    func testJSONFileRoundTrip() throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        let raw = dir.appendingPathComponent("IMG_1234.DNG")
-        let sidecar = EditState.sidecarURL(forRAW: raw)
-        XCTAssertEqual(sidecar.lastPathComponent, "IMG_1234.DNG.grayroom.json")
+        let url = dir.appendingPathComponent("edit.json")
 
         var e = EditState()
         e.tone.exposure = -1.25
-        try e.save(to: sidecar)
-        XCTAssertEqual(try EditState.load(from: sidecar), e)
+        try e.save(to: url)
+        XCTAssertEqual(try EditState.load(from: url), e)
     }
 
     func testUnknownKeysAreIgnored() throws {
@@ -142,7 +140,7 @@ final class EditStateTests: XCTestCase {
         XCTAssertEqual(e.bwMix.blue, 0)
     }
 
-    func testSetPreservesUnrelatedSidecarValues() throws {
+    func testSetPreservesUnrelatedValues() throws {
         var base = EditState()
         base.tone.contrast = 42
         base.bwMix.blue = -70
@@ -202,7 +200,8 @@ final class EditStateTests: XCTestCase {
         XCTAssertEqual(back.version, 1)
     }
 
-    /// Pre-M3 sidecars wrote `"masks": []` (and older ones had no key at all).
+    /// Pre-M3 edits were stored with `"masks": []` (and older ones had no key at
+    /// all).
     func testLegacyMasksDecode() throws {
         let legacy = """
         {"version": 1, "clarity": 10, "masks": [], "tone": {"exposure": 0.5}}
@@ -245,7 +244,7 @@ final class EditStateTests: XCTestCase {
         XCTAssertEqual(e.tone.contrast, 20)
 
         // Out of range and unknown leaves are rejected, and --set cannot create
-        // a mask (strokes come from the sidecar).
+        // a mask (strokes come from the stored edit).
         XCTAssertThrowsError(try base.applying(settings: ["masks[2].enabled=false"])) { err in
             guard case EditStateError.indexOutOfRange(_, let i, let n) = err else {
                 return XCTFail("wrong error \(err)")
