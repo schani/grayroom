@@ -66,12 +66,24 @@ decision, not a backlog: the rationale is the point of the column.
 | 5 | No white-balance presets or eyedropper | deferred | UI feature; the eyedropper also needs #6 to be usable interactively | medium / S |
 | 6 | Every temp/tint change re-decodes the RAW | deferred | WB at decode time is the v1 design (PLAN.md); moving it into the pipeline means carrying camera matrices ourselves | medium / L |
 | 7 | No pixel value readout | deferred | UI feature, no core work | medium / S |
-| 8 | 8-bit output is not dithered — banding in grey gradients | done, wave 3 (stochastic rounding in `ImageWriter` and the canvas shader) | — | medium / S |
-| 9 | Canvas is not colour-managed to the display profile | done, wave 3 (`CAMetalLayer.colorspace = sRGB`) | — | medium / S |
+| 8 | 8-bit output is not dithered — banding in grey gradients | done, wave 3 (stochastic rounding in `ImageWriter`); the canvas needs none, its drawable is float16 | — | medium / S |
+| 9 | Canvas is not colour-managed to the display profile | done, wave 3; the drawable is now `rgba16Float` tagged extended-linear-sRGB with EDR on, so the window server still owns the transfer function | — | medium / S |
 | 10 | Output clamp is per-channel with no rolloff | deferred | only reachable with heavy toning; a rolloff here would fight the tone stage's shoulder, which is where highlight behaviour is defined | low / S |
 | 11 | Histogram is luminance-only; no per-channel layers | deferred | for a B&W pipeline the two agree except under toning; wants the toning-aware channel view to be worth it | low / M |
 | 12 | Histogram/clipping measured on the preview, not the export | done, full-resolution preview (the histogram runs on the refine pass, the same rendition the exporter writes; the draft pass skips it) | — | low / S |
 | 13 | Export is always sRGB 3-channel; no colour space or output sharpening | deferred | needs a real output-sharpening stage (M5) to be worth a dialog | low / M |
+
+## Beyond the audit — deferred by design
+
+Not audit items: things this codebase has that Lightroom's feature set does not
+map onto cleanly, recorded here so the deferral is a decision rather than an
+omission.
+
+| Aspect | Status | Rationale |
+|---|---|---|
+| HDR **export** | deferred | The EDR preview renders toward `W = 4`; every file the exporter writes still ends at SDR white, so exporting an HDR edit clips the headroom (0.33 % of the reference frame against 0.24 % in SDR). Doing it properly means a gain map (ISO 21496-1 / Apple's HDR HEIC) or a PQ/HLG container plus a 10-bit-or-better encoder path, and a decision about which of those a B&W tool should emit — none of it is a constant to flip. The preview is the deliverable for now, and the sidebar and the histogram's SDR-white marker both say so. |
+| Display-driven ceiling | deferred | `W` is fixed at +2 EV rather than tracking `NSScreen.maximumExtendedDynamicRangeColorComponentValue`, which is dynamic (1.0 idle, ~4.7 with EDR content up on the development XDR panel) and would make the rendition change under the user as other windows come and go. A fixed ceiling is reproducible; adapting to it wants a considered policy, not a read of a moving number. |
+| Toning crossover above SDR white | deferred | The crossover's tonal position is `sqrt(min(Y, 1))`, so in HDR everything above SDR white takes the full highlight tint instead of continuing along the curve. The region is small and already the most tinted; extending the crossover means picking what "highlight" means on an open-ended range, which is the same question `W` itself raises. |
 
 ## Summary
 

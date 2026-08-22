@@ -23,7 +23,9 @@ text at startup, concatenated (`Common.metal` first) and compiled with
 ## Pipeline order
 
 ```
-decode(+WB)  ->  [masks]  ->  tone  ->  clarity  ->  bwMix  ->  toning  ->  output  ->  histogram
+decode(+WB)  ->  [masks]  ->  tone  ->  clarity  ->  bwMix  ->  toning  ->  output
+                                                                   |
+                                                                   +->  histogram
 ```
 
 Each stage is one `rgba16Float -> rgba16Float` compute pass, ping-ponging
@@ -33,6 +35,10 @@ slider nor any mask asks for it; `bwMix` is skipped when `bwMix.enabled ==
 false` (colour passthrough, a debugging aid); `toning` is skipped when both
 saturations are zero. `Pipeline.render(upTo:)` can stop at any stage boundary,
 which is what the golden tests use to inspect linear intermediates.
+
+`output` has two forms, chosen by `Pipeline.render(output:)` — see *Output
+modes* — and the histogram taps the **linear** texture the output stage reads,
+not its result, so one tap serves both.
 
 `[masks]` is not an image stage: it runs before `tone` and produces the two
 per-pixel parameter textures that `tone` and `clarity` read. With no *effective*
@@ -163,24 +169,42 @@ Peak added slope is `1.875/6.8 × 2.0 = 0.55`, i.e. the steepest part of the
 rendition runs at slope 1.55 — a "medium contrast" S-curve. Because that slope
 is never negative it can only *help* monotonicity.
 
-### The display shoulder
+### The display shoulder, and the display ceiling
 
-The last thing the EV curve does is roll off toward display white
-(`W = log2(1/0.18) = 2.4739 EV`):
+The last thing the EV curve does is roll off toward the display ceiling. The
+ceiling is a linear number `W` — SDR white is `W = 1`, and `EditState.hdr`
+selects `ToneCurve.hdrDisplayWhite = 4.0` (+2 EV) instead — and it enters the
+curve as the shoulder's asymptote, `W_EV = log2(W/0.18)`: 2.4739 EV in SDR,
+4.4739 EV in HDR.
 
 ```
-shoulder(y) = y                                            y ≤ k
-            = k + (W − k)·(1 − exp(−(y − k)/(W − k)))      y > k     k = 1.4 EV
+shoulder(y) = y                                                  y ≤ k
+            = k + (W_EV − k)·(1 − exp(−(y − k)/(W_EV − k)))      y > k   k = 1.4 EV
 ```
 
 C¹ at the knee (slope 1 on both sides), strictly increasing, and asymptotic to
-linear 1.0 — so **nothing tone-driven ever hard-clips**. Before wave 1, Exposure
+linear `W` — so **nothing tone-driven ever hard-clips**. Before wave 1, Exposure
 +1 sent everything above linear 0.5 to pure white and Contrast +100 blew out
 every tone above sRGB 79.5%; now both roll off instead.
 
 The one route to a genuine clip that remains is the LUT's out-of-domain gain:
 above `+8 EV` of *scene* luminance the endpoint gain is extrapolated
 multiplicatively and the output clamp takes over.
+
+**The knee does not move with the ceiling** — 1.4 EV in both modes — so below it
+the two curves are the *same curve, bit for bit*
+(`ToneCurveTests.testTheCurveBelowTheKneeIsBitEqualInBothModes` walks all 4096
+LUT entries and asserts equality on every one whose shoulder input is under the
+knee). HDR buys headroom above the knee; it does not re-render the picture, and
+the toggle is safe to flip mid-edit. The **black pedestal stays absolute** too —
+0.02 of *SDR* white in both modes — so raising the ceiling does not also move the
+black point and Blacks means the same thing on either display.
+
+An HDR render uses much less than the +2 EV it is given, because the shoulder
+only approaches its asymptote: on `testdata/L1000327.DNG` at clarity 30 the peak
+rendered luminance is 2.15 (+1.11 EV over SDR white), no pixel reaches `W`, and
+0.33 % of the frame sits above SDR white at all. The headroom is a rolloff
+target, not an exposure boost.
 
 ### The five controls
 
@@ -956,28 +980,73 @@ canvas colour management. Each is written up in its own section above.
 **`DEVIATIONS.md` in the repo root is the living record** of where every audit
 item across all four files stands.
 
-## Output transform
+## Output modes
 
-Plain IEC 61966-2-1 sRGB encoding with a 0…1 clamp. Files are tagged sRGB and
-written without alpha (8-bit PNG/JPEG, 16-bit PNG/TIFF).
+There are two output points, selected by `Pipeline.render(output:)`, and they
+are different kernels rather than one kernel with a flag:
 
-The histogram tap runs on this output-referred image: 256 luminance bins plus
-per-pixel shadow (`min channel ≤ 0.5/255`) and highlight (`max channel ≥
-254.5/255`) clip counters, accumulated with `atomic_fetch_add` in one compute
-pass. The UI lights its clipping triangles at **32 clipped pixels**, an absolute
-count rather than a fraction of the frame (`HistogramModel.clipWarningPixels`,
-wave 3, audit `decode-output` #1). A fraction — it was 0.1 % — meant ~3 000
-pixels on the preview and ~24 000 on a 24 MP export, so a blown light source
-never lit it *and* the preview and the export disagreed about the same edit.
-Lightroom's triangles light on essentially any clipped pixel, which is what makes
-"push Whites until the triangle just lights" usable.
+| mode | kernel | writes | used by |
+|---|---|---|---|
+| `.file` (default) | `outputKernel` | sRGB-encoded, clamped `[0, 1]` | CLI, export, every golden test |
+| `.display` | `displayOutputKernel` | **linear**, clamped `[0, W]` | the canvas: preview, draft and before/after |
+
+`.file` is plain IEC 61966-2-1 sRGB encoding with a 0…1 clamp. Files are tagged
+sRGB and written without alpha (8-bit PNG/JPEG, 16-bit PNG/TIFF). It does not
+consult `hdr` at all: `W` for the *clamp* is always 1 on this path.
+
+`.display` writes linear light because the drawable is an extended-linear-sRGB
+float16 surface (see *Canvas display*): the window server owns the transfer
+function, and values above 1.0 land in the panel's EDR headroom. It also skips
+the dither — a float16 drawable has no 8-bit quantisation step to dither at.
+
+**Export is always SDR.** `hdr` reaches the *tone curve* whatever the output
+mode is, because it is part of the rendition, so exporting an HDR edit writes
+that rendition **clipped at SDR white** rather than a different picture. Below
+the shoulder knee the two files are byte-identical; above it, the HDR rendition's
+highlights pile onto 1.0. Measured on `testdata/L1000327.DNG` at clarity 30:
+0.24 % of the frame clips in the SDR export, 0.33 % in the HDR one. Gain-map or
+HDR-container export is future work (`DEVIATIONS.md`, "Beyond the audit").
+
+### The histogram tap
+
+The tap runs on the **linear** texture the output stage reads — one pass for both
+modes — and does the scaling and encoding itself:
+
+```
+e   = sRGBEncode(clamp(rgb / W, 0, 1))
+bin = min(floor(luma(e) · 256), 255)
+```
+
+256 luminance bins plus per-pixel shadow (`min channel ≤ 0.5/255`) and highlight
+(`max channel ≥ 254.5/255`) clip counters, accumulated with `atomic_fetch_add`.
+`W` is the ceiling that output mode actually clamps at: SDR white for a file
+(so `--histogram` describes the bytes on disk), the edit's ceiling for the
+canvas. At `W = 1` the arithmetic is the file transform's, computed at float
+precision rather than from the encoded value's half-float storage, so a bin can
+sit an ulp from what reading the exported file back would give.
+
+"Highlight clipped" therefore means **at or above the ceiling** in both modes,
+which is the statement worth making: in HDR a pixel between SDR white and `W` is
+headroom, not clipping, and the panel shows it. The UI lights its clipping
+triangles at **32 clipped pixels**, an absolute count rather than a fraction of
+the frame (`HistogramModel.clipWarningPixels`, wave 3, audit `decode-output` #1).
+A fraction — it was 0.1 % — meant ~3 000 pixels on the preview and ~24 000 on a
+24 MP export, so a blown light source never lit it *and* the preview and the
+export disagreed about the same edit. Lightroom's triangles light on essentially
+any clipped pixel, which is what makes "push Whites until the triangle just
+lights" usable.
+
+Because the axis is `Y/W`, SDR white stops being the right-hand edge in HDR: it
+sits at `sRGBEncode(1/W)`, 0.537 at `W = 4`. `HistogramModel.sdrWhiteMarker-
+Position(displayWhite:)` is that number and the panel draws it as a dashed
+vertical line — everything to its right is headroom an export would clip.
 
 ### 8-bit dithering
 
-`Export/Dither.swift`. Both 8-bit output points — `ImageWriter.makeCGImage`'s
-8-bit branch and the canvas fragment shader — quantise by **stochastic
-rounding**: the value picks between the two codes bracketing it, with probability
-equal to its fractional part, from a hash of `(x, y, channel)`.
+`Export/Dither.swift`. The 8-bit output point — `ImageWriter.makeCGImage`'s
+8-bit branch — quantises by **stochastic rounding**: the value picks between the
+two codes bracketing it, with probability equal to its fractional part, from a
+hash of `(x, y, channel)`.
 
 ```
 s = clamp(v,0,1)·255;   out = floor(s) + (hash(x,y,c) < frac(s) ? 1 : 0)
@@ -999,20 +1068,44 @@ codes, and degenerates to "do nothing" as the fractional part goes to zero. Its
 cost is signal-dependent noise power (`frac·(1−frac)`), which is precisely the
 behaviour wanted at the ends of the scale.
 
-Not applied in `outputKernel` — the histogram tap reads that texture and the clip
-counters must not see noise — and not in `writeGray`, which writes data. 16-bit
-export is undithered.
+This is the only place it happens. Not in `outputKernel`, whose result is what
+`ImageWriter` then quantises — dithering it first would be noise the exporter
+dithers a second time. Not in `writeGray`, which writes data. Not on 16-bit
+export. And not on the canvas, whose drawable is `rgba16Float` and has no
+quantisation step to dither at.
 
-### Canvas colour management
+### Canvas display
 
-The canvas drawable is `bgra8Unorm` with `CAMetalLayer.colorspace` set to sRGB
-(wave 3, audit `decode-output` #9), so the window server colour-matches it to the
-display profile. Untagged, the pipeline's sRGB-encoded values were handed to the
-display raw and interpreted in *its* space: on a P3 or wider panel every toned
-image was drawn noticeably more saturated than the exported sRGB file, so the
-split-toning sliders lied about the result. A neutral B&W frame is unaffected
-either way (R = G = B is the same neutral in any RGB space), which is why it went
-unnoticed. This is also the hook to change for EDR previews.
+The drawable is `rgba16Float`, its layer is tagged **extended linear sRGB**, and
+`wantsExtendedDynamicRangeContent` is on. All three are load-bearing:
+
+* **Half-float**, because the values are linear light and the display output
+  clamps at `W`, not at SDR white — an 8-bit unorm surface can hold neither the
+  range nor the precision.
+* **Extended linear sRGB**, because that hands the transfer function to the
+  window server, which is also what colour-matches the frame to the display
+  profile (wave 3, audit `decode-output` #9: untagged, the pipeline's encoded
+  values were interpreted in the display's *own* space, so on a P3 or wider panel
+  every toned image was drawn more saturated than the exported sRGB file and the
+  split-toning sliders lied. A neutral B&W frame is unaffected either way, which
+  is why it went unnoticed).
+* **The EDR opt-in**, because without it the layer is an ordinary SDR surface
+  that happens to be float and everything above 1.0 is clamped away.
+
+The fragment shader therefore encodes nothing: it samples the display texture
+and returns it. Every constant it composites — the letterbox backdrop, the
+mask-overlay tint — is authored in sRGB and **decoded to linear** in
+`CanvasColors`, which is also where the clear colour comes from, so they look
+exactly as they did on the old encoded drawable. (The brush cursor's ring is
+pure black and white, the same numbers in either space; only the alpha blends
+now happen in linear light.) `CanvasDisplayInputTests` pins the pixel format,
+the colourspace, the EDR flag, the straight-through pass and the backdrop decode.
+
+On the machine this was developed on (M2 Max, XDR panel) `NSScreen`'s
+`maximumExtendedDynamicRangeColorComponentValue` is 1.0 while nothing on screen
+is asking for headroom and rises to ~4.7 once EDR content is up, against a panel
+potential of 16 — so `W = 4` is within what the display sustains rather than
+what it can peak at.
 
 ### Canvas display sampling
 
@@ -1045,14 +1138,11 @@ minified on screen, and keying on that would turn a shrunk frame blocky. The
 coverage overlay is never mipmapped and is always sampled at level 0; it is a
 soft mask, so aliasing in it is invisible.
 
-The pyramid is built on the **output** stage's result, which is sRGB-encoded, so
-each level is a box average in the encoded domain rather than in linear light.
-That is the conventional choice — it is what image viewers and Lightroom's own
-fit view do — but it is not energy-preserving: fine high-contrast texture mips
-slightly dark, and a pathological black/white checkerboard mips to encoded 0.5,
-which is 0.21 linear rather than 0.5. Generating the pyramid on the linear stage
-instead would mean moving the output transform into the canvas shader, where it
-would have to be reconciled with the dither and the sRGB-tagged drawable.
+The pyramid is built on the display output, which is **linear**, so every level
+is a box average in linear light and the reduction is energy-preserving: a
+black/white checkerboard mips to linear 0.5, and fine high-contrast texture keeps
+its brightness at fit zoom instead of coming out slightly dark the way an average
+of encoded values does.
 
 ### Capture sharpening
 
@@ -1092,9 +1182,6 @@ so it stays consistent either way.
 * The mask coverage overlay bypasses that cache entirely: with the overlay on,
   every render re-stamps the selected mask at its own input's resolution, in its
   own command buffer. Measured ~10-25 ms on top of a 24 MP refine.
-* The display mip pyramid is built in the sRGB-encoded domain, so the fit-zoom
-  view of fine high-contrast texture is slightly darker than a linear-light
-  reduction would be (see *Canvas display sampling*).
 * Stroke interpolation is linear, not Catmull-Rom, so a sparse fast stroke has
   visibly straight segments.
 * Only drawn masks exist: no gradients, no radial shapes, no parametric or range
@@ -1115,6 +1202,14 @@ so it stays consistent either way.
   rendition (see above). That invariant was retired on purpose in parity wave 1,
   and with it the "exposure +1 doubles linear luminance" statement above the
   shoulder knee.
+* The HDR ceiling is one fixed number (`W = 4`, +2 EV), not a slider and not
+  driven by the display's reported headroom. A panel with less headroom than
+  that tone-maps the top of the range itself; one with more does not get used.
+* Toning's shadow/highlight crossover clamps its tonal position at `sqrt(min(Y,
+  1))`, so in HDR every pixel above SDR white takes the full highlight tint
+  rather than continuing to move along the crossover. Acceptable for v1 — the
+  region is small and already the most tinted — but it is a real difference
+  between the HDR and SDR renditions of the same toning settings.
 * Whites cannot *create* highlight clipping, because the shoulder is always on
   and asymptotes below display white. Adobe documents Whites as a clipping
   control; an Option-drag threshold view built on this curve would show an empty
@@ -1126,6 +1221,13 @@ so it stays consistent either way.
   local contrast inside them; Lightroom's are edge-aware (audit tone.json #6).
 * Highlight recovery is exactly ratio-preserving and therefore does not
   desaturate the way Lightroom's does (audit tone.json #5).
+* **An SDR export of an HDR edit clips.** `hdr` changes the tone curve, and the
+  file transform still ends at SDR white, so everything the shoulder rolled into
+  the headroom piles onto 1.0 — 0.33 % of the reference frame against 0.24 % for
+  the same edit in SDR. There is no HDR file format here: no gain map, no PQ or
+  HLG container, no 10-bit AVIF/HEIC path. Turning HDR on for a picture you are
+  about to export is a way to make the highlights worse, and the sidebar says so.
+  The honest export of an HDR edit is future work (`DEVIATIONS.md`).
 * Export is always sRGB, 3 channels, no output-sharpening choice; there is no
   in-image clipping overlay (LR's `J`), no Option-drag threshold view on
   Whites/Blacks, no pixel readout, no WB presets or eyedropper, and the

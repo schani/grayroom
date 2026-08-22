@@ -27,6 +27,25 @@ public struct HistogramModel: Equatable {
     /// clean".
     public static let clipWarningPixels = 32
 
+    /// Where SDR white sits on the plot's 0…1 axis, or `nil` in SDR (where it is
+    /// the right-hand edge and a marker would be noise).
+    ///
+    /// The histogram bins `sRGBEncode(clamp(Y/W, 0, 1))`, so the axis is the EDR
+    /// rendition normalised to its ceiling: linear 1.0 lands at
+    /// `sRGBEncode(1/W)`, which is 0.537 at `W = 4`. Everything to the right of
+    /// the marker is headroom an SDR export would clip.
+    public static func sdrWhiteMarkerPosition(displayWhite w: Double) -> Double? {
+        guard w > 1 else { return nil }
+        return sRGBEncode(1 / w)
+    }
+
+    /// IEC 61966-2-1 linear -> sRGB, the same transfer the histogram kernel
+    /// applies.
+    static func sRGBEncode(_ c: Double) -> Double {
+        let v = min(max(c, 0), 1)
+        return v <= 0.0031308 ? 12.92 * v : 1.055 * pow(v, 1 / 2.4) - 0.055
+    }
+
     public var shadowClipping: Bool { shadowClippedPixels >= HistogramModel.clipWarningPixels }
     public var highlightClipping: Bool { highlightClippedPixels >= HistogramModel.clipWarningPixels }
 

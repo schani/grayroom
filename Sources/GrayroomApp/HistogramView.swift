@@ -6,6 +6,9 @@ import SwiftUI
 /// already counted them while rendering the frame, so this costs one `Path`.
 struct HistogramView: View {
     let model: HistogramModel
+    /// Normalised x of the SDR-white marker, or `nil` in SDR. See
+    /// `HistogramModel.sdrWhiteMarkerPosition`.
+    var sdrWhiteMarker: Double?
 
     var body: some View {
         VStack(spacing: 2) {
@@ -39,6 +42,18 @@ struct HistogramView: View {
                 path.addLine(to: CGPoint(x: w, y: h))
                 path.closeSubpath()
                 context.fill(path, with: .color(.white.opacity(0.75)))
+
+                // In HDR the axis runs to the EDR ceiling, so mark where SDR
+                // white is: everything to its right is headroom an SDR export
+                // would clip.
+                if let marker = sdrWhiteMarker {
+                    var line = Path()
+                    let x = w * marker
+                    line.move(to: CGPoint(x: x, y: 0))
+                    line.addLine(to: CGPoint(x: x, y: h))
+                    context.stroke(line, with: .color(.orange.opacity(0.8)),
+                                   style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+                }
             }
             .frame(height: 90)
             .background(Color.black.opacity(0.35))

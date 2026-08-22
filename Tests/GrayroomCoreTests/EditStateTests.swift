@@ -13,6 +13,37 @@ final class EditStateTests: XCTestCase {
         XCTAssertEqual(e.clarity, 0)
         XCTAssertEqual(e.toning, EditState.Toning())
         XCTAssertTrue(e.masks.isEmpty)
+        XCTAssertFalse(e.hdr)
+        XCTAssertEqual(e.displayWhite, 1.0)
+    }
+
+    /// `hdr` is an ordinary sidecar field: it round-trips, it defaults to
+    /// false when a sidecar predates it, and `--set hdr=true` reaches it
+    /// through the generic dotted-path merge with no special case.
+    func testHDRRoundTripsAndDefaultsOffForOldSidecars() throws {
+        var e = EditState()
+        e.hdr = true
+        e.tone.exposure = 0.5
+        let back = try EditState.decode(from: try e.jsonData())
+        XCTAssertEqual(back, e)
+        XCTAssertTrue(back.hdr)
+        XCTAssertEqual(back.displayWhite, ToneCurve.hdrDisplayWhite)
+
+        // A sidecar written before EDR existed: every other field is honoured
+        // and the render stays SDR.
+        let old = """
+        {"version": 1, "tone": {"exposure": 1.5}, "clarity": 30}
+        """
+        let loaded = try EditState.decode(from: Data(old.utf8))
+        XCTAssertFalse(loaded.hdr)
+        XCTAssertEqual(loaded.tone.exposure, 1.5)
+        XCTAssertEqual(loaded.clarity, 30)
+
+        XCTAssertTrue(EditState.settableKeyPaths.contains("hdr"))
+        XCTAssertTrue(try EditState().applying(settings: ["hdr=true"]).hdr)
+        XCTAssertFalse(try e.applying(settings: ["hdr=false"]).hdr)
+        // ... and it does not disturb anything else.
+        XCTAssertEqual(try EditState().applying(settings: ["hdr=true"]).tone, EditState.Tone())
     }
 
     func testRoundTrip() throws {

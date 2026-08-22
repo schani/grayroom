@@ -1,6 +1,11 @@
 import Foundation
 
-/// A 256-bin luminance histogram of the output-referred image plus clipping counts.
+/// A 256-bin luminance histogram plus clipping counts.
+///
+/// The axis is the rendition normalised to whatever ceiling the render's output
+/// mode clamps at — `sRGBEncode(Y/W)` — so bin 255 and the highlight counter
+/// mean "at or above what this output can show", SDR white for a file and the
+/// EDR ceiling for the canvas. See `Shaders/Histogram.metal`.
 public struct Histogram: Equatable, Sendable {
     public let bins: [UInt32]           // 256 entries
     public let pixelCount: Int

@@ -32,7 +32,8 @@ struct Sidebar: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                HistogramView(model: model.histogram)
+                HistogramView(model: model.histogram,
+                              sdrWhiteMarker: model.sdrWhiteMarker)
                 Divider()
                 WhiteBalancePanel(model: model)
                 Divider()
@@ -126,7 +127,20 @@ private struct TonePanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            PanelHeader(title: "Tone")
+            PanelHeader(title: "Tone", trailing: AnyView(
+                Toggle("HDR", isOn: Binding(
+                    get: { model.store.edit.hdr },
+                    set: { v in model.store.perform("HDR") { $0.hdr = v } }))
+                    .toggleStyle(.checkbox)
+                    .controlSize(.mini)
+                    .help("Roll the highlights off into the display's extended range "
+                          + "instead of SDR white. Preview only — export is always SDR.")
+            ))
+            if model.store.edit.hdr {
+                Text("HDR preview — the export clips above the histogram's SDR mark")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
             SliderRow(title: "Exposure", value: model.binding(\.tone.exposure),
                       range: -5...5, format: "%+.2f EV",
                       onBegin: model.beginEdit, onEnd: { model.endEdit("Exposure") })

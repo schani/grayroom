@@ -38,6 +38,27 @@ public enum ToneCurve {
     /// Display white, in EV above the pivot: `log2(1 / 0.18) = 2.4739`.
     public static let displayWhiteEV: Double = log2(1.0 / 0.18)
 
+    /// The display ceiling `W` an HDR (EDR) render aims at, in linear units
+    /// relative to SDR white 1.0. +2 EV of headroom above SDR — comfortably
+    /// inside what an XDR panel sustains, and about the range a print-like
+    /// rendition can use before speculars stop reading as speculars.
+    ///
+    /// Mirrored into the shaders as `StageConstants.hdrDisplayWhite`.
+    public static let hdrDisplayWhite: Double = 4.0
+
+    /// The ceiling for an edit: SDR white, or the HDR one when `hdr` is set.
+    @inline(__always)
+    public static func displayWhite(hdr: Bool) -> Double {
+        hdr ? hdrDisplayWhite : 1.0
+    }
+
+    /// Where a display ceiling `W` sits in EV above the pivot. `W = 1` gives
+    /// `displayWhiteEV` exactly.
+    @inline(__always)
+    public static func displayWhiteEV(displayWhite w: Double) -> Double {
+        log2(w / pivot)
+    }
+
     // MARK: - Tuning constants
     //
     // The zone controls (contrast / highlights / shadows / whites) are additive
@@ -118,13 +139,17 @@ public enum ToneCurve {
     // MARK: - Display shoulder
 
     /// Soft highlight shoulder: identity up to the knee, then an exponential
-    /// approach to `displayWhiteEV`. C¹ at the knee (slope 1 on both sides),
-    /// strictly increasing, and asymptotic to linear 1.0 — so a tone-driven
+    /// approach to the display ceiling. C¹ at the knee (slope 1 on both sides),
+    /// strictly increasing, and asymptotic to linear `W` — so a tone-driven
     /// value never reaches, let alone exceeds, display white.
+    ///
+    /// The knee is a property of the *curve*, not of the display, so it stays at
+    /// 1.4 EV in both modes: an HDR render is the same picture below the knee and
+    /// rolls off into more headroom above it.
     @inline(__always)
-    public static func shoulderEV(_ y: Double) -> Double {
+    public static func shoulderEV(_ y: Double, displayWhite: Double = 1.0) -> Double {
         guard y > shoulderKneeEV else { return y }
-        let span = displayWhiteEV - shoulderKneeEV
+        let span = displayWhiteEV(displayWhite: displayWhite) - shoulderKneeEV
         return shoulderKneeEV + span * (1 - exp(-(y - shoulderKneeEV) / span))
     }
 
@@ -214,7 +239,8 @@ public enum ToneCurve {
     /// see `blackPedestal` / `evaluateLinear`.
     ///
     /// Returns `log2(Y'/0.18)`.
-    public static func evaluateEV(_ x0: Double, _ tone: EditState.Tone) -> Double {
+    public static func evaluateEV(_ x0: Double, _ tone: EditState.Tone,
+                                  displayWhite: Double = 1.0) -> Double {
         let t = tone.clamped
         // The baseline is the rendition the image starts from; exposure is a
         // pure EV shift on top of it, so "+1 EV doubles linear luminance" stays
@@ -222,7 +248,7 @@ public enum ToneCurve {
         // evaluated on the *exposed, rendered* value, which is also the space
         // Lightroom's histogram zones are defined in.
         let x = baselineEV(x0) + t.exposure
-        return shoulderEV(zoneSumEV(x, t))
+        return shoulderEV(zoneSumEV(x, t), displayWhite: displayWhite)
     }
 
     // MARK: - Local (per-pixel) tone delta
@@ -276,10 +302,15 @@ public enum ToneCurve {
 
     /// Convenience: maps a linear luminance through the whole curve, blacks
     /// included.
-    public static func evaluateLinear(_ y: Double, _ tone: EditState.Tone) -> Double {
+    ///
+    /// The black pedestal is **absolute**: 0.02 of SDR white in both modes, so
+    /// raising the ceiling does not also move the black point.
+    public static func evaluateLinear(_ y: Double, _ tone: EditState.Tone,
+                                      displayWhite: Double = 1.0) -> Double {
         guard y > 0 else { return 0 }
         let x = log2(y / pivot)
-        return blackPedestal(pivot * exp2(evaluateEV(x, tone)), tone.clamped.blacks)
+        return blackPedestal(pivot * exp2(evaluateEV(x, tone, displayWhite: displayWhite)),
+                             tone.clamped.blacks)
     }
 
     // MARK: - LUT
@@ -301,14 +332,16 @@ public enum ToneCurve {
     /// safety net; with the tuning constants above the analytic curve is already
     /// monotone, so this pass only ever matters for the flat toe the black
     /// pedestal produces (which it passes through unchanged).
-    public static func makeLUT(for tone: EditState.Tone, size: Int = ToneCurve.lutSize) -> LUT {
+    public static func makeLUT(for tone: EditState.Tone,
+                               size: Int = ToneCurve.lutSize,
+                               displayWhite: Double = 1.0) -> LUT {
         precondition(size >= 2)
         let blacks = tone.clamped.blacks
         var values = [Float](repeating: 0, count: size)
         var prev = -Double.infinity
         for i in 0..<size {
             let x = domainMinEV + (domainMaxEV - domainMinEV) * Double(i) / Double(size - 1)
-            var y = evaluateEV(x, tone)
+            var y = evaluateEV(x, tone, displayWhite: displayWhite)
             if y < prev { y = prev }
             prev = y
             values[i] = Float(blackPedestal(pivot * exp2(y), blacks))

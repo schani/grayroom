@@ -86,6 +86,7 @@ final class RenderService {
         run(queue) { () -> PreviewResult in
             let t0 = CFAbsoluteTimeGetCurrent()
             let result = try self.renderer.pipeline.render(input: input, edit: edit,
+                                                           output: .display,
                                                            computeHistogram: computeHistogram,
                                                            generateDisplayMipmaps: true)
             var coverage: MTLTexture?
@@ -101,10 +102,15 @@ final class RenderService {
 
     /// The "before" image: the same decode through an all-defaults edit, i.e.
     /// decode + output transform and nothing else. Computed once per decode.
+    ///
+    /// All-defaults includes `hdr = false`, so "before" is always the SDR
+    /// rendition — holding `\` on an HDR edit shows what the picture was, which
+    /// is the comparison the key is for.
     func renderDefaults(input: MTLTexture,
                         completion: @escaping (Result<MTLTexture, Error>) -> Void) {
         run(queue) {
             try self.renderer.pipeline.render(input: input, edit: EditState(),
+                                              output: .display,
                                               generateDisplayMipmaps: true).texture
         } completion: { completion($0) }
     }

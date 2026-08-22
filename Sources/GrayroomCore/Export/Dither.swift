@@ -38,12 +38,13 @@ import Foundation
 ///
 /// ## Where it is applied
 ///
-/// Only at 8-bit output points: `ImageWriter.makeCGImage`'s 8-bit branch and the
-/// canvas fragment shader (which draws into a `bgra8Unorm` drawable), so the
-/// preview shows the same thing the file gets. Deliberately **not** in
-/// `outputKernel` — the histogram tap reads that texture, and dithering there
-/// would put noise in the clip counters. Also not in `ImageWriter.writeGray`,
-/// which writes data (mask coverage) rather than a picture.
+/// At the one 8-bit output point there is: `ImageWriter.makeCGImage`'s 8-bit
+/// branch. The canvas draws into an `rgba16Float` drawable, which has no
+/// quantisation step to dither at. Deliberately **not** in `outputKernel`
+/// either — dithering an output-referred texture would be pointless work, and
+/// the value it produces is the one the exporter quantises. Also not in
+/// `ImageWriter.writeGray`, which writes data (mask coverage) rather than a
+/// picture.
 ///
 /// The noise is a hash of `(x, y, channel)`, so it is deterministic: the same
 /// image exports to the same bytes every time and the tests can assert on it.
@@ -82,27 +83,4 @@ public enum Dither {
         let step = noise(x: x, y: y, channel: channel) < (s - lo) ? 1.0 : 0.0
         return UInt8(min(lo + step, 255))
     }
-
-    /// The MSL mirror of everything above, for the canvas shader. Kept as a
-    /// string next to the Swift so the two cannot drift apart unnoticed. It
-    /// computes in `float` where the Swift computes in `Double`, so the two can
-    /// disagree by one code on a value that lands within ~1e-7 LSB of a rounding
-    /// boundary; everywhere else they agree exactly.
-    public static let metalSource = """
-    static inline uint grDitherHash(uint x, uint y, uint c, uint salt) {
-        uint h = x * 0x04682D9Bu ^ y * 0x12763F1Du ^ c * 0x27D4EB2Fu ^ salt * 0x9E3779B1u;
-        h ^= h >> 16; h *= 0x7FEB352Du; h ^= h >> 15; h *= 0x846CA68Bu; h ^= h >> 16;
-        return h;
-    }
-
-    // Stochastic rounding between the two codes bracketing the exact value, so
-    // exact codes (0 and 255 above all) never move. Mirrors GrayroomCore's
-    // Dither.quantize8.
-    static inline float grDither8(float v, uint x, uint y, uint c) {
-        float s = clamp(v, 0.0f, 1.0f) * 255.0f;
-        float lo = floor(s);
-        float u = float(grDitherHash(x, y, c, 0x51A7u)) * (1.0f / 4294967296.0f);
-        return min(lo + ((u < s - lo) ? 1.0f : 0.0f), 255.0f) * (1.0f / 255.0f);
-    }
-    """
 }

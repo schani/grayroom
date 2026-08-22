@@ -23,7 +23,7 @@ final class CanvasDisplayInputTests: XCTestCase {
 
     private enum Quadrant: String, CaseIterable {
         case topLeft, topRight, bottomLeft, bottomRight
-        /// r, g, b as unorm bytes.
+        /// r, g, b as unorm bytes in the marker texture.
         var rgb: (UInt8, UInt8, UInt8) {
             switch self {
             case .topLeft: return (255, 0, 0)        // red
@@ -31,6 +31,14 @@ final class CanvasDisplayInputTests: XCTestCase {
             case .bottomLeft: return (0, 0, 255)     // blue
             case .bottomRight: return (255, 255, 0)  // yellow
             }
+        }
+
+        /// What the drawable must hold for it. The canvas passes display-linear
+        /// values through unencoded, and 0 and 1 are the same number in any
+        /// transfer function, so the marker colours arrive unchanged.
+        var linear: (Double, Double, Double) {
+            let (r, g, b) = rgb
+            return (Double(r) / 255, Double(g) / 255, Double(b) / 255)
         }
     }
 
@@ -90,19 +98,22 @@ final class CanvasDisplayInputTests: XCTestCase {
 
     // MARK: - Offscreen render of the real draw path
 
+    /// The drawable is `rgba16Float` holding **display-linear** values, so a
+    /// frame is read back as half floats, not as unorm bytes.
     private struct Frame {
-        var bgra: [UInt8]
+        var rgba: [Float16]
         var width: Int
         var height: Int
-        func rgb(x: Int, y: Int) -> (UInt8, UInt8, UInt8) {
+        func rgb(x: Int, y: Int) -> (Double, Double, Double) {
             let i = (y * width + x) * 4
-            return (bgra[i + 2], bgra[i + 1], bgra[i])
+            return (Double(rgba[i]), Double(rgba[i + 1]), Double(rgba[i + 2]))
         }
     }
 
     private func render() throws -> Frame {
         let size = h.canvas.transform.viewSize
         let w = Int(size.width.rounded()), hgt = Int(size.height.rounded())
+        XCTAssertEqual(h.canvas.colorPixelFormat, .rgba16Float)
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: h.canvas.colorPixelFormat,
                                                          width: w, height: hgt, mipmapped: false)
         d.usage = [.renderTarget, .shaderRead]
@@ -121,19 +132,19 @@ final class CanvasDisplayInputTests: XCTestCase {
         buffer.waitUntilCompleted()
         XCTAssertNil(buffer.error)
 
-        var bytes = [UInt8](repeating: 0, count: w * hgt * 4)
-        bytes.withUnsafeMutableBytes {
-            target.getBytes($0.baseAddress!, bytesPerRow: w * 4,
+        var pixels = [Float16](repeating: 0, count: w * hgt * 4)
+        pixels.withUnsafeMutableBytes {
+            target.getBytes($0.baseAddress!,
+                            bytesPerRow: w * 4 * MemoryLayout<Float16>.size,
                             from: MTLRegionMake2D(0, 0, w, hgt), mipmapLevel: 0)
         }
-        return Frame(bgra: bytes, width: w, height: hgt)
+        return Frame(rgba: pixels, width: w, height: hgt)
     }
 
-    private func classify(_ rgb: (UInt8, UInt8, UInt8)) -> Quadrant? {
+    private func classify(_ rgb: (Double, Double, Double)) -> Quadrant? {
         for q in Quadrant.allCases {
-            let (r, g, b) = q.rgb
-            if abs(Int(rgb.0) - Int(r)) < 40, abs(Int(rgb.1) - Int(g)) < 40,
-               abs(Int(rgb.2) - Int(b)) < 40 {
+            let (r, g, b) = q.linear
+            if abs(rgb.0 - r) < 0.16, abs(rgb.1 - g) < 0.16, abs(rgb.2 - b) < 0.16 {
                 return q
             }
         }
@@ -178,42 +189,72 @@ final class CanvasDisplayInputTests: XCTestCase {
         try assertDisplayAgreesWithInput("fit")
     }
 
-    /// The drawable is tagged sRGB so the window server colour-matches it to the
-    /// display profile (wave 3, audit `decode-output` #9). Untagged, the
-    /// pipeline's sRGB-encoded values were interpreted in the *display's* space,
-    /// so on a P3 panel every toned image was drawn more saturated than the
-    /// exported sRGB file — the split-toning sliders lied. Neutral B&W looks the
-    /// same either way, which is exactly why this went unnoticed.
-    func testDrawableIsTaggedSRGB() throws {
+    /// The EDR drawable: half-float, extended **linear** sRGB, extended-range
+    /// content declared.
+    ///
+    /// All three have to hold together. Half-float carries linear values above
+    /// 1.0 that an 8-bit unorm cannot; the extended-linear colourspace is what
+    /// hands the transfer function to the window server, which is also what
+    /// keeps the frame colour-matched to the display profile (wave 3, audit
+    /// `decode-output` #9 — untagged, encoded values were interpreted in the
+    /// display's own space and toned images came out more saturated than the
+    /// exported file); and without the EDR opt-in the layer is an ordinary SDR
+    /// surface that happens to be float, so the headroom is clamped away.
+    func testDrawableIsEDRLinear() throws {
         let layer = try XCTUnwrap(h.canvas.layer as? CAMetalLayer)
         let space = try XCTUnwrap(layer.colorspace)
-        XCTAssertEqual(space.name, CGColorSpace.sRGB)
-        XCTAssertEqual(h.canvas.colorPixelFormat, .bgra8Unorm)
+        XCTAssertEqual(space.name, CGColorSpace.extendedLinearSRGB)
+        XCTAssertEqual(h.canvas.colorPixelFormat, .rgba16Float)
+        XCTAssertTrue(layer.wantsExtendedDynamicRangeContent)
     }
 
-    /// The canvas dithers to 8 bits with the exporter's rule, so a smooth
-    /// gradient does not band on screen either. It must stay within one code of
-    /// the undithered value — a dither that shifted the picture would break
-    /// every "what you see is the PNG" claim in this suite.
-    func testCanvasDitherLeavesExactCodesAlone() throws {
-        // Inside a quadrant every filter tap is the same 0/255 marker colour, so
-        // the fragment value is exactly on a code and the dither must be a
-        // no-op. (The 0.09 backdrop is *not* on a code and is expected to
-        // alternate between 22 and 23 — that is the dither working.)
+    /// The canvas encodes nothing: whatever display-linear value the pipeline
+    /// wrote is what reaches the drawable, bit for bit where the filter taps
+    /// agree. That is the whole contract of the linear output mode — an sRGB
+    /// encode left in the shader would show up here as 0 → 0 but 1 → 1 with
+    /// everything in between lifted, and the backdrop off by a factor of three.
+    func testTheCanvasPassesLinearValuesThroughUnchanged() throws {
         let frame = try render()
         let t = h.canvas.transform
-        var checked = 0, offCode = 0
+        var checked = 0, wrong = 0
         for py in stride(from: 5, to: frame.height, by: 11) {
             for px in stride(from: 5, to: frame.width, by: 11) {
                 let view = CGPoint(x: CGFloat(px) + 0.5, y: CGFloat(py) + 0.5)
-                guard quadrant(ofImagePoint: t.imagePoint(fromView: view)) != nil else { continue }
+                guard let q = quadrant(ofImagePoint: t.imagePoint(fromView: view)) else { continue }
                 checked += 1
                 let (r, g, b) = frame.rgb(x: px, y: py)
-                if ![r, g, b].allSatisfy({ $0 == 0 || $0 == 255 }) { offCode += 1 }
+                let want = q.linear
+                if abs(r - want.0) > 1e-3 || abs(g - want.1) > 1e-3 || abs(b - want.2) > 1e-3 {
+                    wrong += 1
+                }
             }
         }
         XCTAssertGreaterThan(checked, 100)
-        XCTAssertEqual(offCode, 0, "\(offCode)/\(checked) image pixels moved off their exact code")
+        XCTAssertEqual(wrong, 0, "\(wrong)/\(checked) image pixels were not passed through")
+    }
+
+    /// The letterbox is authored in sRGB and must be *decoded*, or it would be
+    /// drawn about three times too bright on the linear drawable. The shader's
+    /// constant and the clear colour both come from `CanvasColors`, so this pins
+    /// the decode itself.
+    func testTheLetterboxBackdropIsSRGBDecoded() throws {
+        let expected = CanvasColors.backdropLinear
+        XCTAssertEqual(expected.0, 0.00845, accuracy: 1e-4)    // sRGB 0.09
+        XCTAssertEqual(expected.2, 0.01002, accuracy: 1e-4)    // sRGB 0.10
+        XCTAssertEqual(CanvasColors.srgbToLinear(0), 0, accuracy: 1e-12)
+        XCTAssertEqual(CanvasColors.srgbToLinear(1), 1, accuracy: 1e-12)
+
+        // The portrait image is letterboxed left and right at fit zoom, so the
+        // far-left column of the canvas is pure backdrop.
+        let frame = try render()
+        let t = h.canvas.transform
+        let view = CGPoint(x: 2.5, y: CGFloat(frame.height / 2) + 0.5)
+        XCTAssertNil(quadrant(ofImagePoint: t.imagePoint(fromView: view)),
+                     "precondition: that column must be outside the image")
+        let (r, g, b) = frame.rgb(x: 2, y: frame.height / 2)
+        XCTAssertEqual(r, expected.0, accuracy: 2e-4)
+        XCTAssertEqual(g, expected.1, accuracy: 2e-4)
+        XCTAssertEqual(b, expected.2, accuracy: 2e-4)
     }
 
     /// A draft render is a *smaller* texture standing in for the same image, and

@@ -422,17 +422,33 @@ enum SelfTest {
         buffer.commit()
         buffer.waitUntilCompleted()
 
-        var bytes = [UInt8](repeating: 0, count: w * h * 4)
-        bytes.withUnsafeMutableBytes {
-            target.getBytes($0.baseAddress!, bytesPerRow: w * 4,
+        // The drawable is display-linear `rgba16Float`, so the screenshot has to
+        // be encoded here: sRGB, tone-mapped by a plain clip at SDR white (this
+        // is a debugging artefact, not an HDR deliverable).
+        var halfs = [Float16](repeating: 0, count: w * h * 4)
+        halfs.withUnsafeMutableBytes {
+            target.getBytes($0.baseAddress!,
+                            bytesPerRow: w * 4 * MemoryLayout<Float16>.size,
                             from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
         }
-        let info: CGBitmapInfo = [.byteOrder32Little,
-                                  CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue)]
+        func encode(_ v: Float16) -> UInt8 {
+            let c = min(max(Double(v), 0), 1)
+            let s = c <= 0.0031308 ? 12.92 * c : 1.055 * pow(c, 1 / 2.4) - 0.055
+            return UInt8(min(max((s * 255).rounded(), 0), 255))
+        }
+        var bytes = [UInt8](repeating: 255, count: w * h * 4)
+        for i in 0..<(w * h) {
+            bytes[i * 4] = encode(halfs[i * 4])
+            bytes[i * 4 + 1] = encode(halfs[i * 4 + 1])
+            bytes[i * 4 + 2] = encode(halfs[i * 4 + 2])
+        }
+        let info: CGBitmapInfo = [CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue)]
         guard let provider = CGDataProvider(data: Data(bytes) as CFData),
               let image = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32,
                                   bytesPerRow: w * 4,
-                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)
+                                      ?? CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: info,
                                   provider: provider, decode: nil, shouldInterpolate: false,
                                   intent: .defaultIntent) else { return }
         let url = outputDirectory.appendingPathComponent("selftest-canvas.png")

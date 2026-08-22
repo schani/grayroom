@@ -9,8 +9,9 @@ import Metal
 ///     -> clarity    (fast local Laplacian on log2 luminance, per-pixel amount) [skipped at 0]
 ///     -> bwMix      (8 hue bands -> gray)          [skipped when disabled]
 ///     -> toning     (split tone, luminance-neutral) [skipped when identity]
-///     -> output     (linear -> sRGB)
-///     -> histogram tap
+///     -> output     (file: linear -> sRGB, clamped 0…1;
+///                    display: linear, clamped 0…W)
+///     -> histogram tap (on the linear texture the output stage reads)
 ///
 /// With zero active masks nothing about the encoding changes: the tone kernel's
 /// `hasLocal` flag is 0 and the clarity stage gets its 1x1 global amount
@@ -22,6 +23,7 @@ public final class Pipeline {
     private let bwMixPipeline: MTLComputePipelineState
     private let toningPipeline: MTLComputePipelineState
     private let outputPipeline: MTLComputePipelineState
+    private let displayOutputPipeline: MTLComputePipelineState
     private let histogramPipeline: MTLComputePipelineState
     private let clarityStage: ClarityStage
     let maskStage: MaskStage
@@ -61,6 +63,7 @@ public final class Pipeline {
         bwMixPipeline = try context.computePipeline("bwMixKernel")
         toningPipeline = try context.computePipeline("toningKernel")
         outputPipeline = try context.computePipeline("outputKernel")
+        displayOutputPipeline = try context.computePipeline("displayOutputKernel")
         histogramPipeline = try context.computePipeline("histogramKernel")
         clarityStage = try ClarityStage(context: context)
         maskStage = try MaskStage(context: context)
@@ -72,8 +75,20 @@ public final class Pipeline {
         case tone, clarity, bwMix, toning, output
     }
 
+    /// What the `output` stage produces.
+    public enum OutputMode: Sendable {
+        /// What a file gets: sRGB-encoded, clamped to `[0, 1]`. Independent of
+        /// `EditState.hdr` — export is always SDR.
+        case file
+        /// What the canvas gets: **linear**, clamped to `[0, W]`, unencoded and
+        /// undithered, for an extended-linear-sRGB float16 drawable. `W` is
+        /// `EditState.displayWhite`.
+        case display
+    }
+
     public struct Result {
-        /// Output-referred (sRGB-encoded) rgba16Float texture, or the linear
+        /// The rendered texture: output-referred (sRGB-encoded) for
+        /// `OutputMode.file`, display-linear for `.display`, or the linear
         /// intermediate when `upTo` stopped short of `.output`.
         public let texture: MTLTexture
         public let histogram: Histogram?
@@ -81,6 +96,8 @@ public final class Pipeline {
 
     /// Runs the pipeline. `input` must be linear scene-referred rgba16Float.
     ///
+    /// - Parameter output: `.file` (the default) is byte-for-byte the export
+    ///   path; `.display` writes display-linear values for the canvas.
     /// - Parameter generateDisplayMipmaps: allocate the working textures with a
     ///   mip pyramid and fill the output's before the command buffer completes.
     ///   Only the app's canvas wants this; file output paths leave it off and
@@ -88,9 +105,17 @@ public final class Pipeline {
     public func render(input: MTLTexture,
                        edit: EditState,
                        upTo lastStage: Stage = .output,
+                       output outputMode: OutputMode = .file,
                        computeHistogram: Bool = false,
                        generateDisplayMipmaps: Bool = false) throws -> Result {
         let w = input.width, h = input.height
+        // The tone curve's shoulder aims at the edit's ceiling whatever the
+        // output mode is — `hdr` is part of the rendition, so a file export of
+        // an HDR edit is that rendition clipped, not a different picture.
+        let toneDisplayWhite = edit.displayWhite
+        // The output clamp, and the number the histogram normalises against.
+        // A file always ends at SDR white.
+        let outputCeiling = outputMode == .display ? toneDisplayWhite : 1.0
 
         // Both working textures carry the pyramid: which of the two ends up
         // holding the result depends on how many stages ran, and a mipmapped
@@ -125,7 +150,8 @@ public final class Pipeline {
         // output; see Tone.metal and ToneCurve.applyToneDelta.
         let hasLocalTone = maps != nil && masks.contains { $0.adjustments.affectsTone }
         try encodeTone(commandBuffer, src: src, dst: dst, tone: edit.tone,
-                       params: hasLocalTone ? maps!.paramsA : nil)
+                       params: hasLocalTone ? maps!.paramsA : nil,
+                       displayWhite: toneDisplayWhite)
         latest = dst
         advance()
 
@@ -197,10 +223,25 @@ public final class Pipeline {
         }
 
         // --- output transform -----------------------------------------------
+        // The histogram taps the texture the output stage *reads*, so it is
+        // captured here, before the ping-pong moves on. Nothing writes to it
+        // again: `advance()` puts it back in the pool, but the pool is not
+        // touched after the last stage.
+        let preOutput = src
         if runs(.output) {
-            try encode(commandBuffer, outputPipeline, w, h) { e in
-                e.setTexture(src, index: 0)
-                e.setTexture(dst, index: 1)
+            switch outputMode {
+            case .file:
+                try encode(commandBuffer, outputPipeline, w, h) { e in
+                    e.setTexture(src, index: 0)
+                    e.setTexture(dst, index: 1)
+                }
+            case .display:
+                var white = Float(outputCeiling)
+                try encode(commandBuffer, displayOutputPipeline, w, h) { e in
+                    e.setTexture(src, index: 0)
+                    e.setTexture(dst, index: 1)
+                    e.setBytes(&white, length: MemoryLayout<Float>.stride, index: 0)
+                }
             }
             latest = dst
             advance()
@@ -215,9 +256,11 @@ public final class Pipeline {
                 length: counterCount * MemoryLayout<UInt32>.stride,
                 options: .storageModeShared) else { throw MetalError.textureAllocationFailed }
             memset(buf.contents(), 0, buf.length)
+            var white = Float(outputCeiling)
             try encode(commandBuffer, histogramPipeline, w, h) { e in
-                e.setTexture(output, index: 0)
+                e.setTexture(preOutput, index: 0)
                 e.setBuffer(buf, offset: 0, index: 0)
+                e.setBytes(&white, length: MemoryLayout<Float>.stride, index: 1)
             }
             histogramBuffer = buf
         }
@@ -310,8 +353,9 @@ public final class Pipeline {
                             src: MTLTexture,
                             dst: MTLTexture,
                             tone: EditState.Tone,
-                            params: MTLTexture?) throws {
-        let lut = ToneCurve.makeLUT(for: tone)
+                            params: MTLTexture?,
+                            displayWhite: Double = 1.0) throws {
+        let lut = ToneCurve.makeLUT(for: tone, displayWhite: displayWhite)
         let lutTexture = try context.makeLUTTexture(lut.values)
         // A texture is always bound (a 1x1 dummy when there are no masks) so the
         // kernel never reads an unbound argument; `hasLocal` gates the code path.

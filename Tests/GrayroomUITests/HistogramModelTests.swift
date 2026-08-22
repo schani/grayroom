@@ -71,6 +71,35 @@ final class HistogramModelTests: XCTestCase {
         let m = HistogramModel(makeHistogram(bins: [1, 2, 3]))
         XCTAssertEqual(m.heights, HistogramModel.empty.heights)
     }
+
+    /// In HDR the plot's axis runs to the EDR ceiling, so the panel marks where
+    /// SDR white fell — everything right of the mark is headroom an SDR export
+    /// would clip. The kernel bins `sRGBEncode(Y/W)`, so the mark is
+    /// `sRGBEncode(1/W)`: 0.537 at W = 4, i.e. just past the middle of the plot.
+    func testSDRWhiteMarkerPosition() {
+        XCTAssertNil(HistogramModel.sdrWhiteMarkerPosition(displayWhite: 1))
+        XCTAssertNil(HistogramModel.sdrWhiteMarkerPosition(displayWhite: 0.5))
+
+        let atFour = try? XCTUnwrap(HistogramModel.sdrWhiteMarkerPosition(displayWhite: 4))
+        XCTAssertEqual(atFour ?? 0, 0.5370, accuracy: 5e-4)
+        XCTAssertEqual(HistogramModel.sdrWhiteMarkerPosition(displayWhite: 2) ?? 0,
+                       0.7354, accuracy: 5e-4)
+
+        // Monotone: more headroom pushes SDR white further left, never off the
+        // plot.
+        var previous = 1.0
+        for w in stride(from: 1.25, through: 16.0, by: 0.25) {
+            let p = HistogramModel.sdrWhiteMarkerPosition(displayWhite: w) ?? 0
+            XCTAssertLessThan(p, previous)
+            XCTAssertGreaterThan(p, 0)
+            previous = p
+        }
+
+        // It is the same transfer function the histogram kernel applies.
+        XCTAssertEqual(HistogramModel.sRGBEncode(1), 1, accuracy: 1e-12)
+        XCTAssertEqual(HistogramModel.sRGBEncode(0), 0, accuracy: 1e-12)
+        XCTAssertEqual(HistogramModel.sRGBEncode(0.5), 0.7354, accuracy: 5e-4)
+    }
 }
 
 final class RenderInvalidationTests: XCTestCase {

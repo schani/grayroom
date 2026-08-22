@@ -1,5 +1,4 @@
 import Foundation
-import GrayroomCore
 
 /// The canvas display shader.
 ///
@@ -22,19 +21,21 @@ import GrayroomCore
 /// to a laptop window is point-sampled through a bilinear filter — roughly every
 /// fourth pixel of the render — with all the aliasing that implies.
 ///
-/// The image texture holds **output-referred, sRGB-encoded** values (the
-/// pipeline's `output` stage did that) and the drawable is a `bgra8Unorm` whose
-/// layer is tagged **sRGB** (`CanvasNSView.init`), so the window server colour-
-/// matches it to the display profile — what you see is what `ImageWriter` would
-/// put in a PNG, on a wide-gamut display too. The fragment shader dithers to
-/// 8 bits with exactly the same rule the exporter uses, so smooth gradients do
-/// not band on screen either.
+/// ## Everything here is linear light
+///
+/// The image texture holds **display-linear** values (`Pipeline.OutputMode`
+/// `.display`, clamped to `[0, W]`) and the drawable is an `rgba16Float` whose
+/// layer is tagged **extended linear sRGB** with EDR enabled
+/// (`CanvasNSView.init`), so the window server applies the display's transfer
+/// function itself and anything above 1.0 lands in the panel's headroom. The
+/// shader therefore encodes nothing and dithers nothing: a float16 drawable has
+/// no 8-bit quantisation step to dither at. Every constant it composites comes
+/// from `CanvasColors`, sRGB-decoded, so the letterbox and the overlay look
+/// unchanged.
 enum CanvasShaders {
     static let source = """
     #include <metal_stdlib>
     using namespace metal;
-
-    \(Dither.metalSource)
 
     struct CanvasUniforms {
         float2 viewSize;      // device pixels
@@ -79,7 +80,8 @@ enum CanvasShaders {
         float2 v = in.position.xy;
         float2 img = (v - u.viewSize * 0.5) / max(u.zoom, 1e-6) + u.center;
 
-        float3 rgb = float3(0.09, 0.09, 0.10);   // backdrop outside the image
+        // Backdrop outside the image: sRGB 0.09/0.09/0.10, decoded.
+        float3 rgb = \(CanvasColors.msl(CanvasColors.backdropLinear));
 
         if (img.x >= 0.0 && img.y >= 0.0 && img.x < u.imageSize.x && img.y < u.imageSize.y) {
             float2 uv = img / u.imageSize;
@@ -91,13 +93,14 @@ enum CanvasShaders {
             if (u.overlay > 0.5) {
                 // The coverage map is soft and never mipmapped; level 0 always.
                 float cov = clamp(coverage.sample(linearSampler, uv, level(0.0)).r, 0.0, 1.0);
-                rgb = mix(rgb, float3(1.0, 0.15, 0.15), 0.5 * cov);
+                rgb = mix(rgb, \(CanvasColors.msl(CanvasColors.overlayLinear)), 0.5 * cov);
             }
         }
 
         // Brush cursor: an outer ring at the stamp radius and a fainter inner
         // ring where the falloff starts, drawn as a dark/light pair so it stays
-        // visible on both black and white.
+        // visible on both black and white. Black and white are the same numbers
+        // in linear light, so only the blend happens in a different space.
         if (u.cursorRadius > 0.0) {
             float d = distance(v, u.cursor);
             float outer = 1.0 - smoothstep(0.6, 1.8, abs(d - u.cursorRadius));
@@ -109,12 +112,8 @@ enum CanvasShaders {
             }
         }
 
-        // Dither at the 8-bit drawable's quantisation step, per channel, keyed
-        // on the device pixel — the same rule ImageWriter applies on export.
-        uint2 p = uint2(v);
-        rgb = float3(grDither8(rgb.r, p.x, p.y, 0u),
-                     grDither8(rgb.g, p.x, p.y, 1u),
-                     grDither8(rgb.b, p.x, p.y, 2u));
+        // Straight through: the drawable is extended-linear-sRGB float16, so
+        // there is nothing to encode and no quantisation step to dither at.
         return float4(rgb, 1.0);
     }
     """

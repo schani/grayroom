@@ -102,21 +102,33 @@ public final class CanvasNSView: MTKView {
     public init(device: MTLDevice, commandQueue: MTLCommandQueue) {
         self.commandQueue = commandQueue
         super.init(frame: .zero, device: device)
-        colorPixelFormat = .bgra8Unorm
-        // Tag the drawable sRGB so the window server colour-matches it to the
-        // display profile (wave 3, audit `decode-output` #9). Without this the
-        // pipeline's sRGB-encoded values were handed to the display raw and
-        // interpreted in *its* space: on a P3 or wider panel every toned image
-        // was drawn noticeably more saturated than the exported sRGB file, so
-        // the split-toning sliders lied about the result. A neutral B&W frame is
-        // unaffected either way (R = G = B is the same neutral in any RGB
-        // space). This is also the hook to change for EDR previews later.
-        (layer as? CAMetalLayer)?.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+        // An EDR drawable: half-float, tagged **extended linear sRGB**, with
+        // extended-range content declared.
+        //
+        // Half-float because the values it carries are linear light and can
+        // exceed 1.0 — the pipeline's display output clamps at `W`, not at SDR
+        // white — and an 8-bit unorm surface can represent neither. Linear
+        // because the window server then owns the transfer function and applies
+        // the display's own, which is also what keeps the frame colour-matched
+        // to the display profile on a P3 or wider panel (wave 3, audit
+        // `decode-output` #9: untagged, sRGB-encoded values were interpreted in
+        // the display's space and every toned image was drawn more saturated
+        // than the exported file). `wantsExtendedDynamicRangeContent` is the
+        // opt-in that lets anything above 1.0 reach the panel's headroom rather
+        // than being clamped; without it the layer is an ordinary SDR surface
+        // that happens to be float.
+        colorPixelFormat = .rgba16Float
+        if let metalLayer = layer as? CAMetalLayer {
+            metalLayer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
+            metalLayer.wantsExtendedDynamicRangeContent = true
+        }
         framebufferOnly = true
         isPaused = true
         enableSetNeedsDisplay = true
         autoResizeDrawable = true
-        clearColor = MTLClearColor(red: 0.09, green: 0.09, blue: 0.10, alpha: 1)
+        // Same backdrop as the shader's, in the drawable's linear space.
+        let backdrop = CanvasColors.backdropLinear
+        clearColor = MTLClearColor(red: backdrop.0, green: backdrop.1, blue: backdrop.2, alpha: 1)
         layer?.isOpaque = true
         delegate = self
         buildPipeline()

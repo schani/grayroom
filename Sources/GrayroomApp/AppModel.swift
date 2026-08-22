@@ -56,6 +56,11 @@ final class AppModel {
     private(set) var isExporting = false
     private(set) var lastRenderMilliseconds: Double = 0
     private(set) var histogram = HistogramModel.empty
+    /// Where SDR white falls on the histogram's axis while the HDR ceiling is in
+    /// use, `nil` in SDR.
+    var sdrWhiteMarker: Double? {
+        HistogramModel.sdrWhiteMarkerPosition(displayWhite: store.edit.displayWhite)
+    }
     var statusMessage: String?
     var errorMessage: String?
 

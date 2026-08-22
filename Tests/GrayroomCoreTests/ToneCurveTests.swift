@@ -397,4 +397,115 @@ final class ToneCurveTests: XCTestCase {
                        accuracy: Double(lut.values[lut.size - 1]) * 0.01)
         XCTAssertEqual(ToneCurve.applyLUT(lut, toLuminance: 0), 0)
     }
+
+    // MARK: - The HDR display ceiling
+
+    /// The SDR LUT is **bit-identical to what it was before the ceiling became a
+    /// parameter**. Pinned against literal values rather than against a second
+    /// evaluation of the same code, so a refactor of the ceiling arithmetic that
+    /// happened to move SDR by an ulp fails here — and every existing sidecar
+    /// keeps rendering to the same bytes.
+    func testSDRLUTIsBitIdenticalToTheFixedCeiling() {
+        let lut = ToneCurve.makeLUT(for: EditState.Tone())
+        let pins: [(Int, Float)] = [
+            (0, 5.4931643e-06),
+            (1000, 0.00022755047),
+            (2000, 0.014765839),
+            (2500, 0.22363257),
+            (3000, 0.86032885),
+            (4095, 0.9993716),
+        ]
+        for (i, expected) in pins {
+            XCTAssertEqual(lut.values[i].bitPattern, expected.bitPattern,
+                           "LUT[\(i)] moved: \(lut.values[i]) != \(expected)")
+        }
+        // The default ceiling *is* SDR white.
+        XCTAssertEqual(ToneCurve.displayWhite(hdr: false), 1.0)
+        XCTAssertEqual(ToneCurve.displayWhiteEV(displayWhite: 1.0).bitPattern,
+                       ToneCurve.displayWhiteEV.bitPattern)
+    }
+
+    /// Below the shoulder knee the two modes are the **same curve**, bit for bit:
+    /// HDR buys headroom above the knee, it does not re-render the picture. That
+    /// is what makes the toggle safe to flip while editing.
+    func testTheCurveBelowTheKneeIsBitEqualInBothModes() {
+        let w = ToneCurve.hdrDisplayWhite
+        for t in [EditState.Tone(),
+                  EditState.Tone(exposure: 0.8, contrast: 40, highlights: -30,
+                                 shadows: 25, whites: 20, blacks: -15),
+                  EditState.Tone(exposure: -1.5, contrast: -60, shadows: 100)] {
+            let sdr = ToneCurve.makeLUT(for: t)
+            let hdr = ToneCurve.makeLUT(for: t, displayWhite: w)
+            XCTAssertEqual(sdr.size, hdr.size)
+            var belowKnee = 0, aboveKnee = 0
+            let clamped = t.clamped
+            for i in 0..<sdr.size {
+                let x = ToneCurve.domainMinEV
+                    + (ToneCurve.domainMaxEV - ToneCurve.domainMinEV)
+                    * Double(i) / Double(sdr.size - 1)
+                // What the shoulder is handed at this LUT entry.
+                let input = ToneCurve.zoneSumEV(ToneCurve.baselineEV(x) + clamped.exposure,
+                                                clamped)
+                if input <= ToneCurve.shoulderKneeEV {
+                    belowKnee += 1
+                    XCTAssertEqual(sdr.values[i].bitPattern, hdr.values[i].bitPattern,
+                                   "entry \(i) (shoulder input \(input) EV) differs below the knee")
+                } else {
+                    aboveKnee += 1
+                }
+            }
+            XCTAssertGreaterThan(belowKnee, 100)
+            XCTAssertGreaterThan(aboveKnee, 100)
+            // ... and above the knee it really is a different, higher curve.
+            XCTAssertGreaterThan(hdr.values[sdr.size - 1], sdr.values[sdr.size - 1] * 2)
+        }
+    }
+
+    /// The HDR shoulder keeps every property the SDR one has, with `W` in place
+    /// of 1.0: strictly increasing, and asymptotic to — never reaching — `W`.
+    func testTheHDRShoulderIsMonotoneAndStaysBelowItsCeiling() {
+        let w = ToneCurve.hdrDisplayWhite
+        let ceilingEV = ToneCurve.displayWhiteEV(displayWhite: w)
+        XCTAssertEqual(ceilingEV, log2(w / ToneCurve.pivot), accuracy: 1e-12)
+        XCTAssertEqual(ToneCurve.shoulderEV(ToneCurve.shoulderKneeEV, displayWhite: w),
+                       ToneCurve.shoulderKneeEV, accuracy: 1e-12)
+
+        var prev = -Double.infinity
+        for i in 0...4000 {
+            let y = Double(i) * 0.01
+            let s = ToneCurve.shoulderEV(y, displayWhite: w)
+            XCTAssertGreaterThan(s, prev)
+            XCTAssertLessThan(s, ceilingEV)
+            prev = s
+        }
+
+        // ... so no tone setting can push a linear value to the ceiling either.
+        let hot = EditState.Tone(exposure: 5, contrast: 100, whites: 100)
+        for y in [1.0, 10.0, 100.0] {
+            let out = ToneCurve.evaluateLinear(y, hot, displayWhite: w)
+            XCTAssertLessThan(out, w)
+            XCTAssertGreaterThan(out, 1.0, "HDR must actually use the headroom at Y=\(y)")
+        }
+
+        // The whole LUT is monotone non-decreasing and bounded by W.
+        let lut = ToneCurve.makeLUT(for: hot, displayWhite: w)
+        for i in 1..<lut.size {
+            XCTAssertGreaterThanOrEqual(lut.values[i], lut.values[i - 1], "LUT inverted at \(i)")
+        }
+        XCTAssertLessThan(lut.values[lut.size - 1], Float(w))
+    }
+
+    /// Blacks is a pedestal of 0.02 of **SDR** white in both modes: raising the
+    /// ceiling must not also move the black point, or the control would mean a
+    /// different thing on an EDR display.
+    func testTheBlackPedestalIsAbsoluteInBothModes() {
+        let w = ToneCurve.hdrDisplayWhite
+        let t = EditState.Tone(blacks: -100)
+        for y in [1e-4, 0.002, 0.01, 0.03] {
+            XCTAssertEqual(ToneCurve.evaluateLinear(y, t),
+                           ToneCurve.evaluateLinear(y, t, displayWhite: w),
+                           accuracy: 1e-12, "the crush point moved at Y=\(y)")
+        }
+        XCTAssertEqual(ToneCurve.blacksPedestal, 0.02)
+    }
 }

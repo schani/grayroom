@@ -25,6 +25,17 @@ public struct EditState: Codable, Equatable, Sendable {
     /// Brush-painted local adjustments (M3). Schema version stays 1: `masks` was
     /// already part of it, so a sidecar with `"masks": []` still decodes.
     public var masks: [Mask]
+    /// Render for an EDR (HDR) display: the tone curve's shoulder asymptotes to
+    /// `ToneCurve.hdrDisplayWhite` instead of SDR white, and the canvas shows the
+    /// result on an extended-range drawable.
+    ///
+    /// It is a **tone** setting, not a display preference, which is why it lives
+    /// in the sidecar and is undoable: it changes the rendition above the
+    /// shoulder knee. Below the knee the curve is identical either way.
+    ///
+    /// File export is always SDR, so exporting an HDR edit clips everything
+    /// above SDR white — see README, "Output modes".
+    public var hdr: Bool
 
     public init(
         version: Int = EditState.currentVersion,
@@ -33,7 +44,8 @@ public struct EditState: Codable, Equatable, Sendable {
         bwMix: BWMix = BWMix(),
         clarity: Double = 0,
         toning: Toning = Toning(),
-        masks: [Mask] = []
+        masks: [Mask] = [],
+        hdr: Bool = false
     ) {
         self.version = version
         self.whiteBalance = whiteBalance
@@ -42,10 +54,11 @@ public struct EditState: Codable, Equatable, Sendable {
         self.clarity = clarity
         self.toning = toning
         self.masks = masks
+        self.hdr = hdr
     }
 
     private enum CodingKeys: String, CodingKey {
-        case version, whiteBalance, tone, bwMix, clarity, toning, masks
+        case version, whiteBalance, tone, bwMix, clarity, toning, masks, hdr
     }
 
     public init(from decoder: Decoder) throws {
@@ -60,7 +73,14 @@ public struct EditState: Codable, Equatable, Sendable {
         clarity = min(max(try c.decodeIfPresent(Double.self, forKey: .clarity) ?? 0, 0), 100)
         toning = try c.decodeIfPresent(Toning.self, forKey: .toning) ?? Toning()
         masks = try c.decodeIfPresent([Mask].self, forKey: .masks) ?? []
+        // Absent means SDR, so every sidecar written before EDR existed loads
+        // as exactly the render it described.
+        hdr = try c.decodeIfPresent(Bool.self, forKey: .hdr) ?? false
     }
+
+    /// The display ceiling this edit renders toward, in linear units relative to
+    /// SDR white. The tone shoulder and the display output clamp share it.
+    public var displayWhite: Double { ToneCurve.displayWhite(hdr: hdr) }
 
     /// The masks that can actually change a pixel.
     public var activeMasks: [Mask] { masks.filter { !$0.isIdentity } }

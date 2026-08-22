@@ -193,6 +193,11 @@ public enum ToningWeights {
 }
 
 enum StageConstants {
+    /// The EDR display ceiling, mirrored from `ToneCurve.hdrDisplayWhite`. It is
+    /// what the display output kernel clamps at and what the histogram tap
+    /// divides by, so the shoulder's asymptote and the output's ceiling are the
+    /// same number by construction.
+    static let hdrDisplayWhite = Float(ToneCurve.hdrDisplayWhite)
     /// Split-tone authority: saturation 100 -> 0.75 mix toward the tint vector.
     static let toningStrength: Float = 0.75
     /// See `ToningWeights.crossoverHalfWidth`.
