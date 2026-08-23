@@ -186,7 +186,12 @@ final class AppModel {
             errorMessage = "Metal is unavailable: \(error)"
         }
         do {
-            library = try Library.openDefault()
+            if let override = ProcessInfo.processInfo.environment["GRAYROOM_LIBRARY"],
+               !override.isEmpty {
+                library = try Library(path: override)
+            } else {
+                library = try Library.openDefault()
+            }
         } catch {
             errorMessage = "Could not open the library: \(error). Edits will not be saved."
             // No catalog, no grid: without a library there is nothing to show
@@ -554,14 +559,13 @@ final class AppModel {
         requestRender(force: true)
     }
 
+    /// "Grayroom — Default Library", or the library's path when it is not the
+    /// default one (`GRAYROOM_LIBRARY`).
     var windowTitle: String {
-        guard let imageURL else { return "Grayroom" }
-        var parts = [imageURL.lastPathComponent]
-        parts.append(String(format: "%.0f%%", zoomPercent))
-        if lastRenderMilliseconds > 0 {
-            parts.append(String(format: "%.1f ms", lastRenderMilliseconds))
-        }
-        return parts.joined(separator: " — ")
+        guard let library else { return "Grayroom" }
+        let isDefault = (try? Library.defaultURL().standardizedFileURL.path)
+            == library.url.standardizedFileURL.path
+        return "Grayroom — " + (isDefault ? "Default Library" : library.url.path)
     }
 
     // MARK: - Render loop
