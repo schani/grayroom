@@ -328,10 +328,10 @@ enum SelfTest {
             check(!app.tasks.tasks.contains { $0.title == "Importing photos" },
                   "the import task went away when it finished")
             // Not `isBusy`: the main window is the library grid now, and its
-            // cells build thumbnails. That task is expected to be there (or
+            // cells build previews. That task is expected to be there (or
             // not, if it has already drained); what must be gone is the import.
-            check(!app.tasks.tasks.contains { $0.title != "Building thumbnails" },
-                  "the activity centre has nothing but thumbnails left "
+            check(!app.tasks.tasks.contains { $0.title != "Building previews" },
+                  "the activity centre has nothing but previews left "
                       + "(\(app.tasks.tasks.map(\.title)))")
             // Not an exact string: the file the app reopened at launch is in
             // the library by hash already, so the summary's "already in
@@ -613,9 +613,12 @@ enum SelfTest {
                       "every importable photo has a cell in the grid "
                           + "(\(missing.count - undecodable.count) unexplained, "
                           + "\(undecodable.count) undecodable, of \(expected.count))")
-                check(app.catalog.count >= expected.count,
-                      "the grid has at least the imported photos "
-                          + "(\(app.catalog.count) cells, \(expected.count) imported)")
+                // Same allowance as above: a file the decoder cannot read never
+                // becomes a photo, so it cannot be a cell either.
+                check(app.catalog.count >= expected.count - undecodable.count,
+                      "the grid has at least the photos that could be imported "
+                          + "(\(app.catalog.count) cells, \(expected.count) checked, "
+                          + "\(undecodable.count) undecodable)")
                 check(app.catalog.photos.allSatisfy { $0.firstLocation != nil },
                       "every catalogued photo has a file on disk")
                 runLibraryKeys(app: app, check: check, failures: { failures })
@@ -767,24 +770,196 @@ enum SelfTest {
         ]
 
         runSteps(steps, model: app) {
-            // 13. The cells built their thumbnails — in RAM, and on disk where
-            //     the next launch will find them.
-            let inMemory = ids.filter { app.thumbnails.cached($0) != nil }.count
-            check(inMemory > 0,
-                  "the grid built thumbnails in memory (\(inMemory) of \(ids.count))")
-            let directory = ThumbnailCache.defaultDirectory()
-            let onDisk = ((try? FileManager.default
-                .contentsOfDirectory(atPath: directory.path)) ?? [])
-                .filter { $0.hasSuffix(".jpg") }
-            check(onDisk.count >= inMemory,
-                  "…and wrote them to \(directory.path) (\(onDisk.count) files)")
-
-            // 14. What all of that looks like: one red cell, the ring on it.
+            // 13. What all of that looks like: one red cell, the ring on it.
             try? FileManager.default.createDirectory(at: outputDirectory,
                                                      withIntermediateDirectories: true)
             writeScreenshot(of: window, named: "selftest-library.png")
-            finishLibrary(failures())
+            runPreviewChecks(app: app, window: window, subject: subject,
+                             check: check, failures: failures)
         }
+    }
+
+    // MARK: - The preview checks
+
+    /// The development-aware previews, end to end: the grid builds embedded ones
+    /// for an undeveloped library, and developing a photo replaces *that* photo's
+    /// preview with a render of the edit.
+    ///
+    /// The witnesses are deliberately outside the app: `previews.sqlite` read
+    /// through a second connection, and the mean luminance of the two `CGImage`s
+    /// the grid actually held. `PreviewBuilder`'s own bookkeeping is what is
+    /// under test, so it cannot be the thing that says the test passed.
+    private static func runPreviewChecks(app: AppModel, window: NSWindow, subject: Int64,
+                                         check: @escaping (Bool, String) -> Void,
+                                         failures: @escaping () -> [String]) {
+        let ids = app.catalog.ids
+        waitForPreviews(app) {
+            // 14. Every cell the grid built has an embedded preview, in memory
+            //     and in previews.sqlite. Only the cells `LazyVGrid` realised
+            //     ask for one at all, which is why this counts them rather than
+            //     asserting over the whole library.
+            let inMemory = ids.filter { id in
+                app.catalog.photo(id: id).flatMap { app.previews.cached($0) } != nil
+            }
+            check(!inMemory.isEmpty,
+                  "the grid built previews in memory (\(inMemory.count) of \(ids.count))")
+            let embedded = inMemory.filter { storedPreview($0)?.source == .embedded }
+            check(embedded.count == inMemory.count,
+                  "…and every one of them is an embedded preview row in previews.sqlite "
+                      + "(\(embedded.count) of \(inMemory.count))")
+            let sized = inMemory.compactMap { storedPreview($0) }
+            check(sized.allSatisfy { max($0.width, $0.height) <= PreviewBuilder.pixelSize },
+                  "…at \(PreviewBuilder.pixelSize) px or less "
+                      + "(\(sized.map { "\($0.width)x\($0.height)" }.joined(separator: " ")))")
+            check(sized.allSatisfy { $0.fingerprint == nil },
+                  "…with no edit fingerprint, because an embedded preview is not "
+                      + "a rendition of an edit")
+
+            let before = app.catalog.photo(id: subject).flatMap { app.previews.cached($0) }
+            check(before != nil, "the subject has a preview to compare against")
+            let beforeLuminance = before.map(meanLuminance) ?? 0
+            log("library self-test: subject preview before the edit: "
+                + "\(before.map { "\($0.width)x\($0.height)" } ?? "none") "
+                + String(format: "mean luminance %.4f", beforeLuminance))
+
+            // 15. Develop the subject: +2 EV, autosaved, then back to the grid.
+            _ = clickCell(cellID(subject))
+            sendKey("d", modifiers: [], window: window, virtualKey: 2)
+            settle(app) {
+                guard app.mode == .develop, app.currentPhotoID == subject else {
+                    check(false, "d reopened the subject in develop")
+                    finishLibrary(failures())
+                }
+                app.store.perform("Exposure") { $0.tone.exposure = 2 }
+                check(app.store.edit.tone.exposure == 2, "the exposure change applied")
+                waitForAutosave(app) {
+                    check(!app.store.isDirty, "the autosave wrote the development")
+                    let stored = storedDevelopmentFingerprint(subject)
+                    check(stored != nil, "…and the library has a development #1 for it")
+                    check(stored == app.store.edit.fingerprint,
+                          "…whose fingerprint is the edit's own")
+                    check(app.catalog.photo(id: subject)?.developmentFingerprint == stored,
+                          "…and the catalog carries it, so the cell knows it is stale")
+                    sendKey("g", modifiers: [], window: window, virtualKey: 5)
+                    waitForRenderedPreview(app, photoID: subject, fingerprint: stored) {
+                        finishPreviewChecks(app: app, window: window, subject: subject,
+                                            fingerprint: stored,
+                                            beforeLuminance: beforeLuminance,
+                                            check: check, failures: failures)
+                    }
+                }
+            }
+        }
+    }
+
+    private static func finishPreviewChecks(app: AppModel, window: NSWindow, subject: Int64,
+                                            fingerprint: Data?, beforeLuminance: Double,
+                                            check: @escaping (Bool, String) -> Void,
+                                            failures: @escaping () -> [String]) -> Never {
+        check(app.mode == .library, "g came back to the grid")
+        let row = storedPreview(subject)
+        check(row?.source == .rendered,
+              "the subject's stored preview is a rendered one now "
+                  + "(got \(row.map { String(describing: $0.source) } ?? "no row"))")
+        check(row?.fingerprint == fingerprint,
+              "…of development #1's edit, by fingerprint")
+        check(row.map { $0.isCurrent(developmentFingerprint: fingerprint) } == true,
+              "…and therefore current")
+
+        let after = app.catalog.photo(id: subject).flatMap { app.previews.cached($0) }
+        check(after != nil, "the grid holds the new picture in memory")
+        let afterLuminance = after.map(meanLuminance) ?? 0
+        log(String(format: "library self-test: subject preview after +2 EV: mean luminance "
+                   + "%.4f (was %.4f)", afterLuminance, beforeLuminance))
+        // +2 EV is two stops of light. Anything short of a frame that was
+        // already clipped comes back visibly brighter, and "brighter" is the
+        // whole claim: the grid is showing the development, not the camera's
+        // embedded JPEG.
+        check(afterLuminance > beforeLuminance,
+              String(format: "…and it is brighter than the embedded preview was "
+                     + "(%.4f > %.4f)", afterLuminance, beforeLuminance))
+
+        try? FileManager.default.createDirectory(at: outputDirectory,
+                                                 withIntermediateDirectories: true)
+        writeScreenshot(of: window, named: "selftest-library-previews.png")
+        finishLibrary(failures())
+    }
+
+    /// Polls until the preview queue has drained.
+    private static func waitForPreviews(_ app: AppModel, then body: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            if Date() < deadline, app.tasks.tasks.contains(where: { $0.title == "Building previews" }) {
+                waitForPreviews(app, then: body)
+            } else {
+                body()
+            }
+        }
+    }
+
+    /// Polls until the store holds a rendered preview of this edit — a full
+    /// decode of a RAW at 512 px, which is seconds rather than milliseconds.
+    private static func waitForRenderedPreview(_ app: AppModel, photoID: Int64,
+                                               fingerprint: Data?,
+                                               then body: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            let row = storedPreview(photoID)
+            let ready = row?.source == .rendered && row?.fingerprint == fingerprint
+                && app.catalog.photo(id: photoID).flatMap { app.previews.cached($0) } != nil
+            if Date() < deadline, !ready {
+                waitForRenderedPreview(app, photoID: photoID, fingerprint: fingerprint, then: body)
+            } else {
+                body()
+            }
+        }
+    }
+
+    /// The autosave is a one-second timer, so this is not a `settle`.
+    private static func waitForAutosave(_ app: AppModel, then body: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            if Date() < deadline, app.store.isDirty {
+                waitForAutosave(app, then: body)
+            } else {
+                settle(app, then: body)
+            }
+        }
+    }
+
+    /// What `previews.sqlite` holds, read through its own connection — the app's
+    /// builder is what is under test, so it cannot be the witness.
+    private static func storedPreview(_ id: Int64) -> StoredPreview? {
+        guard let library = try? Library.openDefault() else { return nil }
+        defer { try? library.close() }
+        guard let store = try? PreviewStore.open(for: library) else { return nil }
+        defer { try? store.close() }
+        return (try? store.preview(for: id)) ?? nil
+    }
+
+    private static func storedDevelopmentFingerprint(_ id: Int64) -> Data? {
+        guard let library = try? Library.openDefault() else { return nil }
+        defer { try? library.close() }
+        return (((try? library.developments(for: id)) ?? []).first?.edit.fingerprint)
+    }
+
+    /// Rec.709 luminance of a `CGImage`, averaged — the one number that says
+    /// "this is a different, brighter picture" without depending on the file.
+    private static func meanLuminance(_ image: CGImage) -> Double {
+        let w = image.width, h = image.height
+        guard w > 0, h > 0,
+              let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                      bytesPerRow: w * 4, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { return 0 }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let base = context.data else { return 0 }
+        let pixels = base.assumingMemoryBound(to: UInt8.self)
+        var total = 0.0
+        for i in 0..<(w * h) {
+            let r = Double(pixels[i * 4]), g = Double(pixels[i * 4 + 1])
+            let b = Double(pixels[i * 4 + 2])
+            total += (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+        }
+        return total / Double(w * h)
     }
 
     /// The transparent `NSView` `ThumbnailGrid` puts behind each cell to catch

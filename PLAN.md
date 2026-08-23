@@ -139,7 +139,10 @@ neutral (Lightroom behavior).
 A single SQLite database (GRDB, WAL) is the source of truth for edits and
 organization. There are no sidecars. Default location
 `~/Library/Application Support/Grayroom/library.sqlite`; every entry point accepts an
-explicit DB path so tests and the CLI can use throwaway databases.
+explicit DB path so tests and the CLI can use throwaway databases. The grid's
+pictures are the one thing kept outside it — `previews.sqlite`, beside the library
+file — because they are derived data, rebuilt on demand, and nothing is lost by
+deleting them (stage 3).
 
 ### Identity
 
@@ -215,22 +218,57 @@ picked); tags are free-form many-to-many. No ratings for now.
      ratings. The keys work on the highlight in the grid and on the open photo
      in Develop, where the status bar carries a dot for it. Photo › Set Color
      Label holds the same commands.
-   - `ThumbnailCache`: `NSCache` (256 MB, cost = real bytes) over a disk cache
-     at `~/Library/Caches/Grayroom/thumbnails/<sha256>.jpg` (256 px, q 0.85,
-     ImageIO's embedded preview — never the RAW decoder). Requests are coalesced
-     per photo and carry an `isStillNeeded` check so scrolling away abandons the
-     read; the queue registers one "Building thumbnails" task in the activity
+   - **Development-aware previews.** The grid shows what a photo *looks like*,
+     which for a developed photo is not what the camera's embedded JPEG says. A
+     preview is therefore one of two things, and the row records which:
+     `source = 0` for the camera's embedded preview (a photo with no
+     development) and `source = 1` for this app's pipeline run over development
+     #1, stored alongside the `edit_fingerprint` it was rendered from. A stored
+     preview is **current** iff there is no development and the source is
+     embedded, or there is one and the source is rendered with a matching
+     fingerprint; anything else is rebuilt. Deleting the development sends the
+     cell back to the embedded preview by that same rule, with no case of its
+     own.
+   - The fingerprint is `EditState.fingerprint`: SHA-256 of the edit's canonical
+     JSON, which is `jsonData()` — sorted keys, and byte for byte what the
+     library stores in `developments.edit_json`. So `catalogSnapshot()` hashes
+     the stored text directly (`EditState.fingerprint(ofEditJSON:)`) rather than
+     decoding a hundred thousand edits to draw a grid, and the two roads reach
+     the same 32 bytes.
+   - `previews.sqlite` (GRDB, WAL, its own `DatabasePool`) sits beside
+     `library.sqlite`:
+     `previews(photo_id PK, source, edit_fingerprint, width, height, jpeg,
+     updated_at)`. It is a separate file because it is derived data — two orders
+     of magnitude larger than the catalogue, rewritten constantly, and worth
+     nothing if lost. Nothing in SQLite can cascade across files, so
+     `Library.previewStore` is the hook that takes a deleted photo's preview
+     with it. `grayroom previews stats` / `previews clear` are the debugging
+     handles.
+   - `PreviewBuilder`: `NSCache` (256 MB, cost = real bytes, keyed by photo *and*
+     fingerprint) in front of the store, and the store in front of the two
+     generators — `EmbeddedPreview.thumbnail` (ImageIO, never the RAW decoder)
+     or the real `Renderer` at 512 px, q 0.85, sRGB, aspect preserved. Requests
+     are coalesced per photo and carry an `isStillNeeded` check so scrolling
+     away abandons the read; the queue is a **stack**, so the cell the user is
+     looking at now is served before everything it flew past. Rendered previews
+     run on a `RenderService` queue of their own and are held back while the
+     develop view is busy, so an autosave's rebuild can never land in the middle
+     of a slider drag. One "Building previews" task appears in the activity
      centre while it is busy.
    - `GRAYROOM_SELFTEST=library` drives all of it in a throwaway home: import,
      then **real mouse events** (click, shift-click, cmd-click, double-click,
      with the modifier flags on the events) and **real key events** (arrows,
      shift-arrows, ⌘A, `8` → green in RAM *and* in SQLite, `8` again → cleared,
      `d` → Develop on that photo, `6` → red, `g` → back to the grid with it
-     still highlighted). Return is asserted *not* to open Develop.
+     still highlighted). Return is asserted *not* to open Develop. It then
+     checks the previews end to end: every cell the grid built has a `source = 0`
+     row in `previews.sqlite` at 512 px with no fingerprint; developing one photo
+     (+2 EV, autosaved) turns *its* row into a `source = 1` one whose fingerprint
+     is development #1's; and the picture the grid holds afterwards is measurably
+     brighter than the embedded preview it replaced.
 
    Still later: filtering (by colour, tag, camera, date), collections, the
-   filmstrip in Develop, sorting other than capture time, and thumbnails that
-   reflect the photo's development rather than its embedded preview.
+   filmstrip in Develop, and sorting other than capture time.
 
 ## Testing inputs
 

@@ -290,6 +290,52 @@ final class LibraryTests: XCTestCase {
         XCTAssertNil(photo.cameraId)
     }
 
+    // MARK: - Catalog snapshot
+
+    func testTheSnapshotCarriesDevelopmentOnesFingerprint() throws {
+        let plain = try makePhoto("plain.raw")
+        let developed = try makePhoto("developed.raw")
+        let edit = sampleEdit()
+        try library.addDevelopment(photoID: developed, edit: edit)
+
+        let summaries = try library.catalogSnapshot().summaries
+        XCTAssertNil(summaries[plain]?.developmentFingerprint,
+                     "a photo with no development has nothing to compare a preview against")
+        XCTAssertEqual(summaries[developed]?.developmentFingerprint, edit.fingerprint,
+                       "hashing the stored edit_json has to agree with hashing the EditState")
+    }
+
+    func testTheSnapshotsFingerprintMovesWhenTheDevelopmentDoes() throws {
+        let photoID = try makePhoto("a.raw")
+        let created = try library.addDevelopment(photoID: photoID, edit: EditState())
+        let before = try library.catalogSnapshot().summaries[photoID]?.developmentFingerprint
+
+        var edit = EditState()
+        edit.tone.exposure = 2
+        try library.updateDevelopment(id: XCTUnwrap(created.id), edit: edit)
+
+        let after = try library.catalogSnapshot().summaries[photoID]?.developmentFingerprint
+        XCTAssertNotEqual(after, before)
+        XCTAssertEqual(after, edit.fingerprint)
+    }
+
+    /// "Development #1" is the photo's lowest ordinal, which is what
+    /// `developments(for:)` hands back first — the two have to name the same
+    /// development or the grid would compare against an edit nothing renders.
+    func testTheSnapshotUsesTheLowestOrdinal() throws {
+        let photoID = try makePhoto("a.raw")
+        var second = EditState()
+        second.clarity = 55
+        try library.addDevelopment(photoID: photoID, edit: EditState())
+        try library.addDevelopment(photoID: photoID, edit: second)
+
+        let summaries = try library.catalogSnapshot().summaries
+        XCTAssertEqual(summaries[photoID]?.developmentCount, 2)
+        XCTAssertEqual(summaries[photoID]?.developmentFingerprint, EditState().fingerprint)
+        XCTAssertEqual(summaries[photoID]?.developmentFingerprint,
+                       try XCTUnwrap(library.developments(for: photoID).first).edit.fingerprint)
+    }
+
     // MARK: - Color label
 
     func testColorLabelRawValues() {

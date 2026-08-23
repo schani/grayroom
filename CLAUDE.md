@@ -24,4 +24,5 @@ top-left identity plate.
   stale, check the repo root for stray `*.o`/`*.d` files (SwiftPM corruption).
 - App self-tests (`GRAYROOM_SELFTEST=...`) must run with `CFFIXED_USER_HOME`
   pointed at a throwaway home so they never touch the real library.
-- The SQLite library is the only persistence; there are no sidecars.
+- `library.sqlite` is the only source of truth; there are no sidecars.
+  `previews.sqlite` beside it holds derived, disposable 512 px previews.

@@ -18,7 +18,7 @@ final class CommandParsingTests: XCTestCase {
         let names = Grayroom.configuration.subcommands.map { $0.configuration.commandName ?? "" }
         XCTAssertEqual(Set(names),
                        ["probe", "render", "mask-preview", "import", "ls", "show",
-                        "tag", "color", "developments"])
+                        "tag", "color", "developments", "previews"])
     }
 
     func testImportParsing() throws {
@@ -94,6 +94,21 @@ final class CommandParsingTests: XCTestCase {
         XCTAssertEqual(list.photo, "4")
         let set = try parse(Developments.SetDevelopment.self, ["dev", "set", "9", "clarity=20"])
         XCTAssertEqual(set.developmentID, 9)
+    }
+
+    func testPreviewsSubcommands() throws {
+        let stats = try parse(Previews.PreviewStats.self,
+                              ["previews", "stats", "--library", "/tmp/l.sqlite"])
+        XCTAssertEqual(stats.libraryOptions.libraryPath, "/tmp/l.sqlite")
+        let clear = try parse(Previews.PreviewClear.self, ["previews", "clear"])
+        XCTAssertNil(clear.libraryOptions.libraryPath)
+    }
+
+    func testPreviewSizeFormatting() {
+        XCTAssertEqual(Previews.describe(0), "0 B")
+        XCTAssertEqual(Previews.describe(512), "512 B")
+        XCTAssertEqual(Previews.describe(2048), "2.0 KB (2048 B)")
+        XCTAssertEqual(Previews.describe(3 * 1024 * 1024), "3.0 MB (3145728 B)")
     }
 
     func testRenderOptions() throws {

@@ -64,6 +64,15 @@ public final class Library {
     public let url: URL
     public let dbPool: DatabasePool
 
+    /// The grid's pictures, when whoever opened this library also opened them.
+    ///
+    /// They live in a database of their own (`previewsURL`), so nothing in
+    /// SQLite can cascade a deleted photo's preview away. This hook is where
+    /// that cascade is done by hand: set it and `deletePhoto` takes the preview
+    /// with the photo. Left `nil` — every command that never deletes anything —
+    /// the second file is not even opened.
+    public var previewStore: PreviewStore?
+
     public init(path: String) throws {
         self.url = URL(fileURLWithPath: path)
         var config = Configuration()
@@ -96,6 +105,13 @@ public final class Library {
 
     public static func openDefault() throws -> Library {
         try Library(url: try Library.defaultURL())
+    }
+
+    /// `previews.sqlite`, beside the library file. Derived data lives next to
+    /// what it is derived from so that moving a library moves its previews, and
+    /// deleting them is one `rm` on a file nothing else is in.
+    public var previewsURL: URL {
+        url.deletingLastPathComponent().appendingPathComponent("previews.sqlite")
     }
 
     public func close() throws {

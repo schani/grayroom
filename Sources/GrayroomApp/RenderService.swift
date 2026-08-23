@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import GrayroomCore
 import Metal
@@ -16,8 +17,10 @@ import Metal
 final class RenderService {
     private let queue = DispatchQueue(label: "com.grayroom.render", qos: .userInitiated)
     private let exportQueue = DispatchQueue(label: "com.grayroom.export", qos: .utility)
+    private let previewQueue = DispatchQueue(label: "com.grayroom.gridpreview", qos: .utility)
     private let renderer: Renderer
     private var exportRenderer: Renderer?
+    private var gridPreviewRenderer: Renderer?
 
     var metal: MetalContext { renderer.metal }
 
@@ -165,6 +168,31 @@ final class RenderService {
             return try r.render(rawURL: url, edit: edit, to: outputURL,
                                 format: format, quality: quality,
                                 maxDimension: nil, computeHistogram: false)
+        } completion: { completion($0) }
+    }
+
+    // MARK: - Grid previews
+
+    /// A small render of one photo for the library grid, off on its own.
+    ///
+    /// Third `Renderer`, third queue, for the same reason export has its own: a
+    /// grid preview is a full decode of a file that is *not* the one being
+    /// edited, and running it on the interactive queue would put a
+    /// hundred-megapixel demosaic in front of the next slider frame and evict
+    /// the preview's mask cache besides. `PreviewBuilder` runs one of these at a
+    /// time and holds them back while the user is editing; this end only has to
+    /// keep them off the interactive queue.
+    func renderGridPreview(url: URL, edit: EditState, maxDimension: Int,
+                           completion: @escaping (Result<CGImage, Error>) -> Void) {
+        run(previewQueue) { () -> CGImage in
+            let r: Renderer
+            if let existing = self.gridPreviewRenderer {
+                r = existing
+            } else {
+                r = try Renderer()
+                self.gridPreviewRenderer = r
+            }
+            return try r.renderPreview(url: url, edit: edit, maxDimension: maxDimension)
         } completion: { completion($0) }
     }
 

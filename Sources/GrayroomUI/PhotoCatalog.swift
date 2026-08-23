@@ -3,14 +3,14 @@ import GrayroomLibrary
 import Observation
 
 /// One photo as the library grid needs it: its row, flattened together with the
-/// three things the row does not carry (its first path, how many developments
-/// it has, its tags).
+/// four things the row does not carry (its first path, how many developments it
+/// has, its tags, and the fingerprint of development #1).
 ///
 /// A value type with no database handle in it, so the grid can hold ten
 /// thousand of these and a cell can be diffed by `==`.
 public struct CatalogPhoto: Identifiable, Equatable, Sendable {
     public var id: Int64
-    /// SHA-256 of the file — the identity, and the thumbnail cache's disk key.
+    /// SHA-256 of the file — the photo's external identity.
     public var hash: Data
     public var originalName: String
     public var capturedAt: Date?
@@ -27,6 +27,12 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
     public var firstLocation: String?
     public var developmentCount: Int
     public var tags: [String]
+    /// `EditState.fingerprint` of development #1, `nil` when the photo has no
+    /// development. It is what decides whether the grid should be showing the
+    /// camera's embedded preview or this app's render of that development — see
+    /// `StoredPreview.isCurrent(developmentFingerprint:)` — so it is held in RAM
+    /// with the rest of the row rather than looked up per cell.
+    public var developmentFingerprint: Data?
 
     public init(id: Int64,
                 hash: Data = Data(),
@@ -43,7 +49,8 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
                 color: ColorLabel = .unlabeled,
                 firstLocation: String? = nil,
                 developmentCount: Int = 0,
-                tags: [String] = []) {
+                tags: [String] = [],
+                developmentFingerprint: Data? = nil) {
         self.id = id
         self.hash = hash
         self.originalName = originalName
@@ -60,6 +67,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
         self.firstLocation = firstLocation
         self.developmentCount = developmentCount
         self.tags = tags
+        self.developmentFingerprint = developmentFingerprint
     }
 
     /// A row plus its aggregates. `nil` for a photo that has not been inserted
@@ -81,13 +89,14 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
                   color: photo.color,
                   firstLocation: summary.firstLocation,
                   developmentCount: summary.developmentCount,
-                  tags: summary.tags)
+                  tags: summary.tags,
+                  developmentFingerprint: summary.developmentFingerprint)
     }
 
     /// The file to open, when there is one.
     public var url: URL? { firstLocation.map { URL(fileURLWithPath: $0) } }
 
-    /// Lowercase hex — the thumbnail cache's filename.
+    /// Lowercase hex — how the CLI addresses this photo.
     public var hashHexString: String { FileHash.hexString(hash) }
 }
 
@@ -141,7 +150,7 @@ public final class PhotoCatalog {
 
     // MARK: - Loading
 
-    /// Reads the whole library: one snapshot, four statements, sorted here.
+    /// Reads the whole library: one snapshot, five statements, sorted here.
     public func load(from library: Library) throws {
         let snapshot = try library.catalogSnapshot()
         replace(snapshot.photos.compactMap { photo in
@@ -215,5 +224,15 @@ public final class PhotoCatalog {
     public func setDevelopmentCount(_ count: Int, for id: Int64) {
         guard let index = indexByID[id], photos[index].developmentCount != count else { return }
         photos[index].developmentCount = count
+    }
+
+    /// After development #1 is written. This is what invalidates the grid's
+    /// picture of the photo: the cell is keyed by the fingerprint, so moving it
+    /// is what makes the cell ask for a preview of the edit that was just saved
+    /// instead of the one before it.
+    public func setDevelopmentFingerprint(_ fingerprint: Data?, for id: Int64) {
+        guard let index = indexByID[id],
+              photos[index].developmentFingerprint != fingerprint else { return }
+        photos[index].developmentFingerprint = fingerprint
     }
 }

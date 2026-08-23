@@ -30,7 +30,7 @@ struct LibraryView: View {
                     LibraryCell(photo: photo,
                                 size: model.libraryThumbnailSize,
                                 isHighlighted: model.isHighlighted(photo.id),
-                                cache: model.thumbnails)
+                                previews: model.previews)
                 }
             )
             .overlay {
@@ -76,7 +76,7 @@ struct LibraryCell: View {
     let photo: CatalogPhoto
     let size: Double
     let isHighlighted: Bool
-    let cache: ThumbnailCache
+    let previews: PreviewBuilder
 
     @State private var thumbnail: CGImage?
     @State private var isVisible = true
@@ -90,7 +90,7 @@ struct LibraryCell: View {
                     Image(decorative: thumbnail, scale: 1)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                } else if cache.isMissing(photo) {
+                } else if previews.isMissing(photo) {
                     // The library remembers this photo; its file does not
                     // answer. Saying so in the cell is the whole reason the
                     // catalog carries `firstLocation`.
@@ -136,16 +136,21 @@ struct LibraryCell: View {
             thumbnail = nil
             request()
         }
+        // The photo was developed while the grid was up (or while it was not):
+        // what is on screen is a picture of the edit before this one.
+        .onChange(of: photo.developmentFingerprint) {
+            request()
+        }
     }
 
     private func request() {
-        if let cached = cache.cached(photo.id) {
+        if let cached = previews.cached(photo) {
             thumbnail = cached
             return
         }
         // The cell has been scrolled off by the time the worker gets to it:
         // that read is not worth doing, and this is how it says so.
-        cache.thumbnail(for: photo, isStillNeeded: { isVisible }) { image in
+        previews.image(for: photo, isStillNeeded: { isVisible }) { image in
             if let image { thumbnail = image }
         }
     }

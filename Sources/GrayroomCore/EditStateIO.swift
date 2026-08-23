@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum EditStateError: Error, CustomStringConvertible {
@@ -37,6 +38,35 @@ extension EditState {
 
     public func save(to url: URL) throws {
         try jsonData().write(to: url, options: .atomic)
+    }
+}
+
+// MARK: - Fingerprint
+
+extension EditState {
+    /// SHA-256 of the edit's canonical JSON — "which edit is this", in 32 bytes.
+    ///
+    /// It is what tells a stored preview apart from the development it was
+    /// rendered from: comparing whole `EditState`s would mean decoding every
+    /// stored development just to draw a grid, and comparing `updated_at` would
+    /// call a re-save with no changes in it a different picture.
+    ///
+    /// The canonical form is `jsonData()`, which sorts its keys — so the same
+    /// edit always hashes the same way, whatever order the encoder felt like
+    /// visiting the properties in. That is also exactly the text the library
+    /// stores in `developments.edit_json`, which is why `fingerprint(ofEditJSON:)`
+    /// can hash the stored bytes directly and get the same answer.
+    public var fingerprint: Data {
+        // `jsonData()` encodes a plain Codable value type with no throwing
+        // custom encoder in it, so it cannot actually fail.
+        EditState.fingerprint(ofEditJSON: (try? jsonData()) ?? Data())
+    }
+
+    /// The same hash, taken over the stored `edit_json` bytes — for the catalog
+    /// load, which reads a hundred thousand developments and has no reason to
+    /// decode any of them.
+    public static func fingerprint(ofEditJSON json: Data) -> Data {
+        Data(SHA256.hash(data: json))
     }
 }
 

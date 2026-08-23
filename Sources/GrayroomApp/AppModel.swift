@@ -71,7 +71,8 @@ final class AppModel {
     /// consumed by the view. This is what makes `g` from the develop view land
     /// on the photo you were just editing rather than at the top of the grid.
     var libraryScrollTarget: Int64?
-    let thumbnails = ThumbnailCache()
+    /// The grid's pictures, development-aware — see `PreviewBuilder`.
+    let previews = PreviewBuilder()
 
     // MARK: Document
 
@@ -145,6 +146,10 @@ final class AppModel {
     /// refine is owed as soon as the loop has nothing newer to do.
     private var lastRenderWasDraft = false
     private var renderInFlight = false
+    /// When the user last moved something. Grid previews stay off the GPU for
+    /// `editingQuietPeriod` after it.
+    private var lastEditAt = Date.distantPast
+    static let editingQuietPeriod: TimeInterval = 0.5
     private var autosaveTask: Task<Void, Never>?
 
     /// The library, opened once at launch. `nil` means it could not be opened —
@@ -188,12 +193,43 @@ final class AppModel {
             // in the library mode, so the app opens straight into develop.
             mode = .develop
         }
+        // Derived data, in its own database beside the library: losing it costs
+        // time and nothing else. A library that would not open has no previews
+        // either, and the grid falls back to reading each file directly.
+        if let library {
+            do {
+                let store = try PreviewStore.open(for: library)
+                library.previewStore = store
+                previews.previews = store
+            } catch {
+                errorMessage = "Could not open the preview store: \(error)"
+            }
+        }
         reloadCatalog()
         store.onChange = { [weak self] invalidation in
             self?.editChanged(invalidation)
         }
         importModel.tasks = tasks
-        thumbnails.tasks = tasks
+        previews.tasks = tasks
+        previews.library = library
+        previews.render = { [weak self] url, edit, done in
+            guard let service = self?.service else {
+                done(nil)
+                return
+            }
+            service.renderGridPreview(url: url, edit: edit,
+                                      maxDimension: PreviewBuilder.pixelSize) { result in
+                done(try? result.get())
+            }
+        }
+        // A grid preview is a whole decode. Held back while the develop view is
+        // busy, it costs nothing; run in the middle of a slider drag it is a
+        // visible stall on the frame the user is dragging.
+        previews.isEditingActive = { [weak self] in
+            guard let self else { return false }
+            return self.renderInFlight
+                || Date().timeIntervalSince(self.lastEditAt) < AppModel.editingQuietPeriod
+        }
         // Identity in this library is the file's bytes, so "already imported"
         // is a hash question, not a path question — and it takes both halves:
         // a photo the library knows but has no location for is one whose files
@@ -272,7 +308,7 @@ final class AppModel {
 
     // MARK: - Library mode
 
-    /// Re-reads the whole catalog. Cheap enough to do outright: four statements
+    /// Re-reads the whole catalog. Cheap enough to do outright: five statements
     /// against a local SQLite file, and the result is what the grid holds.
     func reloadCatalog() {
         guard let library else { return }
@@ -532,6 +568,7 @@ final class AppModel {
 
     private func editChanged(_ invalidation: RenderInvalidation) {
         guard invalidation != .none else { return }
+        lastEditAt = Date()
         requestRender()
         // A state that came from the library is not dirty, and rewriting the
         // development just because it was read would be silly.
@@ -750,6 +787,16 @@ final class AppModel {
                     max(catalog.photo(id: photoID)?.developmentCount ?? 0, 1), for: photoID)
             }
             store.markSaved()
+            // The grid is now showing a picture of the edit *before* this one.
+            // Moving the fingerprint is what tells the cell so; dropping the
+            // cached image and asking for the new one now is what makes `g`
+            // land on the edited look rather than on a stale frame that
+            // refreshes a second later.
+            catalog.setDevelopmentFingerprint(edit.fingerprint, for: photoID)
+            previews.invalidate(photoID: photoID)
+            if let photo = catalog.photo(id: photoID) {
+                previews.image(for: photo) { _ in }
+            }
             if announce { statusMessage = "Saved to the library" }
         } catch {
             errorMessage = "Could not save the edit: \(error)"

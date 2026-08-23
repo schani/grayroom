@@ -11,11 +11,17 @@ public struct PhotoSummary: Equatable, Sendable {
     public var developmentCount: Int
     /// Tag names, alphabetically.
     public var tags: [String]
+    /// `EditState.fingerprint` of development #1, and `nil` for a photo that has
+    /// no development — which is what the grid compares its stored preview
+    /// against, so it has to come along with the snapshot.
+    public var developmentFingerprint: Data?
 
-    public init(firstLocation: String? = nil, developmentCount: Int = 0, tags: [String] = []) {
+    public init(firstLocation: String? = nil, developmentCount: Int = 0, tags: [String] = [],
+                developmentFingerprint: Data? = nil) {
         self.firstLocation = firstLocation
         self.developmentCount = developmentCount
         self.tags = tags
+        self.developmentFingerprint = developmentFingerprint
     }
 }
 
@@ -88,10 +94,14 @@ extension Library {
         }
     }
 
-    /// Cascades: the photo's locations, developments and tag links go with it.
+    /// Cascades: the photo's locations, developments and tag links go with it,
+    /// and so does its preview when `previewStore` is wired up — that one is a
+    /// different database file, so SQLite cannot do it for us.
     @discardableResult
     public func deletePhoto(id: Int64) throws -> Bool {
-        try dbPool.write { db in try Photo.deleteOne(db, key: id) }
+        let deleted = try dbPool.write { db in try Photo.deleteOne(db, key: id) }
+        if deleted { try previewStore?.delete(photoID: id) }
+        return deleted
     }
 
     public func setColor(photoID: Int64, _ color: ColorLabel) throws {
@@ -123,10 +133,10 @@ extension Library {
     /// Everything the grid needs about every photo, read as one consistent
     /// snapshot.
     ///
-    /// Four statements, no `N+1`: the photos themselves plus three aggregates
+    /// Five statements, no `N+1`: the photos themselves plus four aggregates
     /// keyed by photo id. A grid of ten thousand frames that asked the database
     /// for each photo's first path, development count and tags separately would
-    /// issue thirty thousand queries to draw one screen; this issues four and
+    /// issue thirty thousand queries to draw one screen; this issues five and
     /// joins them in RAM, which is what `PhotoCatalog` then holds.
     ///
     /// They run inside one `read`, so the aggregates cannot describe a
@@ -155,6 +165,23 @@ extension Library {
             for row in developments {
                 let id: Int64 = row["photo_id"]
                 summaries[id, default: PhotoSummary()].developmentCount = row["n"]
+            }
+            // Development #1's fingerprint, hashed straight off the stored text.
+            // `#1` is the photo's lowest ordinal — the same one `developments(for:)`
+            // hands back first — and the JSON is hashed rather than decoded
+            // because decoding a hundred thousand `EditState`s to draw a grid
+            // would be the slowest thing the app does.
+            let firstEdits = try Row.fetchAll(db, sql: """
+                SELECT d.photo_id AS photo_id, d.edit_json AS edit_json FROM developments d \
+                JOIN (SELECT photo_id, MIN(ordinal) AS ordinal FROM developments \
+                GROUP BY photo_id) m \
+                ON m.photo_id = d.photo_id AND m.ordinal = d.ordinal
+                """)
+            for row in firstEdits {
+                let id: Int64 = row["photo_id"]
+                let json: String = row["edit_json"]
+                summaries[id, default: PhotoSummary()].developmentFingerprint =
+                    EditState.fingerprint(ofEditJSON: Data(json.utf8))
             }
             // Not GROUP BY / group_concat: a tag name may contain the separator,
             // and the join is one scan of a table that is small by construction.

@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Metal
 
@@ -45,5 +46,24 @@ public final class Renderer {
                       histogram: result.histogram,
                       temperature: decoded.temperature,
                       tint: decoded.tint)
+    }
+
+    /// The same decode → pipeline path as `render(rawURL:…)`, small, and handed
+    /// back as an sRGB `CGImage` instead of a file.
+    ///
+    /// This is what the library grid's rendered previews are made of, so it goes
+    /// through the *real* pipeline rather than anything cheaper: a preview whose
+    /// tone curve or B&W mix differed from the develop view's would be a picture
+    /// of a photo that does not exist. The cost is the decode — capped by
+    /// `maxDimension`, though a RAW still demosaics at full size before it can
+    /// be reduced.
+    ///
+    /// Output mode is `.file`: the grid is an SDR surface, so a preview of an
+    /// HDR edit is that rendition clipped at SDR white, exactly like an export.
+    public func renderPreview(url: URL, edit: EditState, maxDimension: Int) throws -> CGImage {
+        let decoded = try decoder.decode(url: url, edit: edit, maxDimension: maxDimension)
+        let result = try pipeline.render(input: decoded.texture, edit: edit)
+        return try ImageWriter.makeCGImage(TextureReadback.read(result.texture),
+                                           bitsPerComponent: 8)
     }
 }
