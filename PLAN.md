@@ -181,8 +181,56 @@ picked); tags are free-form many-to-many. No ratings for now.
    `render` takes its edit from the library (`--development`) or `--edit file.json`.
    Sidecar code removed entirely. App: `open` hashes, looks up/creates the photo,
    loads/autosaves development #1 from the library.
-3. Browser UI (grid/filmstrip fed by `ValueObservation`), thumbnail cache keyed by
-   (photo, development). Later.
+3. **Library module.** The app has Lightroom's two modules and Lightroom's keys
+   for them: `g` for the Library grid, `d` for Develop, both as bare-key menu
+   items (View › Library / Develop) so they work wherever the focus is. It opens
+   in the Library unless launched at a file (argument or Finder), which is a
+   request to develop that file.
+
+   - `PhotoCatalog` (in `GrayroomUI`) holds the whole library in RAM — one
+     `CatalogPhoto` per photo, sorted by capture date with undated frames last —
+     built from a single `Library.catalogSnapshot()`: the photo rows plus three
+     GROUP BY aggregates (first location `MIN(path)`, development count, tags).
+     No query while scrolling; selection is a set of row ids.
+   - Grid: adaptive `LazyVGrid`, thumbnail-size slider (same default as the
+     import window), "N photos · M selected", a cell per photo showing the
+     picture fitted in a square, the filename, a badge when the photo has a
+     development, and an exclamation badge when its file is missing.
+   - Selection: `GridSelection<ID>` — plain click, shift-range in displayed
+     order, cmd-click toggle, ⌘A, arrows by one/by a row and shift-arrow to grow
+     the range from a fixed anchor (Finder/Lightroom semantics: the anchor stays,
+     the moving end walks) — shared with the import window, which keeps its own
+     checkbox semantics on top.
+   - The grid itself is `ThumbnailGrid`, shared by both windows: adaptive
+     layout, the column arithmetic the arrows need, scroll-to-a-cell, and a
+     `ClickCatcher` `NSView` behind each cell that reads the modifiers off the
+     real `NSEvent` (a tap gesture cannot see them).
+   - The keyboard is **not** view focus. One local `NSEvent` monitor
+     (`KeyRouter`) dispatches every bare key by key window and mode, so the
+     arrows keep working after a click on the toolbar or the size slider, and
+     stands aside for text fields, sheets and panels.
+   - Colour labels, Lightroom's keys: `6`/`7`/`8`/`9` = red/yellow/green/blue,
+     purple menu-only (Lightroom gives it no key), the same key again clears the
+     label, and `1`–`5` are left alone because they are Lightroom's star
+     ratings. The keys work on the highlight in the grid and on the open photo
+     in Develop, where the status bar carries a dot for it. Photo › Set Color
+     Label holds the same commands.
+   - `ThumbnailCache`: `NSCache` (256 MB, cost = real bytes) over a disk cache
+     at `~/Library/Caches/Grayroom/thumbnails/<sha256>.jpg` (256 px, q 0.85,
+     ImageIO's embedded preview — never the RAW decoder). Requests are coalesced
+     per photo and carry an `isStillNeeded` check so scrolling away abandons the
+     read; the queue registers one "Building thumbnails" task in the activity
+     centre while it is busy.
+   - `GRAYROOM_SELFTEST=library` drives all of it in a throwaway home: import,
+     then **real mouse events** (click, shift-click, cmd-click, double-click,
+     with the modifier flags on the events) and **real key events** (arrows,
+     shift-arrows, ⌘A, `8` → green in RAM *and* in SQLite, `8` again → cleared,
+     `d` → Develop on that photo, `6` → red, `g` → back to the grid with it
+     still highlighted). Return is asserted *not* to open Develop.
+
+   Still later: filtering (by colour, tag, camera, date), collections, the
+   filmstrip in Develop, sorting other than capture time, and thumbnails that
+   reflect the photo's development rather than its embedded preview.
 
 ## Testing inputs
 

@@ -85,20 +85,9 @@ public enum ImportSortOrder: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// Which modifier keys were down for a click.
-///
-/// Deliberately not SwiftUI's `EventModifiers`: this type is the reason the
-/// selection rules can be tested without a view, and dragging SwiftUI into the
-/// library target to name two bits would undo that.
-public struct ImportClickModifiers: OptionSet, Sendable {
-    public let rawValue: Int
-    public init(rawValue: Int) { self.rawValue = rawValue }
-
-    /// Extend the highlight from the anchor to the clicked item.
-    public static let shift = ImportClickModifiers(rawValue: 1 << 0)
-    /// Toggle the clicked item's membership in the highlight.
-    public static let command = ImportClickModifiers(rawValue: 1 << 1)
-}
+/// The import grid's clicks carry the same two modifiers every grid's do; the
+/// rules live in `GridSelection`.
+public typealias ImportClickModifiers = GridClickModifiers
 
 /// The import grid's two independent selections, and the rules that connect
 /// them.
@@ -121,14 +110,19 @@ public struct ImportClickModifiers: OptionSet, Sendable {
 /// Everything here is a value type with no dependencies beyond Foundation, so
 /// the whole set of rules is unit-testable — which is the point, given that the
 /// app target it is used from cannot be imported by a test target at all.
+///
+/// The *highlight* half is `GridSelection`, shared with the library grid; what
+/// is left here is the checking, the sorting and the filtering, which only this
+/// window has.
 public struct ImportSelection: Equatable, Sendable {
     /// Scan order (by path). The sorts below are defined relative to this, so
     /// "stable" has a fixed meaning.
     public private(set) var entries: [ImportEntry]
+    private var grid = GridSelection<URL>()
     /// What the ring is drawn around.
-    public private(set) var highlighted: Set<URL> = []
+    public var highlighted: Set<URL> { grid.highlighted }
     /// Where a shift-click measures its range from.
-    public private(set) var anchor: URL?
+    public var anchor: URL? { grid.anchor }
     public var sort: ImportSortOrder = .captureTime
     /// On by default. Re-pointing the window at a card you have already
     /// imported half of should show you the half that is still to do, not make
@@ -144,8 +138,7 @@ public struct ImportSelection: Equatable, Sendable {
     /// Replaces the whole list; the highlight does not survive a rescan.
     public mutating func setEntries(_ entries: [ImportEntry]) {
         self.entries = entries
-        highlighted = []
-        anchor = nil
+        grid.clear()
     }
 
     /// The scan's answer for one file, arriving well after the grid drew it.
@@ -206,49 +199,25 @@ public struct ImportSelection: Equatable, Sendable {
 
     // MARK: - Highlighting
 
+    /// A click on a file the grid does not have is ignored — the entry list,
+    /// not the visible one, so a click that arrives for a row the filter has
+    /// just hidden still means something.
     public mutating func click(_ url: URL, modifiers: ImportClickModifiers = []) {
         guard entries.contains(where: { $0.url == url }) else { return }
-        if modifiers.contains(.shift), let anchor, anchor != url {
-            let order = visibleEntries.map(\.url)
-            if let from = order.firstIndex(of: anchor), let to = order.firstIndex(of: url) {
-                highlighted = Set(order[min(from, to)...max(from, to)])
-                // The anchor deliberately stays put, so dragging the shift-click
-                // around grows and shrinks one range instead of ratcheting.
-                return
-            }
-        }
-        if modifiers.contains(.command) {
-            if highlighted.contains(url) {
-                highlighted.remove(url)
-                if anchor == url { anchor = highlighted.first }
-            } else {
-                highlighted.insert(url)
-                anchor = url
-            }
-            return
-        }
-        highlighted = [url]
-        anchor = url
+        grid.click(url, modifiers: modifiers, order: visibleEntries.map(\.url))
     }
 
     /// Left/right by one, up/down by a row, in visible order. `columns` is the
     /// grid's current column count, which only the view knows.
     public mutating func moveHighlight(dx: Int, dy: Int, columns: Int) {
-        let order = visibleEntries.map(\.url)
-        guard !order.isEmpty else { return }
-        let step = dx + dy * max(columns, 1)
-        guard let current = anchor.flatMap(order.firstIndex(of:))
-            ?? highlighted.compactMap(order.firstIndex(of:)).min()
-        else {
-            // Nothing highlighted yet: the first arrow key lands on the first
-            // cell rather than doing nothing.
-            highlighted = [order[0]]
-            anchor = order[0]
-            return
-        }
-        let next = min(max(current + step, 0), order.count - 1)
-        highlighted = [order[next]]
-        anchor = order[next]
+        grid.moveHighlight(dx: dx, dy: dy, columns: columns,
+                           order: visibleEntries.map(\.url))
+    }
+
+    /// Shift-arrow: grow or shrink the range from the anchor.
+    public mutating func extendHighlight(dx: Int, dy: Int, columns: Int) {
+        grid.extendHighlight(dx: dx, dy: dy, columns: columns,
+                             order: visibleEntries.map(\.url))
     }
 
     // MARK: - Checking

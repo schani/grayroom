@@ -9,13 +9,14 @@ import Metal
 import Observation
 import UniformTypeIdentifiers
 
-/// `GRAYROOM_SELFTEST=paint|undo|import swift run GrayroomApp <file.DNG>`
+/// `GRAYROOM_SELFTEST=paint|undo|import|library swift run GrayroomApp <file.DNG>`
 ///
 /// Whole-app checks, each in its own process: `paint` (a stroke drawn with real
 /// mouse events), `undo` (Cmd-Z / Cmd-Shift-Z pushed through the real menu-bar
-/// key-equivalent path) and `import` (the second window scene, its menu item,
-/// its grid and its selection commands). All print PASS/FAIL lines and exit
-/// non-zero on failure.
+/// key-equivalent path), `import` (the second window scene, its menu item, its
+/// grid and its selection commands) and `library` (the grid, the g/d module
+/// keys and the colour-label keys, all as real keystrokes). All print PASS/FAIL
+/// lines and exit non-zero on failure.
 ///
 /// Repro (c): the whole app, in its own process, painting a stroke with real
 /// `NSEvent`s and then telling you — on stdout, in the library and in a
@@ -52,6 +53,19 @@ enum SelfTest {
         /// `HOME` alone is not enough: Foundation resolves Application Support
         /// from `CFFIXED_USER_HOME` or the passwd entry, not from `HOME`.
         case importWindow = "import"
+        /// The Library module: that the app starts there, that the grid has a
+        /// cell per photo, that clicks and arrows move the ring, and that
+        /// Lightroom's keys — `8` for green, `6` for red, `d` and `g` for the
+        /// two modules — do what they do in Lightroom, pushed in as real
+        /// keystrokes through the menu-bar key-equivalent path.
+        ///
+        /// It imports into the library, so run it against a throwaway home:
+        ///
+        /// ```
+        /// CFFIXED_USER_HOME=$(mktemp -d) GRAYROOM_SELFTEST=library \
+        ///     swift run GrayroomApp
+        /// ```
+        case library
     }
 
     static var mode: Mode? {
@@ -69,11 +83,24 @@ enum SelfTest {
 
     static func startIfRequested() {
         guard isRequested else { return }
+        // These tests open photos, and opening a photo is what the app reopens
+        // at the next launch — a preference `CFFIXED_USER_HOME` does *not*
+        // redirect, because cfprefsd keys off the real user. Left alone it
+        // leaks into the next self-test's library (measured: it made the import
+        // test's "the JPEG is new to the library" fail on every second run), so
+        // the grid tests put it back before they exit.
+        previousLastFile = UserDefaults.standard.string(forKey: AppModel.lastFileDefaultsKey)
         // The import window does not need a document, so it does not wait for
         // one — pointing this mode at a RAW file just to get past the poll
         // would be a decode the test has no use for.
         if mode == .importWindow {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { runImportWindow() }
+            return
+        }
+        // Same reason: the library test starts from an empty library and no
+        // document at all — waiting for a first render would wait forever.
+        if mode == .library {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { runLibrary() }
             return
         }
         log("self-test: waiting for the first render")
@@ -200,6 +227,58 @@ enum SelfTest {
                 model.click(visible[1].url, modifiers: .command)
                 check(model.highlighted == [visible[1].url, visible[2].url],
                       "cmd-click added to the highlight")
+
+                // The mouse, for real. The grid puts a click catcher *behind*
+                // each cell and leaves the checkbox in front of it, and the two
+                // halves of that arrangement are exactly what can break: a
+                // catcher that gets nothing, or a catcher that swallows the
+                // checkbox.
+                let target = visible[0]
+                NSApp.activate(ignoringOtherApps: true)
+                window?.makeKeyAndOrderFront(nil)
+                model.click(visible[3].url, modifiers: [])
+                if clickCell(cellID(target.url)) {
+                    check(model.highlighted == [target.url],
+                          "a real click on a cell moved the ring")
+                } else {
+                    check(false, "the import grid has a click target behind its cells")
+                }
+                model.click(visible[3].url, modifiers: [])
+
+                // The checkbox has to stay *in front of* the catcher. That is a
+                // hit-testing fact, and asking AppKit directly is the
+                // deterministic way to establish it: the click below only acts
+                // when the window is key, which AppKit decides and a test
+                // process cannot always arrange (measured — one run in three).
+                let checkbox = CGPoint(x: 11, y: 11)
+                let hit = cellView(cellID(target.url)).flatMap { view -> NSView? in
+                    let point = view.convert(CGPoint(x: view.bounds.minX + checkbox.x,
+                                                     y: view.bounds.maxY - checkbox.y), to: nil)
+                    return view.window?.contentView?.hitTest(point)
+                }
+                log("import self-test: the checkbox point hits "
+                    + (hit.map { String(describing: type(of: $0)) } ?? "nothing"))
+                check(hit != nil && !(hit is ClickCatcherView),
+                      "a click at the checkbox reaches the checkbox, not the catcher behind it")
+
+                let checkedBefore = model.checkedCount
+                _ = clickCell(cellID(target.url), fromTopLeft: checkbox)
+                if window?.isKeyWindow == true {
+                    check(model.checkedCount != checkedBefore,
+                          "a click on the checkbox ticked it (\(checkedBefore) -> "
+                              + "\(model.checkedCount))")
+                    check(model.highlighted == [visible[3].url],
+                          "…and did not fall through to the click catcher underneath")
+                    // Put it back, so the import below takes what it would have.
+                    _ = clickCell(cellID(target.url), fromTopLeft: checkbox)
+                    check(model.checkedCount == checkedBefore, "clicking it again put it back")
+                } else {
+                    // AppKit does not hand a control the click that makes its
+                    // window key; it activates the window with it instead. In
+                    // that state there is nothing to assert about the toggle.
+                    log("import self-test: the import window is not key — skipped the "
+                        + "checkbox *click* (the hit test above still ran)")
+                }
             } else {
                 check(false, "at least four files to drive the commands with")
             }
@@ -248,14 +327,30 @@ enum SelfTest {
             check(peak > 0, "the import task reported progress (reached \(peak))")
             check(!app.tasks.tasks.contains { $0.title == "Importing photos" },
                   "the import task went away when it finished")
-            check(!app.tasks.isBusy, "the activity centre is idle again")
+            // Not `isBusy`: the main window is the library grid now, and its
+            // cells build thumbnails. That task is expected to be there (or
+            // not, if it has already drained); what must be gone is the import.
+            check(!app.tasks.tasks.contains { $0.title != "Building thumbnails" },
+                  "the activity centre has nothing but thumbnails left "
+                      + "(\(app.tasks.tasks.map(\.title)))")
             // Not an exact string: the file the app reopened at launch is in
             // the library by hash already, so the summary's "already in
             // library" clause may or may not be there.
             let status = app.statusMessage ?? "nil"
             check(status.hasPrefix("Imported "),
                   "the final status reports the import (got \(status))")
-            check(!status.contains("failed"), "no file failed to import (got \(status))")
+            // A file the decoder cannot read at all (a camera Apple's RAW
+            // support does not know yet) fails the import legitimately, and
+            // `testdata` is a personal folder that grows. So the assertion is
+            // not "nothing failed" but "nothing failed that could have worked".
+            let undecodable = model.items.filter { !canDecode($0.url) }
+            if !undecodable.isEmpty {
+                log("import self-test: the decoder cannot read "
+                    + undecodable.map(\.filename).joined(separator: ", "))
+            }
+            check(status.contains("failed") == !undecodable.isEmpty,
+                  "the only import failures are the \(undecodable.count) file(s) the "
+                      + "decoder cannot read (got \(status))")
             log("import self-test: imported \(expected) checked file(s) -> \(status)")
             // The editor's own decode path, on a standard image rather than a
             // RAW: dispatch reaches the window, not just the grid.
@@ -370,6 +465,7 @@ enum SelfTest {
     }
 
     private static func finishImport(_ failures: [String]) -> Never {
+        restoreLastOpenedFile()
         if failures.isEmpty {
             log("import self-test: PASS")
             exit(0)
@@ -425,12 +521,390 @@ enum SelfTest {
         guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow,
                                                   CGWindowID(window.windowNumber),
                                                   [.boundsIgnoreFraming, .bestResolution]) else {
-            log("import self-test: CGWindowListCreateImage returned nil "
+            log("self-test: CGWindowListCreateImage returned nil "
                 + "(screen-recording permission?)")
             return
         }
         write(image, to: url)
-        log("import self-test: wrote \(url.path) (\(image.width)x\(image.height))")
+        log("self-test: wrote \(url.path) (\(image.width)x\(image.height))")
+    }
+
+    // MARK: - The library test
+
+    /// Imports `testdata` into a throwaway library and then drives the grid the
+    /// way a user does: a click, an arrow, a shift-click, and Lightroom's keys
+    /// as **real keystrokes** through `NSApp.sendEvent`.
+    ///
+    /// The keystrokes are the point. `6`–`9`, `g` and `d` are bare-key menu
+    /// equivalents, which AppKit matches before the event reaches any view — so
+    /// the only way to know they work is to push a real key event in and see
+    /// what the library and the database say afterwards. A unit test on
+    /// `AppModel` would prove nothing about the menu.
+    private static func runLibrary() {
+        var failures: [String] = []
+        func check(_ ok: Bool, _ what: String) {
+            log("library self-test: \(ok ? "PASS" : "FAIL") — \(what)")
+            if !ok { failures.append(what) }
+        }
+        let app = AppModel.shared
+
+        dumpMenus()
+
+        // 1. No file argument: the app comes up in the Library, on an empty
+        //    throwaway library, with no develop canvas in the window at all.
+        check(app.mode == .library, "the app started in the library (got \(app.mode.rawValue))")
+        // Both things that can put it in develop instead, on the record: a file
+        // named on the command line, and a library that would not open.
+        log("library self-test: args=\(Array(CommandLine.arguments.dropFirst())) "
+            + "keyWindow=\(NSApp.keyWindow?.title ?? "nil") "
+            + "mainWindow=\(NSApp.mainWindow?.title ?? "nil") "
+            + "error=\(app.errorMessage ?? "none")")
+        check(findCanvas() == nil, "the develop canvas is not in the window in library mode")
+        // Not asserted to be empty: `CFFIXED_USER_HOME` moves the library but
+        // not `cfprefsd`, so the app may still reopen — and therefore import —
+        // the file the *real* user last had open, on a background queue whose
+        // timing this test does not control. The import below is checked by
+        // hash instead of by count.
+        log("library self-test: the library starts with \(app.catalog.count) photo(s)")
+
+        // 2. Lightroom's keys, as AppKit sees them. A disabled item would
+        //    swallow its key equivalent silently (see UndoMenu.swift).
+        for (title, key) in [("Library", "g"), ("Develop", "d"), ("Red", "6"),
+                             ("Yellow", "7"), ("Green", "8"), ("Blue", "9")] {
+            let item = findMenuItemDeep(titled: title)
+            check(item?.keyEquivalent == key,
+                  "'\(title)' carries the bare key '\(key)' (got '\(item?.keyEquivalent ?? "missing")')")
+            check(item?.keyEquivalentModifierMask.isEmpty == true, "'\(title)' has no modifiers")
+            check(item?.isEnabled == true, "'\(title)' is enabled")
+        }
+        // Lightroom gives purple no key; neither do we.
+        let purple = findMenuItemDeep(titled: "Purple")
+        check(purple != nil, "Purple is in the menu")
+        check(purple?.keyEquivalent.isEmpty == true, "Purple has no key equivalent, as in Lightroom")
+
+        // 3. Fill the library through the real import path.
+        let path = ProcessInfo.processInfo.environment["GRAYROOM_SELFTEST_IMPORT_DIR"] ?? "testdata"
+        let source = stageSourceWithAJPEG(URL(fileURLWithPath: path, isDirectory: true))
+        log("library self-test: importing \(source.path)")
+        app.importModel.setSource(source)
+        waitForScan(app.importModel) {
+            // By hash, not by count: the reopened last file (see above) may be
+            // importing itself in the background while this runs, so "how many
+            // photos" is not a number this test can pin down. "Every file I
+            // imported has a cell" is.
+            let expected = Set(app.importModel.checkedEntries.compactMap(\.hash)
+                .map { $0.lowercased() })
+            app.importModel.runImport()
+            waitForImportToFinish(app) { _ in
+                check(app.mode == .library, "the import did not change modules")
+                let inCatalog = Set(app.catalog.photos.map { $0.hashHexString.lowercased() })
+                // Missing is only allowed for a file the decoder cannot read —
+                // `testdata` is a personal folder and may hold a camera Apple's
+                // RAW support does not know.
+                let missing = expected.subtracting(inCatalog)
+                let undecodable = missing.filter { hash in
+                    guard let url = app.importModel.checkedEntries
+                        .first(where: { $0.hash?.lowercased() == hash })?.url
+                    else { return false }
+                    log("library self-test: no cell for \(url.lastPathComponent)")
+                    return !canDecode(url)
+                }
+                check(missing.count == undecodable.count,
+                      "every importable photo has a cell in the grid "
+                          + "(\(missing.count - undecodable.count) unexplained, "
+                          + "\(undecodable.count) undecodable, of \(expected.count))")
+                check(app.catalog.count >= expected.count,
+                      "the grid has at least the imported photos "
+                          + "(\(app.catalog.count) cells, \(expected.count) imported)")
+                check(app.catalog.photos.allSatisfy { $0.firstLocation != nil },
+                      "every catalogued photo has a file on disk")
+                runLibraryKeys(app: app, check: check, failures: { failures })
+            }
+        }
+    }
+
+    private static func runLibraryKeys(app: AppModel,
+                                       check: @escaping (Bool, String) -> Void,
+                                       failures: @escaping () -> [String]) {
+        let ids = app.catalog.ids
+        guard ids.count >= 4, let window = KeyRouter.mainWindow() else {
+            check(false, "four photos and a window to drive the grid with")
+            finishLibrary(failures())
+        }
+        let subject = ids[1]
+        var subjectName = app.catalog.photo(id: subject)?.originalName ?? "?"
+
+        let steps: [() -> Void] = [
+            {
+                // 4. Multi-select, driven by **real mouse events** carrying
+                //    real modifier flags. Not `NSEvent.modifierFlags` and not a
+                //    tap gesture: see `ThumbnailGrid`.
+                check(cellView(cellID(ids[0])) != nil,
+                      "the grid put a click target behind every cell")
+                check(clickCell(cellID(ids[0])), "clicked the first cell")
+                check(app.highlightedPhotoIDs == [ids[0]],
+                      "a plain click selects one (\(app.librarySelection.count))")
+                check(app.libraryCountLabel.hasSuffix("· 1 selected"),
+                      "the bottom bar says so (\(app.libraryCountLabel))")
+
+                check(clickCell(cellID(ids[2]), modifiers: .shift), "shift-clicked the third cell")
+                check(app.highlightedPhotoIDs == [ids[0], ids[1], ids[2]],
+                      "shift-click selects the range of three "
+                          + "(\(app.librarySelection.count))")
+                check(app.libraryCountLabel.hasSuffix("· 3 selected"),
+                      "the bottom bar says three (\(app.libraryCountLabel))")
+
+                check(clickCell(cellID(ids[1]), modifiers: .command), "cmd-clicked the middle cell")
+                check(app.highlightedPhotoIDs == [ids[0], ids[2]],
+                      "cmd-click toggles one out of the selection "
+                          + "(\(app.librarySelection.count))")
+                check(app.libraryCountLabel.hasSuffix("· 2 selected"),
+                      "the bottom bar says two (\(app.libraryCountLabel))")
+
+                // ⌘A is a key, and it is *not* a menu item — the router owns it.
+                sendKey("a", modifiers: .command, window: window, virtualKey: 0)
+            },
+            {
+                check(app.librarySelection.count == ids.count,
+                      "cmd-A selected all \(ids.count) (\(app.librarySelection.count))")
+                check(app.libraryCountLabel.hasSuffix("· \(ids.count) selected"),
+                      "the bottom bar says all of them (\(app.libraryCountLabel))")
+
+                // 5. Arrows, bare and with shift, after a click somewhere else
+                //    in the window — the case SwiftUI focus got wrong.
+                _ = clickCell(cellID(ids[0]))
+                sendKey("", modifiers: [], window: window, virtualKey: 124)   // →
+            },
+            {
+                check(app.highlightedPhotoIDs == [ids[1]],
+                      "the right arrow moved the highlight by one")
+                sendKey("", modifiers: .shift, window: window, virtualKey: 124)
+            },
+            {
+                check(app.highlightedPhotoIDs == [ids[1], ids[2]],
+                      "shift-right extended the range from the anchor "
+                          + "(\(app.librarySelection.count))")
+                sendKey("", modifiers: .shift, window: window, virtualKey: 123)   // ←
+            },
+            {
+                check(app.highlightedPhotoIDs == [ids[1]],
+                      "shift-left shrank it back to the anchor "
+                          + "(\(app.librarySelection.count))")
+                // 6. Return does *not* open the develop view. Only d and a
+                //    double-click do.
+                sendKey("", modifiers: [], window: window, virtualKey: 36)
+            },
+            {
+                check(app.mode == .library, "Return does not leave the library")
+                _ = clickCell(cellID(ids[1]))
+                _ = clickCell(cellID(ids[2]), modifiers: .shift)
+                check(app.highlightedPhotoIDs == [ids[1], ids[2]],
+                      "two photos highlighted for the colour keys")
+                // 7. `8` is green in Lightroom, and it labels the whole
+                //    highlight — in RAM and in the database. Exactly once: a
+                //    second application would toggle it straight back off, so
+                //    "still green" is the proof that the local monitor did not
+                //    double-fire with the menu's key equivalent.
+                sendKey("8", modifiers: [], window: window, virtualKey: 28)
+            },
+            {
+                check(app.catalog.photo(id: ids[1])?.color == .green
+                          && app.catalog.photo(id: ids[2])?.color == .green,
+                      "8 turned both highlighted photos green, exactly once")
+                check(storedColor(ids[1]) == .green && storedColor(ids[2]) == .green,
+                      "…and in the database (got \(describe(storedColor(ids[1]))), "
+                          + "\(describe(storedColor(ids[2]))))")
+                // 8. Lightroom's toggle: the same key again clears it.
+                sendKey("8", modifiers: [], window: window, virtualKey: 28)
+            },
+            {
+                check(app.catalog.photo(id: ids[1])?.color == .unlabeled
+                          && app.catalog.photo(id: ids[2])?.color == .unlabeled,
+                      "8 again cleared the label in the catalog")
+                check(storedColor(ids[1]) == .unlabeled && storedColor(ids[2]) == .unlabeled,
+                      "…and in the database")
+                // 9. `d` opens the highlighted photo in the develop view.
+                sendKey("d", modifiers: [], window: window, virtualKey: 2)
+            },
+            {
+                check(app.mode == .develop, "d switched to the develop view")
+                check(app.currentPhotoID == subject,
+                      "…on the highlighted photo (\(subjectName))")
+                subjectName = app.imageURL?.lastPathComponent ?? subjectName
+                check(app.imageURL?.path == app.catalog.photo(id: subject)?.firstLocation,
+                      "…opened from the catalog's own path (\(subjectName))")
+                check(findCanvas() != nil, "the develop canvas is in the window")
+            },
+            {
+                check(app.previewSize != .zero,
+                      "the photo decoded in the develop view (\(app.previewSize))")
+                // 10. `6` is red, and in the develop view it labels the open
+                //     photo rather than a grid selection.
+                sendKey("6", modifiers: [], window: window, virtualKey: 22)
+            },
+            {
+                check(app.currentColorLabel == .red, "6 labelled the open photo red")
+                check(app.catalog.photo(id: subject)?.color == .red, "…in the catalog")
+                check(storedColor(subject) == .red,
+                      "…and in the database (got \(describe(storedColor(subject))))")
+                // 11. `g` goes back to the grid.
+                sendKey("g", modifiers: [], window: window, virtualKey: 5)
+            },
+            {
+                check(app.mode == .library, "g came back to the library")
+                check(app.highlightedPhotoIDs == [subject],
+                      "…with the photo that was being developed highlighted")
+                check(findCanvas() == nil, "…and the develop canvas gone again")
+                // 12. A double-click opens too.
+                check(clickCell(cellID(ids[0]), clickCount: 2), "double-clicked the first cell")
+            },
+            {
+                check(app.mode == .develop && app.currentPhotoID == ids[0],
+                      "a double-click opened that photo in develop "
+                          + "(mode \(app.mode.rawValue))")
+                sendKey("g", modifiers: [], window: window, virtualKey: 5)
+            },
+        ]
+
+        runSteps(steps, model: app) {
+            // 13. The cells built their thumbnails — in RAM, and on disk where
+            //     the next launch will find them.
+            let inMemory = ids.filter { app.thumbnails.cached($0) != nil }.count
+            check(inMemory > 0,
+                  "the grid built thumbnails in memory (\(inMemory) of \(ids.count))")
+            let directory = ThumbnailCache.defaultDirectory()
+            let onDisk = ((try? FileManager.default
+                .contentsOfDirectory(atPath: directory.path)) ?? [])
+                .filter { $0.hasSuffix(".jpg") }
+            check(onDisk.count >= inMemory,
+                  "…and wrote them to \(directory.path) (\(onDisk.count) files)")
+
+            // 14. What all of that looks like: one red cell, the ring on it.
+            try? FileManager.default.createDirectory(at: outputDirectory,
+                                                     withIntermediateDirectories: true)
+            writeScreenshot(of: window, named: "selftest-library.png")
+            finishLibrary(failures())
+        }
+    }
+
+    /// The transparent `NSView` `ThumbnailGrid` puts behind each cell to catch
+    /// clicks. Finding it is how this test can click a *cell* without knowing
+    /// anything about the grid's geometry.
+    private static func cellView(_ identifier: String) -> NSView? {
+        func search(_ view: NSView) -> NSView? {
+            if view.identifier?.rawValue == identifier { return view }
+            for sub in view.subviews { if let found = search(sub) { return found } }
+            return nil
+        }
+        for window in NSApp.windows where window.isVisible {
+            if let root = window.contentView, let found = search(root) { return found }
+        }
+        return nil
+    }
+
+    /// Whether this app can read the file at all — the same probe the importer
+    /// uses, so a file that fails here is one the import was always going to
+    /// reject.
+    private static func canDecode(_ url: URL) -> Bool {
+        (try? ImageDecoder.probe(url: url)) != nil
+    }
+
+    private static func cellID(_ id: Int64) -> String { "grid-cell-\(id)" }
+    private static func cellID(_ url: URL) -> String { "grid-cell-\(url)" }
+
+    /// A real click on a cell, with real modifier flags on the event — the
+    /// thing a tap gesture cannot see.
+    ///
+    /// `fromTopLeft`, when given, aims at a point inside the cell instead of
+    /// its centre: that is how the import window's checkbox gets clicked, and
+    /// therefore how this test knows the checkbox still takes its own clicks
+    /// rather than the click catcher swallowing them.
+    @discardableResult
+    private static func clickCell(_ identifier: String,
+                                  modifiers: NSEvent.ModifierFlags = [],
+                                  clickCount: Int = 1,
+                                  fromTopLeft: CGPoint? = nil) -> Bool {
+        guard let view = cellView(identifier), let window = view.window else {
+            log("self-test: no click target \(identifier)")
+            return false
+        }
+        let local = fromTopLeft.map { CGPoint(x: view.bounds.minX + $0.x,
+                                              y: view.bounds.maxY - $0.y) }
+            ?? CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+        let point = view.convert(local, to: nil)
+        clickCounter += 1
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                eventNumber: clickCounter, clickCount: clickCount, pressure: 1)
+            else { return false }
+            window.sendEvent(event)
+        }
+        return true
+    }
+
+    private static var clickCounter = 0
+
+    /// What the *database* holds, read through a second connection — the app's
+    /// own catalog is exactly what is under test, so it cannot be the witness.
+    private static func storedColor(_ id: Int64) -> ColorLabel? {
+        guard let library = try? Library.openDefault() else { return nil }
+        defer { try? library.close() }
+        return (try? library.photo(id: id))??.color
+    }
+
+    private static func describe(_ color: ColorLabel?) -> String {
+        color.map(\.name) ?? "nil"
+    }
+
+    private static func waitForScan(_ model: ImportModel, then body: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            if Date() < deadline, model.isScanning || model.totalCount == 0 {
+                waitForScan(model, then: body)
+            } else {
+                body()
+            }
+        }
+    }
+
+    /// Every menu item AppKit has, submenus included — the colour labels live
+    /// one level down, in Photo › Set Color Label.
+    private static func findMenuItemDeep(titled title: String) -> NSMenuItem? {
+        func search(_ menu: NSMenu) -> NSMenuItem? {
+            menu.update()
+            for item in menu.items {
+                if item.title == title { return item }
+                if let submenu = item.submenu, let found = search(submenu) { return found }
+            }
+            return nil
+        }
+        guard let main = NSApp.mainMenu else { return nil }
+        return search(main)
+    }
+
+    private static var previousLastFile: String?
+
+    /// Puts back what the app will reopen at the next launch — see
+    /// `startIfRequested`.
+    private static func restoreLastOpenedFile() {
+        if let previousLastFile {
+            UserDefaults.standard.set(previousLastFile, forKey: AppModel.lastFileDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: AppModel.lastFileDefaultsKey)
+        }
+    }
+
+    private static func finishLibrary(_ failures: [String]) -> Never {
+        restoreLastOpenedFile()
+        if failures.isEmpty {
+            log("library self-test: PASS")
+            exit(0)
+        }
+        log("library self-test: FAILED — \(failures.count) check(s): "
+            + failures.joined(separator: "; "))
+        exit(6)
     }
 
     // MARK: - Waiting
@@ -448,7 +922,7 @@ enum SelfTest {
             switch mode {
             case .paint, nil: run(canvas: canvas, model: model)
             case .undo: runUndo(canvas: canvas, model: model)
-            case .importWindow: break
+            case .importWindow, .library: break
             }
         }
     }
@@ -689,7 +1163,7 @@ enum SelfTest {
     /// goes through menu key-equivalent matching, item validation and all.
     private static func sendKey(_ characters: String, modifiers: NSEvent.ModifierFlags,
                                 window: NSWindow, virtualKey: CGKeyCode = 6 /* Z */) {
-        log("undo self-test: sending key \(describe(modifiers))\(characters)")
+        log("self-test: sending key \(describe(modifiers))\(characters)")
         guard let source = CGEventSource(stateID: .privateState) else {
             fail("could not make a CGEventSource")
         }

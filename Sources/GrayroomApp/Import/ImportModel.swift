@@ -65,6 +65,8 @@ final class ImportModel {
 
     static let minimumThumbnailSize: Double = 96
     static let maximumThumbnailSize: Double = 320
+    /// Shared with the library grid, so the two grids open at the same size.
+    static let defaultThumbnailSize: Double = 160
 
     // MARK: Injected
 
@@ -86,7 +88,10 @@ final class ImportModel {
         didSet { if oldValue != includeSubfolders { rescan() } }
     }
     private(set) var isScanning = false
-    var thumbnailSize: Double = 160
+    var thumbnailSize: Double = ImportModel.defaultThumbnailSize
+    /// The grid's current column count, written by the view. `KeyRouter` reads
+    /// it: the arrow keys cannot know what "one row down" means without it.
+    var columns = 1
 
     private var selection = ImportSelection()
     private var thumbnails: [URL: CGImage] = [:]
@@ -271,6 +276,10 @@ final class ImportModel {
     func uncheckAll() { selection.uncheckAll() }
     func moveHighlight(dx: Int, dy: Int, columns: Int) {
         selection.moveHighlight(dx: dx, dy: dy, columns: columns)
+    }
+
+    func extendHighlight(dx: Int, dy: Int, columns: Int) {
+        selection.extendHighlight(dx: dx, dy: dy, columns: columns)
     }
 
     func stepThumbnailSize(_ steps: Int) {

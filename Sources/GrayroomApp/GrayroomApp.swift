@@ -1,4 +1,5 @@
 import AppKit
+import GrayroomLibrary
 import SwiftUI
 
 /// `swift run GrayroomApp [file.DNG]`.
@@ -9,6 +10,11 @@ import SwiftUI
 /// activating in `applicationDidFinishLaunching` is the standard fix and is what
 /// makes the app usable straight from the terminal without an Xcode project.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Window-level keyboard routing for both grids and the canvas. Held here
+    /// because it lives exactly as long as the application does — see
+    /// `KeyRouter` for why the keys are not a view's business.
+    private var keyRouter: KeyRouter?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -22,6 +28,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.center()
         }
         AppModel.shared.openInitialDocument()
+        keyRouter = KeyRouter(model: AppModel.shared)
+        keyRouter?.install()
         // The menu bar exists by now; take over Undo/Redo (see UndoMenu.swift).
         UndoMenuController.shared.adoptMenuItems(store: AppModel.shared.store)
         SelfTest.startIfRequested()
@@ -29,9 +37,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    /// Double-clicking a RAW in the Finder (or `open -a`) lands here.
+    /// Double-clicking a RAW in the Finder (or `open -a`) lands here. Being
+    /// handed a file is a request to develop it.
     func application(_ application: NSApplication, open urls: [URL]) {
-        if let url = urls.first { AppModel.shared.open(url: url) }
+        guard let url = urls.first else { return }
+        AppModel.shared.open(url: url)
+        AppModel.shared.mode = .develop
     }
 }
 
@@ -79,6 +90,45 @@ struct GrayroomApp: App {
                     .keyboardShortcut("z", modifiers: .command)
                 Button("Redo") { model.store.redo() }
                     .keyboardShortcut("z", modifiers: [.command, .shift])
+            }
+            // Into SwiftUI's own View menu, which is why this is a
+            // `CommandGroup` and not a `CommandMenu("View")`: a second menu
+            // with that name would be unaddressable.
+            //
+            // Bare `g` and `d`, as in Lightroom. A menu key equivalent is
+            // matched by AppKit before the event reaches any view, so this is
+            // what actually makes the two keys work everywhere; the views
+            // handle them too, for the case the menu does not take them.
+            CommandGroup(before: .sidebar) {
+                Button("Library") { model.showLibrary() }
+                    .keyboardShortcut("g", modifiers: [])
+                Button("Develop") { model.showDevelop() }
+                    .keyboardShortcut("d", modifiers: [])
+                Divider()
+            }
+            // Lightroom's colour labels, on Lightroom's keys: 6/7/8/9 for
+            // red/yellow/green/blue, and purple with no key at all (Lightroom
+            // does not give it one). 1-5 are deliberately left alone — they are
+            // Lightroom's star ratings, which this app does not have yet.
+            //
+            // No `.disabled(…)` anywhere: this builder runs once, at launch, so
+            // a disabled item would stay disabled for the session and its key
+            // equivalent would be swallowed (see the undo note above).
+            // `AppModel` simply does nothing when nothing is selected.
+            CommandMenu("Photo") {
+                Menu("Set Color Label") {
+                    Button("Red") { model.toggleColorLabel(.red) }
+                        .keyboardShortcut("6", modifiers: [])
+                    Button("Yellow") { model.toggleColorLabel(.yellow) }
+                        .keyboardShortcut("7", modifiers: [])
+                    Button("Green") { model.toggleColorLabel(.green) }
+                        .keyboardShortcut("8", modifiers: [])
+                    Button("Blue") { model.toggleColorLabel(.blue) }
+                        .keyboardShortcut("9", modifiers: [])
+                    Button("Purple") { model.toggleColorLabel(.purple) }
+                    Divider()
+                    Button("None") { model.setColorLabel(.unlabeled) }
+                }
             }
             // Not "View": SwiftUI already installs a View menu (Enter Full
             // Screen) and a second one with the same name is unaddressable.

@@ -38,9 +38,15 @@ let package = Package(
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        // The view-model layer. It depends on `GrayroomLibrary` because the
+        // catalog the grid draws (`PhotoCatalog`) is a view model over the
+        // database: it holds every photo in RAM, sorted the way the grid shows
+        // them, and writes colour labels straight through. Keeping it here
+        // rather than in `GrayroomLibrary` is what makes it testable without a
+        // window while leaving the database layer free of UI ordering rules.
         .target(
             name: "GrayroomUI",
-            dependencies: ["GrayroomCore"],
+            dependencies: ["GrayroomCore", "GrayroomLibrary"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         // The commands live in a library, not in the executable, for the same
@@ -97,7 +103,7 @@ let package = Package(
         ),
         .testTarget(
             name: "GrayroomUITests",
-            dependencies: ["GrayroomUI", "GrayroomCore"],
+            dependencies: ["GrayroomUI", "GrayroomCore", "GrayroomLibrary"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(

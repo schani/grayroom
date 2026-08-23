@@ -26,6 +26,9 @@ public enum CanvasKeyCommand {
     case featherStep(Int)
     case fit
     case actualSize
+    /// Lightroom's `6`–`9`, as the `ColorLabel` raw value. The enum itself
+    /// lives in `GrayroomLibrary`, which the canvas has no business importing.
+    case colorLabel(Int)
 }
 
 public protocol CanvasInputHandler: AnyObject {
@@ -339,6 +342,12 @@ public final class CanvasNSView: MTKView {
         case "]", "}": handler?.canvasKeyCommand(shift ? .featherStep(1) : .sizeStep(1))
         case "0": handler?.canvasKeyCommand(.fit)
         case "1": handler?.canvasKeyCommand(.actualSize)
+        // 6-9 = red/yellow/green/blue, as in Lightroom. Purple has no key
+        // there and does not get one here. These normally never arrive: the
+        // Photo menu carries the same key equivalents and AppKit matches those
+        // first. This is the path for a keystroke the menu did not take.
+        case "6", "7", "8", "9":
+            handler?.canvasKeyCommand(.colorLabel(Int(String(c))! - 5))
         default: super.keyDown(with: event)
         }
     }

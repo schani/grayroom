@@ -2,6 +2,23 @@ import Foundation
 import GRDB
 import GrayroomCore
 
+/// The three things a photo's *row* does not say, gathered per photo by
+/// `Library.catalogSnapshot()`.
+public struct PhotoSummary: Equatable, Sendable {
+    /// The lexicographically first of the photo's recorded paths, or `nil` when
+    /// it has none — a photo the library remembers but has no file for.
+    public var firstLocation: String?
+    public var developmentCount: Int
+    /// Tag names, alphabetically.
+    public var tags: [String]
+
+    public init(firstLocation: String? = nil, developmentCount: Int = 0, tags: [String] = []) {
+        self.firstLocation = firstLocation
+        self.developmentCount = developmentCount
+        self.tags = tags
+    }
+}
+
 /// Every operation is synchronous and throwing: the library is a local SQLite
 /// file, and the callers (CLI, app model) already have their own concurrency.
 extension Library {
@@ -82,6 +99,75 @@ extension Library {
             try db.execute(sql: "UPDATE photos SET color = ? WHERE id = ?",
                            arguments: [color.rawValue, photoID])
             guard db.changesCount > 0 else { throw LibraryError.noSuchPhoto(photoID) }
+        }
+    }
+
+    /// One label onto a whole selection, in a single transaction.
+    ///
+    /// The grid labels twenty frames with one keystroke, and twenty separate
+    /// write transactions would be twenty fsyncs for what is one user action —
+    /// and would leave the library half-labelled if one of them threw.
+    public func setColor(_ color: ColorLabel, photoIDs: [Int64]) throws {
+        guard !photoIDs.isEmpty else { return }
+        try dbPool.write { db in
+            for photoID in photoIDs {
+                try db.execute(sql: "UPDATE photos SET color = ? WHERE id = ?",
+                               arguments: [color.rawValue, photoID])
+                guard db.changesCount > 0 else { throw LibraryError.noSuchPhoto(photoID) }
+            }
+        }
+    }
+
+    // MARK: - Catalog snapshot
+
+    /// Everything the grid needs about every photo, read as one consistent
+    /// snapshot.
+    ///
+    /// Four statements, no `N+1`: the photos themselves plus three aggregates
+    /// keyed by photo id. A grid of ten thousand frames that asked the database
+    /// for each photo's first path, development count and tags separately would
+    /// issue thirty thousand queries to draw one screen; this issues four and
+    /// joins them in RAM, which is what `PhotoCatalog` then holds.
+    ///
+    /// They run inside one `read`, so the aggregates cannot describe a
+    /// different moment than the photo rows do.
+    public func catalogSnapshot() throws -> (photos: [Photo], summaries: [Int64: PhotoSummary]) {
+        try dbPool.read { db in
+            let photos = try Photo.fetchAll(db, sql: "SELECT * FROM photos ORDER BY id")
+            var summaries: [Int64: PhotoSummary] = [:]
+            summaries.reserveCapacity(photos.count)
+            for photo in photos {
+                if let id = photo.id { summaries[id] = PhotoSummary() }
+            }
+            // MIN(path): "the photo's first location" has to be a defined one,
+            // not whichever row SQLite happens to return, or the same library
+            // would open a different file from one launch to the next.
+            let locations = try Row.fetchAll(db, sql: """
+                SELECT photo_id, MIN(path) AS path FROM locations GROUP BY photo_id
+                """)
+            for row in locations {
+                let id: Int64 = row["photo_id"]
+                summaries[id, default: PhotoSummary()].firstLocation = row["path"]
+            }
+            let developments = try Row.fetchAll(db, sql: """
+                SELECT photo_id, COUNT(*) AS n FROM developments GROUP BY photo_id
+                """)
+            for row in developments {
+                let id: Int64 = row["photo_id"]
+                summaries[id, default: PhotoSummary()].developmentCount = row["n"]
+            }
+            // Not GROUP BY / group_concat: a tag name may contain the separator,
+            // and the join is one scan of a table that is small by construction.
+            let tags = try Row.fetchAll(db, sql: """
+                SELECT photo_tags.photo_id AS photo_id, tags.name AS name \
+                FROM photo_tags JOIN tags ON tags.id = photo_tags.tag_id \
+                ORDER BY tags.name
+                """)
+            for row in tags {
+                let id: Int64 = row["photo_id"]
+                summaries[id, default: PhotoSummary()].tags.append(row["name"])
+            }
+            return (photos, summaries)
         }
     }
 

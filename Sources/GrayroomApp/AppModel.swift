@@ -43,6 +43,36 @@ final class AppModel {
 
     let store = EditStateStore()
 
+    // MARK: Mode
+
+    /// Lightroom's two modules, and its two keys for them: `g` for the grid,
+    /// `d` for the develop view.
+    enum Mode: String, Equatable {
+        case library
+        case develop
+    }
+
+    /// The app opens on the library, the way Lightroom does — except when it
+    /// was launched *at* a file (an argument, or a double-click in the Finder),
+    /// which is a request to develop that file and nothing else.
+    var mode: Mode = .library
+
+    // MARK: Library
+
+    /// Every photo in the library, in RAM, in grid order.
+    let catalog = PhotoCatalog()
+    /// What the grid's ring is around.
+    var librarySelection = LibrarySelection()
+    /// The grid's current column count, which only the view knows; the arrow
+    /// keys need it to know what "one row down" means.
+    var libraryColumns = 1
+    var libraryThumbnailSize: Double = ImportModel.defaultThumbnailSize
+    /// The cell the grid should scroll into view the next time it draws —
+    /// consumed by the view. This is what makes `g` from the develop view land
+    /// on the photo you were just editing rather than at the top of the grid.
+    var libraryScrollTarget: Int64?
+    let thumbnails = ThumbnailCache()
+
     // MARK: Document
 
     private(set) var imageURL: URL?
@@ -122,7 +152,10 @@ final class AppModel {
     private var library: Library?
     /// The development the open image's edits are written to, once it exists.
     private var developmentID: Int64?
-    private var photoID: Int64?
+    /// The open photo's library id — the bridge between the two modes: what
+    /// `g` re-highlights in the grid, and what a colour key labels while the
+    /// develop view is up.
+    private(set) var currentPhotoID: Int64?
     /// Bumped on every `open(url:)`; a lookup that lands after the user has
     /// moved on to another file is discarded.
     private var openGeneration = 0
@@ -139,7 +172,7 @@ final class AppModel {
     }
     private var targeted: TargetedSession?
 
-    private static let lastFileDefaultsKey = "GrayroomLastOpenedFile"
+    static let lastFileDefaultsKey = "GrayroomLastOpenedFile"
 
     init() {
         do {
@@ -151,11 +184,16 @@ final class AppModel {
             library = try Library.openDefault()
         } catch {
             errorMessage = "Could not open the library: \(error). Edits will not be saved."
+            // No catalog, no grid: without a library there is nothing to show
+            // in the library mode, so the app opens straight into develop.
+            mode = .develop
         }
+        reloadCatalog()
         store.onChange = { [weak self] invalidation in
             self?.editChanged(invalidation)
         }
         importModel.tasks = tasks
+        thumbnails.tasks = tasks
         // Identity in this library is the file's bytes, so "already imported"
         // is a hash question, not a path question — and it takes both halves:
         // a photo the library knows but has no location for is one whose files
@@ -217,6 +255,8 @@ final class AppModel {
                 self.tasks.finish(taskID)
                 self.importTaskID = nil
                 self.statusMessage = cancelled ? "Import cancelled — " + summary : summary
+                // The photos that just arrived belong in the grid.
+                self.reloadCatalog()
             }
         }
     }
@@ -228,6 +268,145 @@ final class AppModel {
         if failed > 0 { notes.append("\(failed) failed") }
         if !notes.isEmpty { message += " (" + notes.joined(separator: ", ") + ")" }
         return message
+    }
+
+    // MARK: - Library mode
+
+    /// Re-reads the whole catalog. Cheap enough to do outright: four statements
+    /// against a local SQLite file, and the result is what the grid holds.
+    func reloadCatalog() {
+        guard let library else { return }
+        do {
+            try catalog.load(from: library)
+            // A photo that is no longer there is no longer selected.
+            librarySelection.retain(Set(catalog.ids))
+        } catch {
+            errorMessage = "Could not read the library: \(error)"
+        }
+    }
+
+    /// `g`. Comes back to the grid with the photo you were developing
+    /// highlighted and scrolled into view.
+    func showLibrary() {
+        if let currentPhotoID, catalog.index(of: currentPhotoID) != nil {
+            librarySelection.select([currentPhotoID])
+            libraryScrollTarget = currentPhotoID
+        }
+        mode = .library
+    }
+
+    /// `d`. From the grid this opens the highlighted photo; with nothing
+    /// highlighted it just shows whatever is already open.
+    func showDevelop() {
+        if mode == .library, let id = highlightedPhotoIDs.first,
+           id != currentPhotoID || imageURL == nil {
+            openPhoto(id: id)
+            return
+        }
+        guard imageURL != nil else { return }
+        mode = .develop
+    }
+
+    /// Opens a photo the catalog already knows.
+    ///
+    /// The difference from `open(url:)` is the hash: the photo's identity is
+    /// its row id, which we have, so there is no reason to read 50 MB off the
+    /// disk to rediscover it.
+    func openPhoto(id: Int64) {
+        guard let photo = catalog.photo(id: id) else { return }
+        guard let path = photo.firstLocation else {
+            errorMessage = "\(photo.originalName) has no file on disk"
+            return
+        }
+        librarySelection.select([id])
+        open(url: URL(fileURLWithPath: path), knownPhotoID: id)
+        mode = .develop
+    }
+
+    // MARK: Grid selection
+
+    var highlightedPhotoIDs: [Int64] { librarySelection.ordered(in: catalog.ids) }
+
+    func isHighlighted(_ id: Int64) -> Bool { librarySelection.contains(id) }
+
+    func libraryClick(_ id: Int64, modifiers: GridClickModifiers) {
+        librarySelection.click(id, modifiers: modifiers, order: catalog.ids)
+    }
+
+    func moveLibraryHighlight(dx: Int, dy: Int) {
+        librarySelection.moveHighlight(dx: dx, dy: dy, columns: libraryColumns,
+                                       order: catalog.ids)
+        libraryScrollTarget = librarySelection.anchor
+    }
+
+    /// Shift-arrow: the anchor stays put and the range grows from it.
+    func extendLibraryHighlight(dx: Int, dy: Int) {
+        librarySelection.extendHighlight(dx: dx, dy: dy, columns: libraryColumns,
+                                         order: catalog.ids)
+        libraryScrollTarget = librarySelection.cursor
+    }
+
+    /// The grid's bottom-bar count.
+    var libraryCountLabel: String {
+        let total = catalog.count
+        let photos = "\(total) photo" + (total == 1 ? "" : "s")
+        let selected = librarySelection.count
+        return selected == 0 ? photos : "\(photos) · \(selected) selected"
+    }
+
+    func selectAllPhotos() {
+        librarySelection.select(catalog.ids)
+    }
+
+    func stepLibraryThumbnailSize(_ steps: Int) {
+        libraryThumbnailSize = min(max(libraryThumbnailSize + Double(steps) * 32,
+                                       ImportModel.minimumThumbnailSize),
+                                   ImportModel.maximumThumbnailSize)
+    }
+
+    // MARK: Colour labels
+
+    /// What a colour key applies to: the highlight in the grid, the open photo
+    /// in the develop view.
+    var colorLabelTargets: [Int64] {
+        if mode == .library { return highlightedPhotoIDs }
+        return currentPhotoID.map { [$0] } ?? []
+    }
+
+    /// The open photo's label, for the develop view's status dot.
+    var currentColorLabel: ColorLabel {
+        currentPhotoID.flatMap { catalog.photo(id: $0)?.color } ?? .unlabeled
+    }
+
+    /// Lightroom's `6`–`9`: setting the colour a photo already has clears it.
+    ///
+    /// With several photos highlighted the toggle is all-or-nothing — the key
+    /// clears only when *every* one of them already carries that colour, which
+    /// is what makes "label the lot" work on a mixed selection instead of
+    /// flipping half of it back.
+    func toggleColorLabel(_ color: ColorLabel) {
+        let ids = colorLabelTargets
+        guard !ids.isEmpty else { return }
+        let allHave = ids.allSatisfy { catalog.photo(id: $0)?.color == color }
+        setColorLabel(allHave ? .unlabeled : color)
+    }
+
+    /// The menu's items, and the second half of the toggle: no toggling, just
+    /// this label onto whatever is selected.
+    func setColorLabel(_ color: ColorLabel) {
+        let ids = colorLabelTargets
+        guard !ids.isEmpty, let library else { return }
+        do {
+            try catalog.setColor(color, for: ids, in: library)
+            let what = ids.count == 1
+                ? (catalog.photo(id: ids[0])?.originalName ?? "1 photo")
+                : "\(ids.count) photos"
+            statusMessage = color == .unlabeled
+                ? "Cleared the colour label on \(what)"
+                : "Labelled \(what) \(color.name)"
+        } catch {
+            errorMessage = "Could not set the colour label: \(error)"
+        }
     }
 
 
@@ -255,10 +434,15 @@ final class AppModel {
 
     /// A file named on the command line wins; otherwise reopen whatever was open
     /// last time. There is no document architecture — one window, one image.
+    ///
+    /// Only the command line switches modules. Being launched at a file is a
+    /// request to develop that file; silently reopening yesterday's file is
+    /// not, so it loads in the background while the library grid stays up.
     func openInitialDocument() {
         let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-") }
         if let path = args.first {
             open(url: URL(fileURLWithPath: path))
+            mode = .develop
             return
         }
         if let path = UserDefaults.standard.string(forKey: AppModel.lastFileDefaultsKey),
@@ -283,9 +467,14 @@ final class AppModel {
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         open(url: url)
+        // Choosing a file by hand means developing it.
+        mode = .develop
     }
 
-    func open(url: URL) {
+    /// `knownPhotoID` is the library row this file is already known to be, when
+    /// the caller knows it (the grid does). It skips the hash — the only reason
+    /// opening a file has ever needed to read all of it.
+    func open(url: URL, knownPhotoID: Int64? = nil) {
         guard let service else { return }
         guard FileManager.default.fileExists(atPath: url.path) else {
             errorMessage = "File not found: \(url.path)"
@@ -294,7 +483,7 @@ final class AppModel {
         autosaveTask?.cancel()
         service.clearMaskCache()
         imageURL = url
-        photoID = nil
+        currentPhotoID = knownPhotoID
         developmentID = nil
         openGeneration += 1
         decoded = nil
@@ -313,7 +502,7 @@ final class AppModel {
         store.replace(EditState(), named: nil)
         store.selectedMaskID = nil
         store.markSaved()
-        loadFromLibrary(url: url, generation: openGeneration)
+        loadFromLibrary(url: url, generation: openGeneration, knownPhotoID: knownPhotoID)
 
         service.probe(url: url) { [weak self] result in
             guard let self else { return }
@@ -477,28 +666,40 @@ final class AppModel {
     /// milliseconds, which is a visible hitch on a window that is also trying to
     /// start a decode. The consequence is that the first decode uses as-shot
     /// white balance and a second one follows if the stored edit overrode it.
-    private func loadFromLibrary(url: URL, generation: Int) {
+    ///
+    /// `knownPhotoID` short-circuits the hash: a photo opened from the grid is
+    /// already identified, and re-reading the whole file to find out what it is
+    /// would be the slowest part of opening it.
+    private func loadFromLibrary(url: URL, generation: Int, knownPhotoID: Int64? = nil) {
         guard let library else { return }
         libraryQueue.async {
             let outcome = Result {
-                () -> (photoID: Int64, first: Development?) in
+                () -> (photoID: Int64, isNew: Bool, first: Development?) in
+                if let knownPhotoID {
+                    return (knownPhotoID, false, try library.developments(for: knownPhotoID).first)
+                }
                 let hash = try FileHash.sha256(of: url)
                 let photoID: Int64
+                var isNew = false
                 if let existing = try library.photo(withHash: hash), let id = existing.id {
                     photoID = id
                 } else {
                     photoID = try Importer(library: library).importFile(at: url).photoID
+                    isNew = true
                 }
-                return (photoID, try library.developments(for: photoID).first)
+                return (photoID, isNew, try library.developments(for: photoID).first)
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.openGeneration == generation else { return }
                 switch outcome {
                 case .failure(let error):
                     self.errorMessage = "Could not read the library: \(error)"
-                case .success(let (photoID, first)):
-                    self.photoID = photoID
+                case .success(let (photoID, isNew, first)):
+                    self.currentPhotoID = photoID
                     self.developmentID = first?.id
+                    // Opening a file the library had never seen imports it, so
+                    // the grid has to learn about it.
+                    if isNew || self.catalog.index(of: photoID) == nil { self.reloadCatalog() }
                     // An edit the user has already started beats a stored one:
                     // the lookup lost the race, it does not get to win it.
                     if let first, !self.store.isDirty {
@@ -536,13 +737,17 @@ final class AppModel {
     /// A no-op while the library lookup is still in flight — it finishes by
     /// calling back here if the edit is dirty by then.
     private func persistEdit(announce: Bool) {
-        guard let library, imageURL != nil, let photoID else { return }
+        guard let library, imageURL != nil, let photoID = currentPhotoID else { return }
         let edit = store.edit
         do {
             if let developmentID {
                 _ = try library.updateDevelopment(id: developmentID, edit: edit)
             } else {
                 developmentID = try library.addDevelopment(photoID: photoID, edit: edit).id
+                // The grid draws a badge for "has a development", so the count
+                // it holds has to move the moment one is created.
+                catalog.setDevelopmentCount(
+                    max(catalog.photo(id: photoID)?.developmentCount ?? 0, 1), for: photoID)
             }
             store.markSaved()
             if announce { statusMessage = "Saved to the library" }
@@ -705,6 +910,8 @@ extension AppModel: CanvasInputHandler {
             zoomToFit()
         case .actualSize:
             zoomToActualSize()
+        case .colorLabel(let raw):
+            if let color = ColorLabel(rawValue: raw) { toggleColorLabel(color) }
         }
     }
 
