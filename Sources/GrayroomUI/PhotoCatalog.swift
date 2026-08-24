@@ -3,8 +3,8 @@ import GrayroomLibrary
 import Observation
 
 /// One photo as the library grid needs it: its row, flattened together with the
-/// four things the row does not carry (its first path, how many developments it
-/// has, its tags, and the fingerprint of development #1).
+/// four things the row does not carry (its paths, how many developments it has,
+/// its tags, and the fingerprint of development #1).
 ///
 /// A value type with no database handle in it, so the grid can hold ten
 /// thousand of these and a cell can be diffed by `==`.
@@ -23,8 +23,9 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
     public var altitude: Double?
     public var byteSize: Int64
     public var color: ColorLabel
-    /// `nil` when the library has no path for this photo at all.
-    public var firstLocation: String?
+    /// Every path the library has for this photo, sorted. Empty when it has
+    /// none at all — the "missing" case the Folders panel gathers.
+    public var locations: [String]
     public var developmentCount: Int
     public var tags: [String]
     /// `EditState.fingerprint` of development #1, `nil` when the photo has no
@@ -47,7 +48,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
                 altitude: Double? = nil,
                 byteSize: Int64 = 0,
                 color: ColorLabel = .unlabeled,
-                firstLocation: String? = nil,
+                locations: [String] = [],
                 developmentCount: Int = 0,
                 tags: [String] = [],
                 developmentFingerprint: Data? = nil) {
@@ -64,7 +65,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
         self.altitude = altitude
         self.byteSize = byteSize
         self.color = color
-        self.firstLocation = firstLocation
+        self.locations = locations
         self.developmentCount = developmentCount
         self.tags = tags
         self.developmentFingerprint = developmentFingerprint
@@ -87,11 +88,17 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
                   altitude: photo.altitude,
                   byteSize: photo.byteSize,
                   color: photo.color,
-                  firstLocation: summary.firstLocation,
+                  locations: summary.locations,
                   developmentCount: summary.developmentCount,
                   tags: summary.tags,
                   developmentFingerprint: summary.developmentFingerprint)
     }
+
+    /// The path to open, and `nil` when the library has no file for this photo
+    /// at all. Defined as the lexicographically first of the photo's paths (the
+    /// snapshot sorts them), not "whichever one came back first", so the same
+    /// library opens the same file from one launch to the next.
+    public var firstLocation: String? { locations.first }
 
     /// The file to open, when there is one.
     public var url: URL? { firstLocation.map { URL(fileURLWithPath: $0) } }

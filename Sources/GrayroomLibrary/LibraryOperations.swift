@@ -5,9 +5,10 @@ import GrayroomCore
 /// The three things a photo's *row* does not say, gathered per photo by
 /// `Library.catalogSnapshot()`.
 public struct PhotoSummary: Equatable, Sendable {
-    /// The lexicographically first of the photo's recorded paths, or `nil` when
-    /// it has none — a photo the library remembers but has no file for.
-    public var firstLocation: String?
+    /// Every path the library has for this photo, sorted — empty for a photo it
+    /// remembers but has no file for. All of them, not just the first, because
+    /// the Folders panel counts a photo under every directory it sits in.
+    public var locations: [String]
     public var developmentCount: Int
     /// Tag names, alphabetically.
     public var tags: [String]
@@ -16,9 +17,14 @@ public struct PhotoSummary: Equatable, Sendable {
     /// against, so it has to come along with the snapshot.
     public var developmentFingerprint: Data?
 
-    public init(firstLocation: String? = nil, developmentCount: Int = 0, tags: [String] = [],
+    /// The lexicographically first of the photo's recorded paths, or `nil` when
+    /// it has none. Defined rather than "whichever row came back first", so the
+    /// same library opens the same file from one launch to the next.
+    public var firstLocation: String? { locations.first }
+
+    public init(locations: [String] = [], developmentCount: Int = 0, tags: [String] = [],
                 developmentFingerprint: Data? = nil) {
-        self.firstLocation = firstLocation
+        self.locations = locations
         self.developmentCount = developmentCount
         self.tags = tags
         self.developmentFingerprint = developmentFingerprint
@@ -149,15 +155,19 @@ extension Library {
             for photo in photos {
                 if let id = photo.id { summaries[id] = PhotoSummary() }
             }
-            // MIN(path): "the photo's first location" has to be a defined one,
-            // not whichever row SQLite happens to return, or the same library
-            // would open a different file from one launch to the next.
+            // Every path, grouped in Swift rather than with `group_concat`: a
+            // POSIX path may contain any byte but `/` and NUL, so there is no
+            // separator that is safe to join on and split back. One ordered
+            // scan of a table with one row per file costs less than getting
+            // that wrong, and `ORDER BY` is what makes `firstLocation` the
+            // lexicographically first path rather than whichever row SQLite
+            // happened to return.
             let locations = try Row.fetchAll(db, sql: """
-                SELECT photo_id, MIN(path) AS path FROM locations GROUP BY photo_id
+                SELECT photo_id, path FROM locations ORDER BY photo_id, path
                 """)
             for row in locations {
                 let id: Int64 = row["photo_id"]
-                summaries[id, default: PhotoSummary()].firstLocation = row["path"]
+                summaries[id, default: PhotoSummary()].locations.append(row["path"])
             }
             let developments = try Row.fetchAll(db, sql: """
                 SELECT photo_id, COUNT(*) AS n FROM developments GROUP BY photo_id

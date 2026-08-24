@@ -40,7 +40,9 @@ struct ImportWindow: View {
                 .foregroundStyle(model.sourceURL == nil ? .secondary : .primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Toggle("Include subfolders", isOn: $model.includeSubfolders)
+                .controlProbe("import-include-subfolders")
             Button("Choose…") { model.chooseSource() }
+                .controlProbe("import-choose")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -82,15 +84,20 @@ struct ImportWindow: View {
         // which is a worse answer than a slightly narrower slider.
         HStack(spacing: 10) {
             Button("Check All") { model.checkAll() }.fixedSize()
+                .controlProbe("import-check-all")
             Button("Uncheck All") { model.uncheckAll() }.fixedSize()
+                .controlProbe("import-uncheck-all")
             Toggle("Hide already imported", isOn: $model.hideImported).fixedSize()
+                .controlProbe("import-hide-imported")
             Picker("Sort", selection: $model.sort) {
                 ForEach(ImportSortOrder.allCases) { Text($0.title).tag($0) }
             }
             .fixedSize()
+            .controlProbe("import-sort")
             Slider(value: $model.thumbnailSize,
                    in: ImportModel.minimumThumbnailSize...ImportModel.maximumThumbnailSize)
                 .frame(minWidth: 60, maxWidth: 120)
+                .controlProbe("import-thumbnail-size")
             Spacer(minLength: 0)
             // The scan is a task like any other, so the window shows the same
             // indicator the main window does rather than a second private
@@ -103,6 +110,7 @@ struct ImportWindow: View {
             Button("Cancel") { close() }
                 .keyboardShortcut(.cancelAction)
                 .fixedSize()
+                .controlProbe("import-cancel")
             Button("Import") {
                 model.runImport()
                 close()
@@ -113,6 +121,7 @@ struct ImportWindow: View {
             // there; a view's body re-evaluates whenever `checkedCount` moves.
             .disabled(model.checkedCount == 0)
             .fixedSize()
+            .controlProbe("import-run")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

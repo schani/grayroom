@@ -117,6 +117,11 @@ struct ThumbnailGrid<Item: Identifiable, Cell: View>: View {
 struct ClickCatcher: NSViewRepresentable {
     let identifier: String
     var help: String?
+    /// What this thing *is*, when the catcher is standing in for a control
+    /// rather than sitting behind a cell that reads itself out. A cell leaves
+    /// both nil and stays out of the accessibility tree.
+    var accessibilityLabel: String?
+    var accessibilityValue: String?
     let onClick: (GridClickModifiers, Int) -> Void
 
     func makeNSView(context: Context) -> ClickCatcherView {
@@ -133,11 +138,21 @@ struct ClickCatcher: NSViewRepresentable {
         view.identifier = NSUserInterfaceItemIdentifier(identifier)
         view.toolTip = help
         view.onClick = onClick
+        view.setAccessibilityIdentifier(identifier)
+        view.setAccessibilityLabel(accessibilityLabel)
+        view.setAccessibilityValue(accessibilityValue)
+        view.isElement = accessibilityLabel != nil
     }
 }
 
 final class ClickCatcherView: NSView {
     var onClick: ((GridClickModifiers, Int) -> Void)?
+    /// Whether this catcher is the accessibility element for what is drawn on
+    /// top of it — true when it stands in for a control, false behind a cell.
+    var isElement = false
+
+    override func isAccessibilityElement() -> Bool { isElement }
+    override func accessibilityRole() -> NSAccessibility.Role? { isElement ? .button : nil }
 
     override func mouseDown(with event: NSEvent) {
         onClick?(GridClickModifiers(event.modifierFlags), event.clickCount)

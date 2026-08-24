@@ -223,15 +223,19 @@ public final class CanvasNSView: MTKView {
         window?.invalidateCursorRects(for: self)
     }
 
-    public override func resetCursorRects() {
-        // In brush mode the ring *is* the cursor, so hide the arrow.
-        if tool == .brush {
-            addCursorRect(bounds, cursor: .crosshair)
-        } else if tool == .targeted {
-            addCursorRect(bounds, cursor: .crosshair)
-        } else {
-            addCursorRect(bounds, cursor: .openHand)
+    /// The cursor the current tool wants. Public because AppKit's cursor rects
+    /// are write-only — a test can read this, but not what `addCursorRect` did.
+    public var toolCursor: NSCursor {
+        switch tool {
+        // In brush and targeted mode the crosshair marks the exact pixel the
+        // gesture will act on; panning is a grab.
+        case .brush, .targeted: return .crosshair
+        case .pan: return .openHand
         }
+    }
+
+    public override func resetCursorRects() {
+        addCursorRect(bounds, cursor: toolCursor)
     }
 
     public override func mouseMoved(with event: NSEvent) {

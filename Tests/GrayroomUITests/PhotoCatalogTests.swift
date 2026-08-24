@@ -89,6 +89,14 @@ final class PhotoCatalogTests: XCTestCase {
                        temp.directory.appendingPathComponent("copy-of-two.dng").path)
         XCTAssertNil(catalog.photo(id: none)?.firstLocation)
         XCTAssertNil(catalog.photo(id: none)?.url)
+        // *Every* path, sorted — the Folders panel files one photo under each
+        // directory it has a file in.
+        XCTAssertEqual(catalog.photo(id: one)?.locations,
+                       [temp.directory.appendingPathComponent("one.dng").path])
+        XCTAssertEqual(catalog.photo(id: two)?.locations,
+                       [temp.directory.appendingPathComponent("copy-of-two.dng").path,
+                        temp.directory.appendingPathComponent("two.dng").path])
+        XCTAssertEqual(catalog.photo(id: none)?.locations, [])
         XCTAssertEqual(catalog.photo(id: one)?.originalName, "one.dng")
         XCTAssertEqual(catalog.photo(id: one)?.width, 6000)
     }

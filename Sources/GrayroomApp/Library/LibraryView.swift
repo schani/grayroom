@@ -4,65 +4,72 @@ import GrayroomLibrary
 import GrayroomUI
 import SwiftUI
 
-/// Lightroom's Library module, grid view: every photo in the catalog, at a size
-/// the slider sets, with the colour labels visible at a glance.
+/// Lightroom's Library module: the Folders panel on the left, the grid — every
+/// photo in the selected source, at a size the slider sets, with the colour
+/// labels visible at a glance — on the right.
 ///
-/// The grid is the whole window in this mode — no develop sidebar, because
-/// nothing in it applies to a selection of photos. The structure is
-/// `ThumbnailGrid`, shared with the import window; what is here is the cell and
-/// the bottom bar. The keyboard is not here either: it is routed at the window
-/// level by `KeyRouter`, so the arrows keep working after a click on the
-/// toolbar or the size slider.
+/// The develop sidebar is not here, because nothing in it applies to a
+/// selection of photos. The grid is `ThumbnailGrid`, shared with the import
+/// window; what is here is the cell. The count and the size slider are in the
+/// window's one status bar (`RootView`), so the grid runs straight down to it
+/// instead of standing on a strip of its own. The keyboard is not here either:
+/// it is routed at the window level by `KeyRouter`, so the arrows keep working
+/// after a click on the toolbar, the size slider or the Folders panel.
 struct LibraryView: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        VStack(spacing: 0) {
-            ThumbnailGrid(
-                items: model.catalog.photos,
-                thumbnailSize: model.libraryThumbnailSize,
-                columns: $model.libraryColumns,
-                scrollTarget: $model.libraryScrollTarget,
-                onClick: { model.libraryClick($0.id, modifiers: $1) },
-                onOpen: { model.openPhoto(id: $0.id) },
-                help: { $0.firstLocation ?? "\($0.originalName) — no file on disk" },
-                cell: { photo in
-                    LibraryCell(photo: photo,
-                                size: model.libraryThumbnailSize,
-                                isHighlighted: model.isHighlighted(photo.id),
-                                previews: model.previews)
-                }
-            )
-            .overlay {
-                if model.catalog.isEmpty {
-                    VStack(spacing: 8) {
-                        Text("The library is empty").font(.title3)
-                        Text("Add photos with File › Import… (⇧⌘I)")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            Divider()
-            bottomBar
+        NavigationSplitView(columnVisibility: Binding(
+            get: { model.isFolderSidebarVisible ? .all : .detailOnly },
+            set: { model.isFolderSidebarVisible = $0 != .detailOnly }
+        )) {
+            FolderSidebar(model: model)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 420)
+        } detail: {
+            grid
         }
+        // `.balanced` and not the default: the grid is not a detail *view* of
+        // the panel, it is the module, and it should not push the panel off the
+        // window when it wants room.
+        //
+        // The split view brings the standard sidebar button in the window's
+        // title bar with it, which is what shows and hides the panel with the
+        // mouse; ⌥⌘S is the same command from the keyboard (`KeyRouter`), and
+        // View › Show/Hide Folders is where both are discoverable.
+        .navigationSplitViewStyle(.balanced)
     }
 
-    private var bottomBar: some View {
-        HStack(spacing: 10) {
-            Text(model.libraryCountLabel)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .fixedSize()
-            Spacer(minLength: 0)
-            Image(systemName: "photo").font(.system(size: 9)).foregroundStyle(.secondary)
-            Slider(value: $model.libraryThumbnailSize,
-                   in: ImportModel.minimumThumbnailSize...ImportModel.maximumThumbnailSize)
-                .frame(width: 140)
-            Image(systemName: "photo").font(.system(size: 13)).foregroundStyle(.secondary)
+    private var grid: some View {
+        ThumbnailGrid(
+            items: model.visiblePhotos,
+            thumbnailSize: model.libraryThumbnailSize,
+            columns: $model.libraryColumns,
+            scrollTarget: $model.libraryScrollTarget,
+            onClick: { model.libraryClick($0.id, modifiers: $1) },
+            onOpen: { model.openPhoto(id: $0.id) },
+            help: { $0.firstLocation ?? "\($0.originalName) — no file on disk" },
+            cell: { photo in
+                LibraryCell(photo: photo,
+                            size: model.libraryThumbnailSize,
+                            isHighlighted: model.isHighlighted(photo.id),
+                            previews: model.previews)
+            }
+        )
+        .overlay {
+            if model.catalog.isEmpty {
+                VStack(spacing: 8) {
+                    Text("The library is empty").font(.title3)
+                    Text("Add photos with File › Import… (⇧⌘I)")
+                        .foregroundStyle(.secondary)
+                }
+            } else if model.visiblePhotoIDs.isEmpty {
+                Text(model.folderSelection == .missing
+                     ? "No photos are missing their files"
+                     : "No photos in this folder")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
     }
 }
 

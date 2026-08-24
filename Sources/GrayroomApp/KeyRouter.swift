@@ -62,8 +62,20 @@ final class KeyRouter {
         else { return false }
         guard let characters = event.charactersIgnoringModifiers?.lowercased() else { return false }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        // Anything with Control or Option in it belongs to whatever else claims
-        // it; Command survives only for the one shortcut below.
+        // ⌥⌘S — macOS's shortcut for a sidebar, and the one Option key this
+        // router claims. It has to be claimed here: AppKit answers ⌥⌘S itself,
+        // out of the window's own toolbar, and its answer for a SwiftUI
+        // `NavigationSplitView` is to do nothing at all — so View › Show/Hide
+        // Folders never sees the key (measured: the menu item fires from the
+        // menu and never from the keyboard). The item keeps the shortcut for
+        // discoverability, exactly as `g` and `d` do.
+        if modifiers == [.command, .option], characters == "s" {
+            guard window == KeyRouter.mainWindow(), model.mode == .library else { return false }
+            model.isFolderSidebarVisible.toggle()
+            return true
+        }
+        // Anything else with Control or Option in it belongs to whatever else
+        // claims it; Command survives only for the one shortcut below.
         guard !modifiers.contains(.control), !modifiers.contains(.option) else { return false }
         let shift = modifiers.contains(.shift)
         let command = modifiers.contains(.command)

@@ -61,8 +61,11 @@ final class AppModel {
 
     /// Every photo in the library, in RAM, in grid order.
     let catalog = PhotoCatalog()
-    /// What the grid's ring is around.
-    var librarySelection = LibrarySelection()
+    /// The Library module's browser: which source the Folders panel has
+    /// selected, which rows are open, what that leaves in the grid, and the
+    /// grid's own highlight. It is a separate object because all of that is
+    /// testable without a window — see `LibraryBrowserState`.
+    let browser = LibraryBrowserState()
     /// The grid's current column count, which only the view knows; the arrow
     /// keys need it to know what "one row down" means.
     var libraryColumns = 1
@@ -319,18 +322,53 @@ final class AppModel {
         guard let library else { return }
         do {
             try catalog.load(from: library)
-            // A photo that is no longer there is no longer selected.
-            librarySelection.retain(Set(catalog.ids))
+            // The Folders panel's counts are a picture of exactly this, and a
+            // photo that is no longer there — or that the selected folder no
+            // longer shows — is no longer selected.
+            browser.rebuild(from: catalog.photos)
         } catch {
             errorMessage = "Could not read the library: \(error)"
         }
     }
 
+    // MARK: The Folders panel, as the views address it
+
+    var folders: FolderTree { browser.folders }
+
+    /// Which source the Folders panel has selected. It is what the grid is
+    /// filtered by, and it deliberately survives a trip through Develop.
+    var folderSelection: FolderSelection {
+        get { browser.selection }
+        set { browser.selection = newValue }
+    }
+
+    var expandedFolders: Set<String> {
+        get { browser.expandedFolders }
+        set { browser.expandedFolders = newValue }
+    }
+
+    /// Whether the Folders panel is showing. The panel is Library-only — none
+    /// of it applies to the one photo the develop view is editing.
+    var isFolderSidebarVisible: Bool {
+        get { browser.isSidebarVisible }
+        set { browser.isSidebarVisible = newValue }
+    }
+
+    var visiblePhotoIDs: [Int64] { browser.visiblePhotoIDs }
+
+    var visiblePhotos: [CatalogPhoto] { browser.visiblePhotos(from: catalog.photos) }
+
+    func isVisible(_ id: Int64) -> Bool { browser.isVisible(id) }
+
     /// `g`. Comes back to the grid with the photo you were developing
     /// highlighted and scrolled into view.
+    /// The folder the panel has selected is left alone: it is the module's
+    /// state, not the photo's, and Lightroom keeps it across a trip to Develop.
+    /// So the photo is only re-highlighted when the current folder is actually
+    /// showing it.
     func showLibrary() {
-        if let currentPhotoID, catalog.index(of: currentPhotoID) != nil {
-            librarySelection.select([currentPhotoID])
+        if let currentPhotoID, isVisible(currentPhotoID) {
+            browser.selectPhotos([currentPhotoID])
             libraryScrollTarget = currentPhotoID
         }
         mode = .library
@@ -359,44 +397,45 @@ final class AppModel {
             errorMessage = "\(photo.originalName) has no file on disk"
             return
         }
-        librarySelection.select([id])
+        browser.selectPhotos([id])
         open(url: URL(fileURLWithPath: path), knownPhotoID: id)
         mode = .develop
     }
 
     // MARK: Grid selection
 
-    var highlightedPhotoIDs: [Int64] { librarySelection.ordered(in: catalog.ids) }
+    /// Every selection command spans the *visible* list — the folder the panel
+    /// has selected, not the whole catalog — because that is what the user sees
+    /// a range and an arrow key moving over. The rules themselves are in
+    /// `LibraryBrowserState`, where they can be tested without a window.
+    var librarySelection: LibrarySelection {
+        get { browser.photoSelection }
+        set { browser.photoSelection = newValue }
+    }
 
-    func isHighlighted(_ id: Int64) -> Bool { librarySelection.contains(id) }
+    var highlightedPhotoIDs: [Int64] { browser.highlightedPhotoIDs }
+
+    func isHighlighted(_ id: Int64) -> Bool { browser.isHighlighted(id) }
 
     func libraryClick(_ id: Int64, modifiers: GridClickModifiers) {
-        librarySelection.click(id, modifiers: modifiers, order: catalog.ids)
+        browser.clickPhoto(id, modifiers: modifiers)
     }
 
     func moveLibraryHighlight(dx: Int, dy: Int) {
-        librarySelection.moveHighlight(dx: dx, dy: dy, columns: libraryColumns,
-                                       order: catalog.ids)
-        libraryScrollTarget = librarySelection.anchor
+        libraryScrollTarget = browser.movePhotoHighlight(dx: dx, dy: dy, columns: libraryColumns)
     }
 
     /// Shift-arrow: the anchor stays put and the range grows from it.
     func extendLibraryHighlight(dx: Int, dy: Int) {
-        librarySelection.extendHighlight(dx: dx, dy: dy, columns: libraryColumns,
-                                         order: catalog.ids)
-        libraryScrollTarget = librarySelection.cursor
+        libraryScrollTarget = browser.extendPhotoHighlight(dx: dx, dy: dy, columns: libraryColumns)
     }
 
-    /// The grid's bottom-bar count.
-    var libraryCountLabel: String {
-        let total = catalog.count
-        let photos = "\(total) photo" + (total == 1 ? "" : "s")
-        let selected = librarySelection.count
-        return selected == 0 ? photos : "\(photos) · \(selected) selected"
-    }
+    /// The status bar's photo count in the Library module — of what the grid is
+    /// showing, so it follows the Folders panel the way Lightroom's does.
+    var libraryCountLabel: String { browser.countLabel }
 
     func selectAllPhotos() {
-        librarySelection.select(catalog.ids)
+        browser.selectAllPhotos()
     }
 
     func stepLibraryThumbnailSize(_ steps: Int) {
@@ -507,6 +546,16 @@ final class AppModel {
             panel.directoryURL = current.deletingLastPathComponent()
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        openChosenFile(url)
+    }
+
+    /// Everything File › Open… does once the panel has answered.
+    ///
+    /// Split out because `NSOpenPanel.runModal` cannot be answered from inside
+    /// the process, so the self-test supplies the panel's *result* and drives
+    /// the production path from here — the same arrangement the Import window's
+    /// source panel already has.
+    func openChosenFile(_ url: URL) {
         open(url: url)
         // Choosing a file by hand means developing it.
         mode = .develop
@@ -848,7 +897,14 @@ final class AppModel {
             panel.allowedContentTypes = [type]
         }
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+        export(to: outputURL)
+    }
 
+    /// Everything Export does once the save panel has answered — see
+    /// `openChosenFile` for why the panel and the work it starts are two
+    /// methods.
+    func export(to outputURL: URL) {
+        guard let service, let url = imageURL else { return }
         isExporting = true
         statusMessage = nil
         // Indeterminate: a full-resolution render reports nothing until it is

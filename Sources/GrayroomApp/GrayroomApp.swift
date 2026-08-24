@@ -16,14 +16,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var keyRouter: KeyRouter?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        // A self-test must never take the screen away from whoever is using the
+        // machine: it runs as an accessory (no Dock tile, no menu bar of its
+        // own), never activates, and puts its windows below the desktop — see
+        // `SelfTest.stayOutOfTheWay()`.
+        if SelfTest.isRequested {
+            NSApp.setActivationPolicy(.accessory)
+            SelfTest.stayOutOfTheWay()
+        } else {
+            NSApp.setActivationPolicy(.regular)
+            // After the policy call, not before: `.prohibited` has no Dock tile
+            // to put a picture on, and the assignment is silently dropped.
+            // SPM builds a bare Mach-O, so there is no `.app` bundle for the
+            // Finder to read an icon out of — the app has to set its own.
+            if let url = Bundle.module.url(forResource: "AppIcon", withExtension: "icns"),
+               let image = NSImage(contentsOf: url) {
+                NSApp.applicationIconImage = image
+            } else {
+                NSLog("Grayroom: AppIcon.icns not found in bundle")
+            }
+            NSApp.activate(ignoringOtherApps: true)
+        }
         // By title, not `.first`: there is a second `Window` scene now, and
         // whichever one AppKit happens to have created first is not necessarily
         // the editor.
         if let window = NSApp.windows.first(where: { $0.title == "Grayroom" })
             ?? NSApp.windows.first {
-            window.makeKeyAndOrderFront(nil)
+            if SelfTest.isRequested {
+                // `orderFront`, not `makeKeyAndOrderFront`: the window has to be
+                // laid out and drawn (the tests click what they see) without the
+                // app coming forward.
+                window.orderFront(nil)
+            } else {
+                window.makeKeyAndOrderFront(nil)
+            }
             window.setContentSize(NSSize(width: 1440, height: 900))
             window.center()
         }
@@ -55,6 +81,12 @@ struct GrayroomApp: App {
         Window("Grayroom", id: "main") {
             RootView(model: model)
         }
+        // The controls live *in* the title bar (see `RootView.toolbar`), so the
+        // title text is off: one bar across the top rather than a line of text
+        // with a row of buttons under it. The window keeps its `title` string —
+        // that is what `applicationDidFinishLaunching` and `KeyRouter` find it
+        // by, and what accessibility reads out — only the drawn text goes.
+        .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Open…") { model.presentOpenPanel() }
@@ -104,6 +136,19 @@ struct GrayroomApp: App {
                     .keyboardShortcut("g", modifiers: [])
                 Button("Develop") { model.showDevelop() }
                     .keyboardShortcut("d", modifiers: [])
+                Divider()
+                // macOS's own shortcut for a sidebar. In *this* group and not
+                // `CommandGroup(replacing: .sidebar)`: replacing that group
+                // takes the anchor this one is positioned against with it, and
+                // Library and Develop then vanish from the menu bar along with
+                // their bare keys (measured — the library self-test caught it).
+                //
+                // The title does not flip between "Show" and "Hide" because
+                // this builder runs once, at launch (see the undo note above),
+                // so a title read off the model would freeze at what it said
+                // then.
+                Button("Show/Hide Folders") { model.isFolderSidebarVisible.toggle() }
+                    .keyboardShortcut("s", modifiers: [.command, .option])
                 Divider()
             }
             // Lightroom's colour labels, on Lightroom's keys: 6/7/8/9 for

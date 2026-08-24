@@ -192,9 +192,29 @@ picked); tags are free-form many-to-many. No ratings for now.
 
    - `PhotoCatalog` (in `GrayroomUI`) holds the whole library in RAM — one
      `CatalogPhoto` per photo, sorted by capture date with undated frames last —
-     built from a single `Library.catalogSnapshot()`: the photo rows plus three
-     GROUP BY aggregates (first location `MIN(path)`, development count, tags).
-     No query while scrolling; selection is a set of row ids.
+     built from a single `Library.catalogSnapshot()`: the photo rows plus the
+     aggregates that go with them (every location, development count,
+     development #1's fingerprint, tags). Locations come back as one ordered
+     scan grouped in Swift rather than a `group_concat`, because a path may
+     contain any byte but `/`. No query while scrolling; selection is a set of
+     row ids.
+   - **Folders panel.** Lightroom's left panel, reduced to its three sources: a
+     Catalog section ("All Photographs" and its count), the folder tree, and a
+     "Missing" row for the photos the library remembers and has no file for —
+     drawn even at zero, greyed. `FolderTree` (in `GrayroomUI`) builds it from
+     the catalog in one pass: roots are volumes (`/` under the boot volume's
+     name, `/Volumes/<x>` beside it), a chain of directories with nothing in it
+     but one subdirectory is drawn as one row named after the joined path
+     ("Users/schani/Pictures"), and every row carries the number of *distinct*
+     photos in it or below it. Selecting a row filters the grid
+     (`FolderSelection` = the catalog, one folder and everything under it, or
+     the missing files); the grid's highlight keeps only what is still on
+     screen, the arrows and ⌘A span the filtered list, and the bottom bar
+     counts it. The panel is mouse-driven — the arrows always belong to the
+     grid — and it shows and hides with the standard title-bar button, ⌥⌘S, or
+     View › Show/Hide Folders. `LibraryBrowserState` holds all of that state
+     (selection, disclosure, filtered ids, highlight) with no SwiftUI in it, so
+     every transition is an XCTest.
    - Grid: adaptive `LazyVGrid`, thumbnail-size slider (same default as the
      import window), "N photos · M selected", a cell per photo showing the
      picture fitted in a square, the filename, a badge when the photo has a
@@ -255,8 +275,10 @@ picked); tags are free-form many-to-many. No ratings for now.
      develop view is busy, so an autosave's rebuild can never land in the middle
      of a slider drag. One "Building previews" task appears in the activity
      centre while it is busy.
-   - `GRAYROOM_SELFTEST=library` drives all of it in a throwaway home: import,
-     then **real mouse events** (click, shift-click, cmd-click, double-click,
+   - `GRAYROOM_SELFTEST=library` drives all of it in a throwaway home, as an
+     accessory app whose windows sit below the desktop so a run never
+     interrupts the user: import, then **real mouse events** (click,
+     shift-click, cmd-click, double-click,
      with the modifier flags on the events) and **real key events** (arrows,
      shift-arrows, ⌘A, `8` → green in RAM *and* in SQLite, `8` again → cleared,
      `d` → Develop on that photo, `6` → red, `g` → back to the grid with it
@@ -265,7 +287,13 @@ picked); tags are free-form many-to-many. No ratings for now.
      row in `previews.sqlite` at 512 px with no fingerprint; developing one photo
      (+2 EV, autosaved) turns *its* row into a `source = 1` one whose fingerprint
      is development #1's; and the picture the grid holds afterwards is measurably
-     brighter than the embedded preview it replaced.
+     brighter than the embedded preview it replaced. Then the Folders panel: the
+     rows it draws, read back through **accessibility** (name and count), a real
+     click on a subfolder filtering the grid to the one photo staged into it,
+     its parent restoring the rest, the arrows still moving the *grid* after
+     that click, the folder surviving `d`/`g`, a location removed through the
+     library API turning up under Missing, and the panel folding away on ⌥⌘S
+     and coming back.
 
    Still later: filtering (by colour, tag, camera, date), collections, the
    filmstrip in Develop, and sorting other than capture time.

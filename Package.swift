@@ -79,6 +79,11 @@ let package = Package(
         .executableTarget(
             name: "GrayroomApp",
             dependencies: ["GrayroomCore", "GrayroomLibrary", "GrayroomUI", "GrayroomCanvas"],
+            // SPM builds a bare Mach-O, not an `.app`, so there is no
+            // `CFBundleIconFile` for the system to read: the icon ships as a
+            // resource and the delegate hands it to `NSApp` at launch.
+            // Regenerate it with `swift Tools/make-icon.swift`.
+            resources: [.copy("Resources/AppIcon.icns")],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(

@@ -16,23 +16,103 @@ final class RecordingHandler: CanvasInputHandler {
 
     var begins: [Begin] = []
     var extends: [CGPoint] = []
+    var extendPressures: [Double] = []
     var endCount = 0
     var targetedBegins: [CGPoint] = []
     var targetedDrags: [Double] = []
+    var targetedEndCount = 0
     var transforms: [CanvasTransform] = []
     var keyCommands: [CanvasKeyCommand] = []
+    var beforeAfterHeld: [Bool] = []
 
     func canvasTransformChanged(_ transform: CanvasTransform) { transforms.append(transform) }
     func canvasBeginStroke(atNormalized p: CGPoint, pressure: Double, erase: Bool) {
         begins.append(Begin(point: p, pressure: pressure, erase: erase))
     }
-    func canvasExtendStroke(toNormalized p: CGPoint, pressure: Double) { extends.append(p) }
+    func canvasExtendStroke(toNormalized p: CGPoint, pressure: Double) {
+        extends.append(p)
+        extendPressures.append(pressure)
+    }
     func canvasEndStroke() { endCount += 1 }
     func canvasBeginTargeted(atNormalized p: CGPoint) { targetedBegins.append(p) }
     func canvasDragTargeted(dragPixels: Double) { targetedDrags.append(dragPixels) }
-    func canvasEndTargeted() {}
+    func canvasEndTargeted() { targetedEndCount += 1 }
     func canvasKeyCommand(_ command: CanvasKeyCommand) { keyCommands.append(command) }
-    func canvasBeforeAfterHeld(_ held: Bool) {}
+    func canvasBeforeAfterHeld(_ held: Bool) { beforeAfterHeld.append(held) }
+
+    func reset() {
+        begins.removeAll(); extends.removeAll(); extendPressures.removeAll()
+        endCount = 0
+        targetedBegins.removeAll(); targetedDrags.removeAll(); targetedEndCount = 0
+        transforms.removeAll(); keyCommands.removeAll(); beforeAfterHeld.removeAll()
+    }
+}
+
+/// `CanvasKeyCommand` carries payloads and is not `Equatable`; this is the
+/// test-side spelling used in assertions.
+extension CanvasKeyCommand {
+    var testDescription: String {
+        switch self {
+        case .toggleBrush: return "toggleBrush"
+        case .toggleTargeted: return "toggleTargeted"
+        case .toggleEraser: return "toggleEraser"
+        case .sizeStep(let n): return "sizeStep(\(n))"
+        case .featherStep(let n): return "featherStep(\(n))"
+        case .fit: return "fit"
+        case .actualSize: return "actualSize"
+        case .colorLabel(let n): return "colorLabel(\(n))"
+        }
+    }
+}
+
+/// An `NSEvent` for the scroll and gesture types AppKit gives no public
+/// constructor for. Only the accessors `CanvasNSView` actually reads are
+/// overridden; everything else stays `NSEvent`'s.
+///
+/// `NSEvent(cgEvent:)` can build a real scroll event, but it comes back with a
+/// `nil` window and a *screen* `locationInWindow`, which is exactly the piece
+/// the canvas's coordinate conversion is being tested on. A subclass is the
+/// only way to hand `scrollWheel(with:)` a window-relative point.
+final class SyntheticGestureEvent: NSEvent {
+    private let kind: NSEvent.EventType
+    private let mag: CGFloat
+    private let loc: CGPoint
+    private weak var win: NSWindow?
+    private let dx: CGFloat
+    private let dy: CGFloat
+    private let precise: Bool
+    private let flags: NSEvent.ModifierFlags
+
+    init(type: NSEvent.EventType, magnification: CGFloat = 0, location: CGPoint,
+         window: NSWindow?, deltaX: CGFloat = 0, deltaY: CGFloat = 0,
+         precise: Bool = true, modifiers: NSEvent.ModifierFlags = []) {
+        self.kind = type
+        self.mag = magnification
+        self.loc = location
+        self.win = window
+        self.dx = deltaX
+        self.dy = deltaY
+        self.precise = precise
+        self.flags = modifiers
+        super.init()
+    }
+
+    required init?(coder: NSCoder) { fatalError("not supported") }
+
+    override var type: NSEvent.EventType { kind }
+    override var magnification: CGFloat { mag }
+    override var locationInWindow: NSPoint { loc }
+    override var window: NSWindow? { win }
+    override var windowNumber: Int { win?.windowNumber ?? 0 }
+    override var modifierFlags: NSEvent.ModifierFlags { flags }
+    override var timestamp: TimeInterval { 0 }
+    override var hasPreciseScrollingDeltas: Bool { precise }
+    override var scrollingDeltaX: CGFloat { dx }
+    override var scrollingDeltaY: CGFloat { dy }
+    override var deltaX: CGFloat { dx }
+    override var deltaY: CGFloat { dy }
+    override var phase: NSEvent.Phase { [] }
+    override var momentumPhase: NSEvent.Phase { [] }
 }
 
 /// A real `NSWindow` with a real `CanvasNSView` as its content view, driven by
@@ -103,8 +183,9 @@ final class CanvasHarness {
 
     // MARK: - Events
 
-    private func event(_ type: NSEvent.EventType, at p: CGPoint,
-                       clickCount: Int, modifiers: NSEvent.ModifierFlags) -> NSEvent {
+    func event(_ type: NSEvent.EventType, at p: CGPoint,
+               clickCount: Int, modifiers: NSEvent.ModifierFlags,
+               pressure: Float = 1) -> NSEvent {
         eventNumber += 1
         guard let e = NSEvent.mouseEvent(with: type,
                                          location: p,
@@ -114,7 +195,7 @@ final class CanvasHarness {
                                          context: nil,
                                          eventNumber: eventNumber,
                                          clickCount: clickCount,
-                                         pressure: 1) else {
+                                         pressure: pressure) else {
             fatalError("could not synthesize \(type)")
         }
         return e
@@ -124,17 +205,126 @@ final class CanvasHarness {
     /// real. Returns whether the canvas was the view AppKit picked.
     @discardableResult
     func send(_ type: NSEvent.EventType, at p: CGPoint,
-              clickCount: Int = 1, modifiers: NSEvent.ModifierFlags = []) -> Bool {
+              clickCount: Int = 1, modifiers: NSEvent.ModifierFlags = [],
+              pressure: Float = 1) -> Bool {
         let hit = window.contentView?.hitTest(p) === canvas
-        window.sendEvent(event(type, at: p, clickCount: clickCount, modifiers: modifiers))
+        window.sendEvent(event(type, at: p, clickCount: clickCount,
+                               modifiers: modifiers, pressure: pressure))
         return hit
     }
 
     func click(rightOf dx: CGFloat, below dy: CGFloat,
-               clickCount: Int = 1, modifiers: NSEvent.ModifierFlags = []) {
+               clickCount: Int = 1, modifiers: NSEvent.ModifierFlags = [],
+               pressure: Float = 1) {
         let p = windowPoint(rightOf: dx, below: dy)
-        send(.leftMouseDown, at: p, clickCount: clickCount, modifiers: modifiers)
-        send(.leftMouseUp, at: p, clickCount: clickCount, modifiers: modifiers)
+        send(.leftMouseDown, at: p, clickCount: clickCount, modifiers: modifiers,
+             pressure: pressure)
+        send(.leftMouseUp, at: p, clickCount: clickCount, modifiers: modifiers,
+             pressure: pressure)
+    }
+
+    /// A press-and-drag-and-release through a list of visual canvas locations.
+    func drag(through points: [(CGFloat, CGFloat)], modifiers: NSEvent.ModifierFlags = [],
+              pressure: Float = 1) {
+        precondition(!points.isEmpty)
+        send(.leftMouseDown, at: windowPoint(rightOf: points[0].0, below: points[0].1),
+             modifiers: modifiers, pressure: pressure)
+        for p in points.dropFirst() {
+            send(.leftMouseDragged, at: windowPoint(rightOf: p.0, below: p.1),
+                 modifiers: modifiers, pressure: pressure)
+        }
+        let last = points[points.count - 1]
+        send(.leftMouseUp, at: windowPoint(rightOf: last.0, below: last.1), modifiers: modifiers,
+             pressure: pressure)
+    }
+
+    // MARK: - Keyboard
+
+    /// AppKit's key routing needs a first responder; the window is deliberately
+    /// never made key (that would steal focus), and `sendEvent` still reaches the
+    /// responder chain.
+    @discardableResult
+    func sendKey(_ type: NSEvent.EventType, _ charsIgnoringModifiers: String,
+                 characters: String? = nil,
+                 modifiers: NSEvent.ModifierFlags = [],
+                 isARepeat: Bool = false) -> Bool {
+        window.makeFirstResponder(canvas)
+        guard let e = NSEvent.keyEvent(with: type,
+                                       location: .zero,
+                                       modifierFlags: modifiers,
+                                       timestamp: ProcessInfo.processInfo.systemUptime,
+                                       windowNumber: window.windowNumber,
+                                       context: nil,
+                                       characters: characters ?? charsIgnoringModifiers,
+                                       charactersIgnoringModifiers: charsIgnoringModifiers,
+                                       isARepeat: isARepeat,
+                                       keyCode: 0) else {
+            fatalError("could not synthesize \(type)")
+        }
+        window.sendEvent(e)
+        return window.firstResponder === canvas
+    }
+
+    func keyDown(_ chars: String, characters: String? = nil,
+                 modifiers: NSEvent.ModifierFlags = [], isARepeat: Bool = false) {
+        sendKey(.keyDown, chars, characters: characters, modifiers: modifiers,
+                isARepeat: isARepeat)
+    }
+
+    func keyUp(_ chars: String, modifiers: NSEvent.ModifierFlags = []) {
+        sendKey(.keyUp, chars, modifiers: modifiers)
+    }
+
+    // MARK: - Scroll / pinch
+
+    /// A scroll wheel / trackpad scroll at a visual canvas location.
+    ///
+    /// Routed through `sendEvent`, so AppKit's hit-testing picks the view.
+    func scroll(rightOf dx: CGFloat, below dy: CGFloat,
+                deltaX: CGFloat = 0, deltaY: CGFloat = 0,
+                precise: Bool = true, modifiers: NSEvent.ModifierFlags = []) {
+        let e = SyntheticGestureEvent(type: .scrollWheel,
+                                      location: windowPoint(rightOf: dx, below: dy),
+                                      window: window, deltaX: deltaX, deltaY: deltaY,
+                                      precise: precise, modifiers: modifiers)
+        window.sendEvent(e)
+    }
+
+    /// A pinch at a visual canvas location.
+    ///
+    /// Delivered straight to the view: `NSWindow.sendEvent` hands gesture events
+    /// to the gesture-recogniser machinery, which drops a synthetic one (verified
+    /// — the zoom did not move), so routing it through the window would test
+    /// nothing.
+    func magnify(rightOf dx: CGFloat, below dy: CGFloat, by magnification: CGFloat) {
+        let e = SyntheticGestureEvent(type: .magnify, magnification: magnification,
+                                      location: windowPoint(rightOf: dx, below: dy),
+                                      window: window)
+        canvas.magnify(with: e)
+    }
+
+    /// Mouse-moved and mouse-exited are tracking-area callbacks; AppKit only
+    /// generates them for a key window under a real pointer, so they are
+    /// delivered to the view directly.
+    func moveMouse(rightOf dx: CGFloat, below dy: CGFloat) {
+        canvas.mouseMoved(with: event(.mouseMoved, at: windowPoint(rightOf: dx, below: dy),
+                                      clickCount: 0, modifiers: []))
+    }
+
+    func exitMouse() {
+        eventNumber += 1
+        guard let e = NSEvent.enterExitEvent(with: .mouseExited,
+                                             location: windowPoint(rightOf: 0, below: 0),
+                                             modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber,
+                                             context: nil,
+                                             eventNumber: eventNumber,
+                                             trackingNumber: 0,
+                                             userData: nil) else {
+            fatalError("could not synthesize mouseExited")
+        }
+        canvas.mouseExited(with: e)
     }
 
     // MARK: - Ground-truth geometry (derived from first principles, not from
@@ -159,6 +349,24 @@ final class CanvasHarness {
         let originY = (backingSize.height - drawnH) / 2
         return CGPoint(x: (dx * scale - originX) / drawnW,
                        y: (dy * scale - originY) / drawnH)
+    }
+
+    /// A visual canvas location in device pixels. Valid because the canvas is
+    /// flipped and its rect starts at the window origin — both asserted by
+    /// `testHarnessLayoutIsWhatTheOtherTestsAssume`.
+    func backingPoint(rightOf dx: CGFloat, below dy: CGFloat) -> CGPoint {
+        CGPoint(x: dx * scale, y: dy * scale)
+    }
+
+    /// Normalised image point that must be under a visual canvas location for a
+    /// given zoom/centre, restating the documented mapping
+    /// `image = (view − viewSize/2) / zoom + centre` rather than calling it.
+    func expectedNormalized(rightOf dx: CGFloat, below dy: CGFloat,
+                            zoom: Double, center: CGPoint, imageSize: CGSize) -> CGPoint {
+        let v = backingPoint(rightOf: dx, below: dy)
+        let img = CGPoint(x: (v.x - backingSize.width / 2) / CGFloat(zoom) + center.x,
+                          y: (v.y - backingSize.height / 2) / CGFloat(zoom) + center.y)
+        return CGPoint(x: img.x / imageSize.width, y: img.y / imageSize.height)
     }
 }
 

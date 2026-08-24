@@ -24,7 +24,12 @@ top-left identity plate.
   stale, check the repo root for stray `*.o`/`*.d` files (SwiftPM corruption).
 - App self-tests (`GRAYROOM_SELFTEST=...`) must run with `CFFIXED_USER_HOME`
   pointed at a throwaway home so they never touch the real library.
+- Self-tests run as an accessory app with their windows below the desktop, so
+  they never take the screen or the keyboard away from whoever is using the
+  machine.
 - Build everything tests-first. All UI functionality must also have tests.
   Architect the code so that UI is easily testable.
+- Every feature ships with tests: logic in XCTest, UI via the GRAYROOM_SELFTEST
+  harness.
 - `library.sqlite` is the only source of truth; there are no sidecars.
   `previews.sqlite` beside it holds derived, disposable 512 px previews.
