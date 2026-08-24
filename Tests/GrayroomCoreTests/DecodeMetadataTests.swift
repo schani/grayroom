@@ -136,6 +136,116 @@ final class DecodeMetadataTests: XCTestCase {
         XCTAssertNil(ImageDecoder.captureDate(url: URL(fileURLWithPath: "/nope/missing.jpg")))
     }
 
+    // MARK: - Lens
+
+    func testLensIsReadFromTheEXIFDictionary() {
+        let lens = ImageDecoder.lens(exif: [
+            kCGImagePropertyExifLensMake as String: "Leica Camera AG",
+            kCGImagePropertyExifLensModel as String: "Summilux-M 1:1.4/35 ASPH.",
+        ])
+        XCTAssertEqual(lens.make, "Leica Camera AG")
+        XCTAssertEqual(lens.model, "Summilux-M 1:1.4/35 ASPH.")
+    }
+
+    /// The two halves are independent: adapted and manual glass is written as a
+    /// model with no make, and that is still a lens.
+    func testAModelWithoutAMakeIsStillReported() {
+        let lens = ImageDecoder.lens(exif: [
+            kCGImagePropertyExifLensModel as String: "R-Adapter M",
+        ])
+        XCTAssertNil(lens.make)
+        XCTAssertEqual(lens.model, "R-Adapter M")
+
+        let makeOnly = ImageDecoder.lens(exif: [
+            kCGImagePropertyExifLensMake as String: "NIKON",
+        ])
+        XCTAssertEqual(makeOnly.make, "NIKON")
+        XCTAssertNil(makeOnly.model)
+    }
+
+    /// Cameras pad these fields; an all-blank field is no lens at all rather
+    /// than a lens whose name is spaces.
+    func testBlankAndMissingLensFieldsAreNil() {
+        let padded = ImageDecoder.lens(exif: [
+            kCGImagePropertyExifLensMake as String: "  FUJIFILM  ",
+            kCGImagePropertyExifLensModel as String: " GF63mmF2.8 R WR\n",
+        ])
+        XCTAssertEqual(padded.make, "FUJIFILM")
+        XCTAssertEqual(padded.model, "GF63mmF2.8 R WR")
+
+        let blank = ImageDecoder.lens(exif: [
+            kCGImagePropertyExifLensMake as String: "   ",
+            kCGImagePropertyExifLensModel as String: "",
+        ])
+        XCTAssertNil(blank.make)
+        XCTAssertNil(blank.model)
+
+        XCTAssertNil(ImageDecoder.lens(exif: nil).model)
+        XCTAssertNil(ImageDecoder.lens(exif: [:]).model)
+        // A non-string value is not a lens name either.
+        XCTAssertNil(ImageDecoder.lens(exif: [
+            kCGImagePropertyExifLensModel as String: 35 as NSNumber,
+        ]).model)
+    }
+
+    /// The RAW path reads `CIRAWFilter.properties` first and ImageIO's
+    /// dictionary only when the filter has no section of that name — per
+    /// section, so the two are never interleaved.
+    func testTheImageIOFallbackDictionaryIsUsedOnlyForAMissingSection() {
+        let exifKey = kCGImagePropertyExifDictionary as String
+        let primary: [AnyHashable: Any] = [
+            exifKey: [kCGImagePropertyExifLensModel as String: "from the filter"],
+        ]
+        let fallback: [AnyHashable: Any] = [
+            exifKey: [kCGImagePropertyExifLensModel as String: "from ImageIO"],
+            kCGImagePropertyGPSDictionary as String: [
+                kCGImagePropertyGPSLatitude as String: 48.2 as NSNumber,
+            ],
+        ]
+
+        // The filter has this section: ImageIO's copy is not consulted at all.
+        let exif = ImageDecoder.section(kCGImagePropertyExifDictionary,
+                                        primary: primary, fallback: fallback)
+        XCTAssertEqual(ImageDecoder.lens(exif: exif).model, "from the filter")
+
+        // It has no GPS section, so ImageIO's is what describes the file.
+        let gps = ImageDecoder.section(kCGImagePropertyGPSDictionary,
+                                       primary: primary, fallback: fallback)
+        XCTAssertEqual(ImageDecoder.gpsPosition(gps: gps).0 ?? 0, 48.2, accuracy: 1e-9)
+
+        // Neither has it: nil, and every reader of it copes with that.
+        XCTAssertNil(ImageDecoder.section(kCGImagePropertyExifDictionary,
+                                          primary: [:], fallback: [:]))
+        // A filter with no EXIF at all falls back wholesale.
+        let fallenBack = ImageDecoder.section(kCGImagePropertyExifDictionary,
+                                              primary: [:], fallback: fallback)
+        XCTAssertEqual(ImageDecoder.lens(exif: fallenBack).model, "from ImageIO")
+    }
+
+    /// End to end on a real file: whatever `probe` reports is what the file's
+    /// own EXIF says, read through a second, independent ImageIO pass.
+    func testProbeReportsTheLensOfARealFile() throws {
+        guard let url = testDataURL("L1000003.DNG") else {
+            throw XCTSkip("testdata/L1000003.DNG not present (set GRAYROOM_TEST_DNG to override)")
+        }
+        let info = try ImageDecoder.probe(url: url)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                  as? [String: Any]
+        else { throw XCTSkip("ImageIO cannot read \(url.lastPathComponent)") }
+        let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any]
+        guard let expected = exif?[kCGImagePropertyExifLensModel as String] as? String,
+              !expected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { throw XCTSkip("\(url.lastPathComponent) carries no EXIF lens") }
+
+        XCTAssertEqual(info.lensModel, expected.trimmingCharacters(in: .whitespacesAndNewlines))
+        XCTAssertEqual(info.lensMake,
+                       (exif?[kCGImagePropertyExifLensMake as String] as? String)?
+                           .trimmingCharacters(in: .whitespacesAndNewlines))
+        // The lens is not the camera.
+        XCTAssertNotEqual(info.lensModel, info.cameraModel)
+    }
+
     // MARK: - Format predicate
 
     /// The predicate is not just the hand-written list: a still format this OS

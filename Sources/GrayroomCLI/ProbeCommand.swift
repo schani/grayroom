@@ -22,6 +22,8 @@ struct Probe: ParsableCommand {
         out += "raw:                  \(info.isRAW ? "yes" : "no")\n"
         if let make = info.cameraMake { out += "make:                 \(make)\n" }
         if let model = info.cameraModel { out += "model:                \(model)\n" }
+        if let make = info.lensMake { out += "lensMake:             \(make)\n" }
+        if let model = info.lensModel { out += "lensModel:            \(model)\n" }
         out += "nativeSize:           \(Int(info.nativeSize.width)) x \(Int(info.nativeSize.height))\n"
         out += "orientation:          \(info.orientation.rawValue) (\(orientationName(info.orientation)))\n"
         out += "orientedSize:         \(Int(info.orientedSize.width)) x \(Int(info.orientedSize.height))\n"

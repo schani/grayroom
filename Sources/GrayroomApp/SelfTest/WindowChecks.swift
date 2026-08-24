@@ -15,6 +15,7 @@ extension SelfTest {
     static func runWindowChecks(app: AppModel, window: NSWindow,
                                 check: @escaping (Bool, String) -> Void,
                                 failures: @escaping () -> [String]) {
+        phase("window")
         /// The rectangles the user notices: the title bar's own leading
         /// controls and the status bar's activity slot.
         func toolbarFrames() -> [String: NSRect] {
@@ -218,6 +219,7 @@ extension SelfTest {
     static func runToolbarAndMenuChecks(app: AppModel, window: NSWindow,
                                         check: @escaping (Bool, String) -> Void,
                                         failures: @escaping () -> [String]) {
+        phase("toolbar and menus")
         let ids = app.catalog.ids
         guard ids.count >= 2 else {
             check(false, "two photos to label from the menu")
@@ -460,17 +462,30 @@ extension SelfTest {
     static func runOpenAndExportChecks(app: AppModel, window: NSWindow,
                                        check: @escaping (Bool, String) -> Void,
                                        failures: @escaping () -> [String]) {
-        // The synthetic JPEG, when it is there: the export renders at full
-        // resolution from a fresh decode, and 64x48 keeps that a fraction of a
-        // second rather than a hundred megapixels of it.
+        phase("open and export")
+        // The synthetic JPEG: the export renders at full resolution from a
+        // fresh decode, and 64x48 keeps that a fraction of a second rather
+        // than the two minutes a hundred-megapixel frame costs — most of it
+        // in the PNG encoder, which is not what this checks.
+        //
+        // Addressed by *path*, not through the catalog: the Folders checks
+        // take this photo's location away on purpose, and File › Open… does
+        // not care — it is a file the user picked, which the library then
+        // recognises by its hash. Any photo on disk stands in when there is no
+        // staged source (a run pointed at someone else's folder).
+        let staged = stagedSource?
+            .appendingPathComponent(folderSubfolderName, isDirectory: true)
+            .appendingPathComponent("standard.jpg")
         let photos = app.catalog.photos.filter { $0.firstLocation != nil }
-        guard let subject = photos.first(where: { $0.originalName == "standard.jpg" })
-                ?? photos.first,
-              let path = subject.firstLocation else {
+        let fallback = photos.min { $0.byteSize < $1.byteSize }?.firstLocation
+            .map { URL(fileURLWithPath: $0) }
+        guard let url = staged.flatMap({
+            FileManager.default.fileExists(atPath: $0.path) ? $0 : nil
+        }) ?? fallback else {
             check(false, "a photo on disk to open")
             finishLibrary(failures())
         }
-        let url = URL(fileURLWithPath: path)
+        log("library self-test: exporting \(url.lastPathComponent)")
         let exported = outputDirectory.appendingPathComponent("selftest-export.png")
         try? FileManager.default.removeItem(at: exported)
 

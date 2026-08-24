@@ -9,6 +9,8 @@ public struct PhotoMetadata: Equatable, Sendable {
     public var capturedAt: Date?
     public var cameraMake: String?
     public var cameraModel: String?
+    public var lensMake: String?
+    public var lensModel: String?
     public var latitude: Double?
     public var longitude: Double?
     public var altitude: Double?
@@ -19,6 +21,8 @@ public struct PhotoMetadata: Equatable, Sendable {
         capturedAt: Date? = nil,
         cameraMake: String? = nil,
         cameraModel: String? = nil,
+        lensMake: String? = nil,
+        lensModel: String? = nil,
         latitude: Double? = nil,
         longitude: Double? = nil,
         altitude: Double? = nil
@@ -28,6 +32,8 @@ public struct PhotoMetadata: Equatable, Sendable {
         self.capturedAt = capturedAt
         self.cameraMake = cameraMake
         self.cameraModel = cameraModel
+        self.lensMake = lensMake
+        self.lensModel = lensModel
         self.latitude = latitude
         self.longitude = longitude
         self.altitude = altitude
@@ -122,6 +128,8 @@ public final class Importer {
             capturedAt: info.capturedAt,
             cameraMake: info.cameraMake,
             cameraModel: info.cameraModel,
+            lensMake: info.lensMake,
+            lensModel: info.lensModel,
             latitude: info.latitude,
             longitude: info.longitude,
             altitude: info.altitude)
@@ -169,6 +177,18 @@ public final class Importer {
                 cameraID = try Library.findOrCreateCamera(db, make: make, model: model).id
             }
 
+            // A lens needs only its model: the make is often missing on
+            // adapted and manual glass, and the model alone is still the one
+            // thing the file says about what the picture was taken through.
+            var lensID: Int64?
+            let lensMake = metadata.lensMake?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let lensModel = metadata.lensModel?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !lensModel.isEmpty {
+                lensID = try Library.findOrCreateLens(db, make: lensMake, model: lensModel).id
+            }
+
             var photo = Photo(
                 hash: hash,
                 byteSize: byteSize,
@@ -176,6 +196,7 @@ public final class Importer {
                 importedAt: Date(),
                 capturedAt: metadata.capturedAt,
                 cameraId: cameraID,
+                lensId: lensID,
                 width: metadata.width,
                 height: metadata.height,
                 latitude: metadata.latitude,

@@ -200,6 +200,7 @@ final class LibraryErrorPathTests: XCTestCase {
         XCTAssertEqual(LibraryError.noSuchPhoto(7).description, "no photo with id 7")
         XCTAssertEqual(LibraryError.noSuchDevelopment(9).description, "no development with id 9")
         XCTAssertEqual(LibraryError.emptyTagName.description, "a tag name cannot be empty")
+        XCTAssertEqual(LibraryError.emptyLensModel.description, "a lens model cannot be empty")
         XCTAssertEqual(LibraryError.notADirectory(URL(fileURLWithPath: "/tmp/x")).description,
                        "not a directory: /tmp/x")
     }

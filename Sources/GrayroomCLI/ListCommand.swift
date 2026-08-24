@@ -22,9 +22,12 @@ struct List: ParsableCommand {
     @Option(name: .customLong("camera"), help: "Only photos from this camera id.")
     var camera: Int64?
 
+    @Option(name: .customLong("lens"), help: "Only photos taken through this lens id.")
+    var lens: Int64?
+
     func run() throws {
         let library = try libraryOptions.open()
-        let photos = try library.photos(color: color, tag: tag, cameraID: camera)
+        let photos = try library.photos(color: color, tag: tag, cameraID: camera, lensID: lens)
 
         var cameras: [Int64: Camera] = [:]
         var out = ""

@@ -101,6 +101,39 @@ final class PhotoCatalogTests: XCTestCase {
         XCTAssertEqual(catalog.photo(id: one)?.width, 6000)
     }
 
+    /// The camera and the lens both ride along on the row, so the grid can say
+    /// what a photo was taken with without going back to the database.
+    func testLoadCarriesTheCameraAndTheLens() throws {
+        let shot = try Importer(library: temp.library, probe: { _ in
+            PhotoMetadata(cameraMake: "FUJIFILM", cameraModel: "GFX50S",
+                          lensMake: "FUJIFILM", lensModel: "GF63mmF2.8 R WR")
+        }).importFile(at: try temp.writeFile("shot.raf")).photoID
+        let bare = try temp.importFile("bare.dng")
+
+        let catalog = PhotoCatalog()
+        try catalog.load(from: temp.library)
+
+        let lensID = try XCTUnwrap(temp.library.photo(id: shot)?.lensId)
+        let cameraID = try XCTUnwrap(temp.library.photo(id: shot)?.cameraId)
+        XCTAssertEqual(catalog.photo(id: shot)?.lensId, lensID)
+        XCTAssertEqual(catalog.photo(id: shot)?.cameraId, cameraID)
+        XCTAssertEqual(try temp.library.lens(id: lensID)?.model, "GF63mmF2.8 R WR")
+        XCTAssertNil(catalog.photo(id: bare)?.lensId)
+        XCTAssertNil(catalog.photo(id: bare)?.cameraId)
+
+        // …and the words, for the loupe's status bar: the two lookup tables are
+        // read whole with the catalog rather than joined per photo.
+        let photo = try XCTUnwrap(catalog.photo(id: shot))
+        XCTAssertEqual(catalog.cameraDescription(of: photo), "FUJIFILM GFX50S")
+        XCTAssertEqual(catalog.lensDescription(of: photo), "FUJIFILM GF63mmF2.8 R WR")
+        let plain = try XCTUnwrap(catalog.photo(id: bare))
+        XCTAssertEqual(catalog.cameraDescription(of: plain), "")
+        XCTAssertEqual(catalog.lensDescription(of: plain), "")
+        // A lens with no make is its model alone, which is how plenty of
+        // adapted glass writes itself.
+        XCTAssertEqual(PhotoCatalog.name(make: "", model: "Sonnar 55mm"), "Sonnar 55mm")
+    }
+
     func testLoadCountsDevelopmentsAndCollectsTags() throws {
         let bare = try temp.importFile("bare.dng", capturedAt: date(0))
         let developed = try temp.importFile("developed.dng", capturedAt: date(60))

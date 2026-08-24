@@ -305,6 +305,31 @@ private func drawConcept4(_ ctx: CGContext, s: CGFloat) {
 
 // MARK: - Rendering
 
+/// Concept 0: an externally supplied square artwork, scaled onto the standard
+/// 824/1024 body rect, clipped to the squircle, over the template shadow.
+private var sourceImage: CGImage?
+
+private func drawFromSource(_ ctx: CGContext, s: CGFloat) {
+    guard let src = sourceImage else { fatalError("--from image not loaded") }
+    let side = Grid.body * s
+    let rect = CGRect(
+        x: (Grid.canvas * s - side) / 2, y: (Grid.canvas * s - side) / 2,
+        width: side, height: side)
+    let path = squirclePath(in: rect, exponent: Grid.squircleExponent)
+    ctx.saveGState()
+    ctx.setShadow(offset: CGSize(width: 0, height: -14 * s), blur: 26 * s, color: rgb(0, 0, 0, 0.42))
+    ctx.addPath(path)
+    ctx.setFillColor(rgb(0, 0, 0))
+    ctx.fillPath()
+    ctx.restoreGState()
+    ctx.saveGState()
+    ctx.addPath(path)
+    ctx.clip()
+    ctx.interpolationQuality = .high
+    ctx.draw(src, in: rect)
+    ctx.restoreGState()
+}
+
 private func render(concept: Int, size: Int) -> CGImage {
     let px = size
     let space = CGColorSpace(name: CGColorSpace.sRGB)!
@@ -316,6 +341,7 @@ private func render(concept: Int, size: Int) -> CGImage {
     ctx.interpolationQuality = .high
     let s = CGFloat(px) / Grid.canvas
     switch concept {
+    case 0: drawFromSource(ctx, s: s)
     case 1: drawConcept1(ctx, s: s)
     case 2: drawConcept2(ctx, s: s)
     case 3: drawConcept3(ctx, s: s)
@@ -370,6 +396,14 @@ while let arg = args.first {
     args.removeFirst()
     switch arg {
     case "--concept": concept = Int(args.removeFirst())!
+    case "--from":
+        let path = args.removeFirst()
+        guard let provider = CGDataProvider(url: URL(fileURLWithPath: path) as CFURL),
+              let img = CGImage(pngDataProviderSource: provider, decode: nil,
+                                shouldInterpolate: true, intent: .defaultIntent)
+        else { fatalError("could not read \(path) as PNG") }
+        sourceImage = img
+        concept = 0
     case "--size": size = Int(args.removeFirst())!
     case "--out": out = args.removeFirst()
     case "--icns": icns = args.removeFirst()

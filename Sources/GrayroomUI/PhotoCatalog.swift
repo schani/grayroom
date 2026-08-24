@@ -18,6 +18,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
     public var width: Int?
     public var height: Int?
     public var cameraId: Int64?
+    public var lensId: Int64?
     public var latitude: Double?
     public var longitude: Double?
     public var altitude: Double?
@@ -43,6 +44,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
                 width: Int? = nil,
                 height: Int? = nil,
                 cameraId: Int64? = nil,
+                lensId: Int64? = nil,
                 latitude: Double? = nil,
                 longitude: Double? = nil,
                 altitude: Double? = nil,
@@ -60,6 +62,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
         self.width = width
         self.height = height
         self.cameraId = cameraId
+        self.lensId = lensId
         self.latitude = latitude
         self.longitude = longitude
         self.altitude = altitude
@@ -83,6 +86,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
                   width: photo.width,
                   height: photo.height,
                   cameraId: photo.cameraId,
+                  lensId: photo.lensId,
                   latitude: photo.latitude,
                   longitude: photo.longitude,
                   altitude: photo.altitude,
@@ -137,6 +141,13 @@ public final class PhotoCatalog {
     /// keystroke and once per cell, which is not a place for a linear scan.
     private var indexByID: [Int64: Int] = [:]
 
+    /// "Nikon Z 8" per camera row, and the same for the glass. A photo carries
+    /// only the foreign key, and the loupe's status bar wants the words — there
+    /// are a handful of bodies and lenses in a library of any size, so both
+    /// tables are read whole with the catalog rather than joined per photo.
+    public var cameraNames: [Int64: String] = [:]
+    public var lensNames: [Int64: String] = [:]
+
     public init() {}
 
     public init(photos: [CatalogPhoto]) {
@@ -160,10 +171,37 @@ public final class PhotoCatalog {
     /// Reads the whole library: one snapshot, five statements, sorted here.
     public func load(from library: Library) throws {
         let snapshot = try library.catalogSnapshot()
+        cameraNames = [:]
+        for camera in try library.allCameras() {
+            guard let id = camera.id else { continue }
+            cameraNames[id] = PhotoCatalog.name(make: camera.make, model: camera.model)
+        }
+        lensNames = [:]
+        for lens in try library.allLenses() {
+            guard let id = lens.id else { continue }
+            lensNames[id] = PhotoCatalog.name(make: lens.make, model: lens.model)
+        }
         replace(snapshot.photos.compactMap { photo in
             guard let id = photo.id else { return nil }
             return CatalogPhoto(photo: photo, summary: snapshot.summaries[id] ?? PhotoSummary())
         })
+    }
+
+    /// The body a photo was taken with, "" when the library does not say —
+    /// the same rule the develop status bar follows, where a file that names
+    /// nothing gets no label rather than a dash.
+    public func cameraDescription(of photo: CatalogPhoto) -> String {
+        photo.cameraId.flatMap { cameraNames[$0] } ?? ""
+    }
+
+    public func lensDescription(of photo: CatalogPhoto) -> String {
+        photo.lensId.flatMap { lensNames[$0] } ?? ""
+    }
+
+    /// Make and model as one line, with the make dropped when there is none —
+    /// plenty of lenses have only a model.
+    public static func name(make: String, model: String) -> String {
+        "\(make) \(model)".trimmingCharacters(in: .whitespaces)
     }
 
     public func replace(_ photos: [CatalogPhoto]) {

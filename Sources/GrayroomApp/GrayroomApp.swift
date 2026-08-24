@@ -134,6 +134,10 @@ struct GrayroomApp: App {
             CommandGroup(before: .sidebar) {
                 Button("Library") { model.showLibrary() }
                     .keyboardShortcut("g", modifiers: [])
+                // Lightroom's third view key, and the Library module's other
+                // view: `e` for the loupe, from the grid or from Develop.
+                Button("Loupe") { model.showLoupe() }
+                    .keyboardShortcut("e", modifiers: [])
                 Button("Develop") { model.showDevelop() }
                     .keyboardShortcut("d", modifiers: [])
                 Divider()
@@ -147,7 +151,7 @@ struct GrayroomApp: App {
                 // this builder runs once, at launch (see the undo note above),
                 // so a title read off the model would freeze at what it said
                 // then.
-                Button("Show/Hide Folders") { model.isFolderSidebarVisible.toggle() }
+                Button("Show/Hide Folders") { model.toggleFolderSidebar() }
                     .keyboardShortcut("s", modifiers: [.command, .option])
                 Divider()
             }

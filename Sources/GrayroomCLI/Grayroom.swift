@@ -107,4 +107,11 @@ enum Format {
         guard let camera else { return "-" }
         return "\(camera.make) \(camera.model)".trimmingCharacters(in: .whitespaces)
     }
+
+    /// The same shape as `camera`, and a lens with no make prints as its model
+    /// alone rather than with a leading space.
+    static func lens(_ lens: Lens?) -> String {
+        guard let lens else { return "-" }
+        return "\(lens.make) \(lens.model)".trimmingCharacters(in: .whitespaces)
+    }
 }

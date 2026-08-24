@@ -23,6 +23,7 @@ extension SelfTest {
     static func runFolderChecks(app: AppModel, window: NSWindow,
                                         check: @escaping (Bool, String) -> Void,
                                         failures: @escaping () -> [String]) {
+        phase("folders")
         let sourcePath = (stagedSource ?? URL(fileURLWithPath: "/nowhere"))
             .standardizedFileURL.path
         let subPath = sourcePath + "/" + folderSubfolderName
@@ -260,6 +261,28 @@ extension SelfTest {
                       "…and the status bar says one photo (\(app.libraryCountLabel))")
                 check(app.visiblePhotos.first?.locations.isEmpty == true,
                       "…and it is the photo with no file")
+                // 23a. The loupe on a photo whose file the library has lost.
+                //      There is nothing to draw, so it says so rather than
+                //      showing an empty frame.
+                check(clickCell(cellID(victim)), "clicked the missing photo's cell")
+                sendKey("e", modifiers: [], window: window, virtualKey: 14)
+            },
+            {
+                check(app.libraryViewMode == .loupe && app.loupePhotoID == victim,
+                      "e opened the loupe on the photo with no file")
+                check(app.loupeTexture == nil, "…and there is no picture in it")
+                check(findLoupeCanvas() == nil,
+                      "…and no canvas either, so the backdrop is not mistakable "
+                          + "for a black photo")
+                check(app.loupeMessage != nil,
+                      "…so it says what is wrong instead "
+                          + "(\(app.loupeMessage ?? "nothing"))")
+                check(probeView("loupe-missing") != nil,
+                      "…and the placeholder is drawn in the window")
+                sendKey("g", modifiers: [], window: window, virtualKey: 5)
+            },
+            {
+                check(app.libraryViewMode == .grid, "g came back to the grid")
                 check(clickRow(FolderSidebar.rowIdentifier("all"), in: window),
                       "clicked All Photographs")
             },

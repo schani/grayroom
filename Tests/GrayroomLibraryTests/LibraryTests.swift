@@ -53,7 +53,8 @@ final class LibraryTests: XCTestCase {
 
     func testSchemaIsCreatedWithForeignKeysOn() throws {
         try library.dbPool.read { db in
-            for table in ["cameras", "photos", "locations", "developments", "tags", "photo_tags"] {
+            for table in ["cameras", "lenses", "photos", "locations", "developments", "tags",
+                          "photo_tags"] {
                 XCTAssertTrue(try db.tableExists(table), table)
             }
             XCTAssertEqual(try Bool.fetchOne(db, sql: "PRAGMA foreign_keys"), true)
@@ -277,6 +278,20 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(try library.tags(for: survivor).map(\.name), ["doomed"])
     }
 
+    func testDeletingALensLeavesItsPhotos() throws {
+        let metadata = PhotoMetadata(lensMake: "Leica Camera AG",
+                                     lensModel: "Summilux-M 1:1.4/35 ASPH.")
+        let importer = Importer(library: library, probe: stubProbe(metadata))
+        let photoID = try importer.importFile(at: try temp.writeFile("a.raw",
+                                                                    Data("a".utf8))).photoID
+        let lensID = try XCTUnwrap(XCTUnwrap(library.photo(id: photoID)).lensId)
+        try library.dbPool.write { db in
+            _ = try Lens.deleteOne(db, key: lensID)
+        }
+        let photo = try XCTUnwrap(library.photo(id: photoID))
+        XCTAssertNil(photo.lensId)
+    }
+
     func testDeletingACameraLeavesItsPhotos() throws {
         let metadata = PhotoMetadata(cameraMake: "Leica Camera AG", cameraModel: "LEICA M11")
         let importer = Importer(library: library, probe: stubProbe(metadata))
@@ -342,5 +357,106 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(ColorLabel.allCases.map(\.rawValue), [0, 1, 2, 3, 4, 5])
         XCTAssertEqual(ColorLabel.allCases,
                        [.unlabeled, .red, .yellow, .green, .blue, .purple])
+    }
+
+    // MARK: - Lenses
+
+    func testLensRoundTripAndFindOrCreate() throws {
+        let first = try library.lens(make: "Leica Camera AG", model: "Summilux-M 1:1.4/35 ASPH.")
+        let id = try XCTUnwrap(first.id)
+        let read = try XCTUnwrap(library.lens(id: id))
+        XCTAssertEqual(read, first)
+        XCTAssertEqual(read.make, "Leica Camera AG")
+        XCTAssertEqual(read.model, "Summilux-M 1:1.4/35 ASPH.")
+
+        // Find-or-create: the same pair is the same row.
+        let again = try library.lens(make: "Leica Camera AG", model: "Summilux-M 1:1.4/35 ASPH.")
+        XCTAssertEqual(again.id, first.id)
+        XCTAssertEqual(try library.allLenses().count, 1)
+
+        // Either field differing makes a different lens.
+        let otherModel = try library.lens(make: "Leica Camera AG", model: "R-Adapter M")
+        let otherMake = try library.lens(make: "NIKON", model: "R-Adapter M")
+        XCTAssertNotEqual(otherModel.id, first.id)
+        XCTAssertNotEqual(otherMake.id, otherModel.id)
+        // Ordered by make, then model.
+        XCTAssertEqual(try library.allLenses().map { "\($0.make)/\($0.model)" },
+                       ["Leica Camera AG/R-Adapter M",
+                        "Leica Camera AG/Summilux-M 1:1.4/35 ASPH.",
+                        "NIKON/R-Adapter M"])
+        XCTAssertNil(try library.lens(id: 9_999))
+    }
+
+    /// Adapted and manual glass names the model and nothing else, and that is a
+    /// lens worth keeping — unlike a camera, which needs both halves.
+    func testALensWithNoMakeIsStillALens() throws {
+        let lens = try library.lens(model: "Summicron 50")
+        XCTAssertEqual(lens.make, "")
+        XCTAssertEqual(try library.lens(id: try XCTUnwrap(lens.id))?.make, "")
+        // And it is the same row the second time.
+        XCTAssertEqual(try library.lens(make: "", model: "Summicron 50").id, lens.id)
+        // A blank make is the empty make, not a third lens.
+        XCTAssertEqual(try library.lens(make: "   ", model: "Summicron 50").id, lens.id)
+        XCTAssertEqual(try library.allLenses().count, 1)
+    }
+
+    func testAnEmptyLensModelIsRejected() throws {
+        for model in ["", "   ", "\n"] {
+            XCTAssertThrowsError(try library.lens(make: "Leica", model: model)) { error in
+                guard case LibraryError.emptyLensModel = error else {
+                    return XCTFail("wrong error \(error)")
+                }
+            }
+        }
+        XCTAssertEqual(try library.allLenses().count, 0)
+    }
+
+    /// The surrounding whitespace a camera writes into EXIF is not part of the
+    /// lens's identity: " XCD 38V " and "XCD 38V" are one row.
+    func testLensFieldsAreTrimmed() throws {
+        let padded = try library.lens(make: "  Hasselblad ", model: "  XCD 38V\n")
+        XCTAssertEqual(padded.make, "Hasselblad")
+        XCTAssertEqual(padded.model, "XCD 38V")
+        XCTAssertEqual(try library.lens(make: "Hasselblad", model: "XCD 38V").id, padded.id)
+        XCTAssertEqual(try library.allLenses().count, 1)
+    }
+
+    func testQueryFiltersByLens() throws {
+        let summilux = PhotoMetadata(cameraMake: "Leica Camera AG", cameraModel: "LEICA M11",
+                                     lensMake: "Leica Camera AG", lensModel: "Summilux-M")
+        let noctilux = PhotoMetadata(cameraMake: "Leica Camera AG", cameraModel: "LEICA M11",
+                                     lensMake: "Leica Camera AG", lensModel: "Noctilux-M")
+        let a = try Importer(library: library, probe: stubProbe(summilux))
+            .importFile(at: try temp.writeFile("a.raw", Data("a".utf8))).photoID
+        let b = try Importer(library: library, probe: stubProbe(summilux))
+            .importFile(at: try temp.writeFile("b.raw", Data("b".utf8))).photoID
+        let c = try Importer(library: library, probe: stubProbe(noctilux))
+            .importFile(at: try temp.writeFile("c.raw", Data("c".utf8))).photoID
+
+        let summiluxID = try XCTUnwrap(XCTUnwrap(library.photo(id: a)).lensId)
+        let noctiluxID = try XCTUnwrap(XCTUnwrap(library.photo(id: c)).lensId)
+        let cameraID = try XCTUnwrap(XCTUnwrap(library.photo(id: a)).cameraId)
+        XCTAssertNotEqual(summiluxID, noctiluxID)
+
+        XCTAssertEqual(try library.photos(lensID: summiluxID).map(\.id), [a, b])
+        XCTAssertEqual(try library.photos(lensID: noctiluxID).map(\.id), [c])
+        // Composes with the other filters, camera included.
+        try library.setColor(photoID: b, .green)
+        XCTAssertEqual(try library.photos(color: .green, lensID: summiluxID).map(\.id), [b])
+        XCTAssertEqual(try library.photos(cameraID: cameraID, lensID: noctiluxID).map(\.id), [c])
+        XCTAssertEqual(try library.photos(color: .red, lensID: summiluxID).count, 0)
+    }
+
+    func testTheSnapshotCarriesTheLens() throws {
+        let metadata = PhotoMetadata(lensMake: "FUJIFILM", lensModel: "GF63mmF2.8 R WR")
+        let withLens = try Importer(library: library, probe: stubProbe(metadata))
+            .importFile(at: try temp.writeFile("a.raw", Data("a".utf8))).photoID
+        let without = try makePhoto("b.raw")
+        let lensID = try XCTUnwrap(XCTUnwrap(library.photo(id: withLens)).lensId)
+
+        let snapshot = try library.catalogSnapshot()
+        let byID = Dictionary(uniqueKeysWithValues: snapshot.photos.map { ($0.id!, $0) })
+        XCTAssertEqual(byID[withLens]?.lensId, lensID)
+        XCTAssertNil(byID[without]?.lensId)
     }
 }

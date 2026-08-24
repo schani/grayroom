@@ -110,6 +110,47 @@ final class CatalogCommandTests: XCTestCase {
         XCTAssertTrue(none.stderr.contains("0 photo(s)"), none.stderr)
     }
 
+    func testListFiltersByLens() throws {
+        let summilux = try library.lens(make: "Leica Camera AG", model: "Summilux-M")
+        let adapted = try library.lens(model: "R-Adapter M")
+        let a = try stubPhoto("a.dng")
+        try stubPhoto("b.dng")
+        try library.dbPool.write { db in
+            try db.execute(sql: "UPDATE photos SET lens_id = ? WHERE id = ?",
+                           arguments: [summilux.id, a])
+        }
+
+        let matched = try temp.run(["ls", "--lens", String(try XCTUnwrap(summilux.id))])
+        XCTAssertEqual(matched.lines.count, 1)
+        XCTAssertTrue(matched.lines[0].hasPrefix(String(a)), matched.lines[0])
+
+        let none = try temp.run(["ls", "--lens", String(try XCTUnwrap(adapted.id))])
+        XCTAssertEqual(none.lines.count, 0)
+        XCTAssertTrue(none.stderr.contains("0 photo(s)"), none.stderr)
+    }
+
+    /// `--camera` and `--lens` are separate dimensions and compose.
+    func testListFiltersByCameraAndLensTogether() throws {
+        let camera = try library.camera(make: "Leica Camera AG", model: "LEICA M11")
+        let lens = try library.lens(make: "Leica Camera AG", model: "Summilux-M")
+        let both = try stubPhoto("both.dng")
+        let cameraOnly = try stubPhoto("camera-only.dng")
+        try library.dbPool.write { db in
+            try db.execute(sql: "UPDATE photos SET camera_id = ?, lens_id = ? WHERE id = ?",
+                           arguments: [camera.id, lens.id, both])
+            try db.execute(sql: "UPDATE photos SET camera_id = ? WHERE id = ?",
+                           arguments: [camera.id, cameraOnly])
+        }
+
+        let byCamera = try temp.run(["ls", "--camera", String(try XCTUnwrap(camera.id))])
+        XCTAssertEqual(byCamera.lines.count, 2)
+        let byBoth = try temp.run(["ls",
+                                   "--camera", String(try XCTUnwrap(camera.id)),
+                                   "--lens", String(try XCTUnwrap(lens.id))])
+        XCTAssertEqual(byBoth.lines.count, 1)
+        XCTAssertTrue(byBoth.lines[0].hasPrefix(String(both)), byBoth.lines[0])
+    }
+
     func testAnEmptyLibraryListsNothing() throws {
         let output = try temp.run(["ls"])
         XCTAssertEqual(output.stdout, "")
@@ -156,11 +197,37 @@ final class CatalogCommandTests: XCTestCase {
         let out = try temp.run(["show", String(id)]).stdout
         XCTAssertTrue(out.contains("captured:      -"), out)
         XCTAssertTrue(out.contains("camera:        -"), out)
+        XCTAssertTrue(out.contains("lens:          -"), out)
         XCTAssertTrue(out.contains("size:          -"), out)
         XCTAssertTrue(out.contains("gps:           -"), out)
         XCTAssertTrue(out.contains("tags:          -"), out)
         XCTAssertTrue(out.contains("developments:  -"), out)
         XCTAssertFalse(out.contains("locations:     -"), "it does have a location")
+    }
+
+    func testShowPrintsTheLensWithItsID() throws {
+        let id = try stubPhoto("a.dng")
+        let lens = try library.lens(make: "Leica Camera AG", model: "Summilux-M 1:1.4/35 ASPH.")
+        try library.dbPool.write { db in
+            try db.execute(sql: "UPDATE photos SET lens_id = ? WHERE id = ?",
+                           arguments: [lens.id, id])
+        }
+        let out = try temp.run(["show", String(id)]).stdout
+        XCTAssertTrue(
+            out.contains("lens:          Leica Camera AG Summilux-M 1:1.4/35 ASPH. "
+                         + "(id \(try XCTUnwrap(lens.id)))"), out)
+    }
+
+    /// A lens with no make prints as its model alone, with no leading gap.
+    func testShowPrintsALensWithNoMake() throws {
+        let id = try stubPhoto("a.dng")
+        let lens = try library.lens(model: "R-Adapter M")
+        try library.dbPool.write { db in
+            try db.execute(sql: "UPDATE photos SET lens_id = ? WHERE id = ?",
+                           arguments: [lens.id, id])
+        }
+        let out = try temp.run(["show", String(id)]).stdout
+        XCTAssertTrue(out.contains("lens:          R-Adapter M (id"), out)
     }
 
     func testShowResolvesAHashPrefixAndAFilePath() throws {

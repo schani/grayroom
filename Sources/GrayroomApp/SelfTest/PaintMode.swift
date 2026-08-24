@@ -113,6 +113,11 @@ extension SelfTest {
             abs($0.x - $1.x) < 0.01 && abs($0.y - $1.y) < 0.01
         } && stroke.points.count == targets.count
         log("self-test: points match intent = \(ok)")
+        // This mode was pointed at a file, and the app remembers the last file
+        // it opened in a preference `CFFIXED_USER_HOME` does not redirect. Left
+        // standing it is imported by the *next* self-test's app, into that
+        // test's throwaway library — see `startIfRequested`.
+        restoreLastOpenedFile()
         exit(ok ? 0 : 3)
     }
 

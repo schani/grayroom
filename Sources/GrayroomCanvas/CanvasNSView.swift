@@ -21,7 +21,6 @@ public enum CanvasTool: String, CaseIterable {
 public enum CanvasKeyCommand {
     case toggleBrush
     case toggleTargeted
-    case toggleEraser
     case sizeStep(Int)
     case featherStep(Int)
     case fit
@@ -341,7 +340,6 @@ public final class CanvasNSView: MTKView {
             }
         case "b", "B": handler?.canvasKeyCommand(.toggleBrush)
         case "t", "T": handler?.canvasKeyCommand(.toggleTargeted)
-        case "e", "E": handler?.canvasKeyCommand(.toggleEraser)
         case "[", "{": handler?.canvasKeyCommand(shift ? .featherStep(-1) : .sizeStep(-1))
         case "]", "}": handler?.canvasKeyCommand(shift ? .featherStep(1) : .sizeStep(1))
         case "0": handler?.canvasKeyCommand(.fit)

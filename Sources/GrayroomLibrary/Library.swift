@@ -44,6 +44,7 @@ public enum LibraryError: Error, CustomStringConvertible {
     case noSuchDevelopment(Int64)
     case notADirectory(URL)
     case emptyTagName
+    case emptyLensModel
 
     public var description: String {
         switch self {
@@ -51,6 +52,7 @@ public enum LibraryError: Error, CustomStringConvertible {
         case .noSuchDevelopment(let id): return "no development with id \(id)"
         case .notADirectory(let u): return "not a directory: \(u.path)"
         case .emptyTagName: return "a tag name cannot be empty"
+        case .emptyLensModel: return "a lens model cannot be empty"
         }
     }
 }
@@ -131,6 +133,13 @@ public final class Library {
                     UNIQUE (make, model)
                 );
 
+                CREATE TABLE lenses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    make TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL,
+                    UNIQUE (make, model)
+                );
+
                 CREATE TABLE photos (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     hash BLOB NOT NULL UNIQUE,
@@ -139,6 +148,7 @@ public final class Library {
                     imported_at DATETIME NOT NULL,
                     captured_at DATETIME,
                     camera_id INTEGER REFERENCES cameras(id) ON DELETE SET NULL,
+                    lens_id INTEGER REFERENCES lenses(id) ON DELETE SET NULL,
                     width INTEGER,
                     height INTEGER,
                     latitude DOUBLE,
@@ -177,6 +187,7 @@ public final class Library {
                 CREATE INDEX index_locations_on_photo_id ON locations(photo_id);
                 CREATE INDEX index_developments_on_photo_id ON developments(photo_id);
                 CREATE INDEX index_photos_on_camera_id ON photos(camera_id);
+                CREATE INDEX index_photos_on_lens_id ON photos(lens_id);
                 CREATE INDEX index_photos_on_color ON photos(color);
                 CREATE INDEX index_photos_on_captured_at ON photos(captured_at);
                 CREATE INDEX index_photo_tags_on_tag_id ON photo_tags(tag_id);

@@ -275,14 +275,14 @@ picked); tags are free-form many-to-many. No ratings for now.
      develop view is busy, so an autosave's rebuild can never land in the middle
      of a slider drag. One "Building previews" task appears in the activity
      centre while it is busy.
-   - `GRAYROOM_SELFTEST=library` drives all of it in a throwaway home, as an
+   - `GRAYROOM_SELFTEST=library` and `=library2` drive all of it in a throwaway home, as an
      accessory app whose windows sit below the desktop so a run never
      interrupts the user: import, then **real mouse events** (click,
      shift-click, cmd-click, double-click,
      with the modifier flags on the events) and **real key events** (arrows,
      shift-arrows, ⌘A, `8` → green in RAM *and* in SQLite, `8` again → cleared,
      `d` → Develop on that photo, `6` → red, `g` → back to the grid with it
-     still highlighted). Return is asserted *not* to open Develop. It then
+     still highlighted). Return opens the **loupe**, as it does in Lightroom. It then
      checks the previews end to end: every cell the grid built has a `source = 0`
      row in `previews.sqlite` at 512 px with no fingerprint; developing one photo
      (+2 EV, autosaved) turns *its* row into a `source = 1` one whose fingerprint
@@ -294,6 +294,22 @@ picked); tags are free-form many-to-many. No ratings for now.
      that click, the folder surviving `d`/`g`, a location removed through the
      library API turning up under Missing, and the panel folding away on ⌥⌘S
      and coming back.
+
+     The run is split across two processes, one per half of what it covers:
+     `library` does the grid's keys, the previews (grid and loupe) and the
+     develop status bar, and `library2` does the Library module's two *views* — the
+     grid's scroll position surviving a trip through Develop (scroll, `d`, `g`,
+     same offset to the pixel, same selection) and the loupe (`e`/Return open
+     it, ←/→ walk the filtered order and stop at both ends, ↑/↓ do nothing, the
+     colour keys label the photo on screen, `g`/Esc come back to the grid with
+     that photo selected and scrolled into view, `d` develops it, `e` from
+     Develop comes back to it; the Folders panel gets out of the way and comes
+     back the way it was left, from both states; `0`/`1` and a double-click zoom
+     the real canvas, a scroll pans it, and the percentage in the status bar
+     follows; and an edit made in Develop is in the loupe on the keystroke, at
+     the decode's own resolution, on the very texture the develop view had
+     rendered) — and then the Folders panel, the toolbar, the menus and the
+     export sheet.
 
    Still later: filtering (by colour, tag, camera, date), collections, the
    filmstrip in Develop, and sorting other than capture time.

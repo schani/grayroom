@@ -69,6 +69,10 @@ final class AppModel {
     /// The grid's current column count, which only the view knows; the arrow
     /// keys need it to know what "one row down" means.
     var libraryColumns = 1
+    /// The width the grid was last laid out at while it was showing. It is what
+    /// the grid is held at while the loupe has the window, so the panel going
+    /// away does not reflow it — see `LibraryView`.
+    var libraryGridWidth: Double = 0
     var libraryThumbnailSize: Double = ImportModel.defaultThumbnailSize
     /// The cell the grid should scroll into view the next time it draws —
     /// consumed by the view. This is what makes `g` from the develop view land
@@ -76,6 +80,31 @@ final class AppModel {
     var libraryScrollTarget: Int64?
     /// The grid's pictures, development-aware — see `PreviewBuilder`.
     let previews = PreviewBuilder()
+    /// The camera's own pictures, at loupe resolution, for photos that have
+    /// never been developed — see `LoupeImageStore`.
+    let loupeImages = LoupeImageStore()
+
+    // MARK: Loupe
+
+    /// What the loupe's canvas is drawing right now: the grid's 512 px preview
+    /// at first, replaced by the loupe's own picture the moment it lands.
+    private(set) var loupeTexture: MTLTexture?
+    /// The size, in image pixels, of what the loupe is showing — the frame the
+    /// canvas fits and zooms, which for a pipeline render is the decode's own
+    /// size even while a draft pass is what is on screen.
+    private(set) var loupeImageSize: CGSize = .zero
+    /// Whether `loupeTexture` is the loupe's own picture rather than the grid
+    /// preview standing in for it.
+    private(set) var loupeIsFullResolution = false
+    /// Why there is no picture, when there is none — a photo whose file the
+    /// library has lost.
+    private(set) var loupeMessage: String?
+    /// Bumped on every photo change; a load that lands after the user has
+    /// arrowed on is discarded.
+    private var loupeGeneration = 0
+    /// Whether the loupe's picture comes from the render loop (a developed
+    /// photo) rather than from the camera's embedded preview.
+    private var loupeUsesPipeline = false
 
     // MARK: Document
 
@@ -83,6 +112,8 @@ final class AppModel {
     private(set) var previewSize: CGSize = .zero
     private(set) var fullSize: CGSize = .zero
     private(set) var cameraDescription: String = ""
+    /// The lens the open photo was taken through, "" when the file does not say.
+    private(set) var lensDescription: String = ""
 
     // MARK: Status
 
@@ -132,6 +163,10 @@ final class AppModel {
 
     private var service: RenderService?
     private weak var canvas: CanvasNSView?
+    /// The loupe's canvas — the same view class, so the loupe pans, zooms and
+    /// reaches the display's headroom exactly as the develop view does. Only
+    /// one of the two is ever in the window.
+    private weak var loupeCanvas: CanvasNSView?
 
     private var decoded: DecodedImage?
     /// The decode reduced to `PreviewStrategy.draftLongEdge`, built once per
@@ -354,6 +389,20 @@ final class AppModel {
         set { browser.isSidebarVisible = newValue }
     }
 
+    /// Whether the panel is actually on screen. The loupe never shows it — one
+    /// photo fills the module's whole content area, as it does in Lightroom —
+    /// without disturbing the preference above, so `g` comes back to the panel
+    /// the way the user left it.
+    var isFolderSidebarShowing: Bool { browser.isSidebarShowing }
+
+    /// View › Show/Hide Folders, and ⌥⌘S. A no-op in the loupe, which has no
+    /// panel to show: flipping a preference with nothing on screen to show for
+    /// it is worse than doing nothing.
+    func toggleFolderSidebar() {
+        guard mode == .library, libraryViewMode == .grid else { return }
+        isFolderSidebarVisible.toggle()
+    }
+
     var visiblePhotoIDs: [Int64] { browser.visiblePhotoIDs }
 
     var visiblePhotos: [CatalogPhoto] { browser.visiblePhotos(from: catalog.photos) }
@@ -361,29 +410,260 @@ final class AppModel {
     func isVisible(_ id: Int64) -> Bool { browser.isVisible(id) }
 
     /// `g`. Comes back to the grid with the photo you were developing
-    /// highlighted and scrolled into view.
+    /// highlighted, and at the screenful the grid was left at.
+    ///
     /// The folder the panel has selected is left alone: it is the module's
     /// state, not the photo's, and Lightroom keeps it across a trip to Develop.
     /// So the photo is only re-highlighted when the current folder is actually
     /// showing it.
+    ///
+    /// Nothing scrolls. The grid was never taken out of the window (see
+    /// `RootView`), so it is already at the offset it was left at — asking for
+    /// a cell to be scrolled into view here would *move* it.
     func showLibrary() {
+        // From the loupe, this is the loupe's own way out — the photo the
+        // arrows walked to has to be scrolled into view, wherever it is.
+        if libraryViewMode == .loupe {
+            showGrid()
+            return
+        }
         if let currentPhotoID, isVisible(currentPhotoID) {
             browser.selectPhotos([currentPhotoID])
-            libraryScrollTarget = currentPhotoID
         }
+        clearLoupe()
         mode = .library
     }
 
-    /// `d`. From the grid this opens the highlighted photo; with nothing
-    /// highlighted it just shows whatever is already open.
+    /// `d`. From the grid this opens the highlighted photo — in the loupe, the
+    /// photo the loupe is showing, which is the same thing because the loupe
+    /// *is* the selection. With nothing highlighted it just shows whatever is
+    /// already open.
     func showDevelop() {
         if mode == .library, let id = highlightedPhotoIDs.first,
            id != currentPhotoID || imageURL == nil {
             openPhoto(id: id)
             return
         }
+        _ = browser.exitLoupe()
+        clearLoupe()
         guard imageURL != nil else { return }
         mode = .develop
+    }
+
+    // MARK: The loupe
+
+    /// Grid or loupe — the two views of the Library module, as `g` and `e`
+    /// switch between them in Lightroom.
+    var libraryViewMode: LibraryViewMode { browser.viewMode }
+
+    var loupePhotoID: Int64? { browser.loupePhotoID }
+
+    var loupePhoto: CatalogPhoto? { loupePhotoID.flatMap { catalog.photo(id: $0) } }
+
+    /// "3 / 11" — where this photo is in the filtered list, Lightroom's way.
+    var loupePositionLabel: String { browser.loupePositionLabel }
+
+    /// What the status bar says about the photo in the loupe. The same four
+    /// facts the develop view names, read out of the catalog rather than off a
+    /// decode: nothing here is open, and the library already knows all of it.
+    var loupeName: String { loupePhoto?.originalName ?? "" }
+
+    var loupeResolution: String {
+        guard let photo = loupePhoto, let width = photo.width, let height = photo.height,
+              width > 0, height > 0 else { return "" }
+        return "\(width)×\(height)"
+    }
+
+    var loupeCameraDescription: String {
+        loupePhoto.map { catalog.cameraDescription(of: $0) } ?? ""
+    }
+
+    var loupeLensDescription: String {
+        loupePhoto.map { catalog.lensDescription(of: $0) } ?? ""
+    }
+
+    /// `e`, or Return in the grid. From the develop view it is Lightroom's `e`
+    /// too: back to the Library, on the photo that was being developed.
+    func showLoupe() {
+        let fromDevelop = mode == .develop ? currentPhotoID : nil
+        // A photo the selected folder does not show cannot be the loupe's — the
+        // Folders panel's selection survives a trip through Develop, and the
+        // loupe walks *that* list.
+        let requested = fromDevelop.flatMap { isVisible($0) ? $0 : nil }
+        guard browser.enterLoupe(on: requested) != nil else { return }
+        mode = .library
+        loadLoupeImage()
+    }
+
+    /// `g` or Esc, from the loupe: back to the grid, with the loupe's photo
+    /// selected and scrolled into view.
+    func showGrid() {
+        libraryScrollTarget = browser.exitLoupe()
+        clearLoupe()
+        mode = .library
+    }
+
+    /// The left and right arrows in the loupe. Up and down do nothing: there
+    /// are no rows here, and Lightroom's loupe walks one photo at a time.
+    func stepLoupe(_ delta: Int) {
+        let before = browser.loupePhotoID
+        guard browser.stepLoupe(delta) != before else { return }
+        loadLoupeImage()
+    }
+
+    /// The picture, in as many passes as it takes.
+    ///
+    /// # A developed photo is the real pipeline
+    ///
+    /// …run through the *same render loop the develop view uses*, not a copy of
+    /// it. That is what makes `d`/`e` between the two views free: the loop
+    /// already holds this photo's decode and its rendered frame, so the loupe
+    /// only has to point its canvas at them. It is also what gives the loupe
+    /// EDR and full resolution, neither of which an 8-bit `CGImage` can carry.
+    ///
+    /// # An undeveloped photo is the camera's own picture
+    ///
+    /// Exactly as in the grid: this app's defaults are black and white, and a
+    /// frame nobody has edited must not turn grey just because it was looked
+    /// at. So it goes on the same canvas — same zoom, same pan — with no
+    /// pipeline over it at all (`LoupeImageStore`).
+    ///
+    /// # In the meantime
+    ///
+    /// Whatever the grid already has, scaled up: on screen in the same turn of
+    /// the run loop the key was pressed in, and replaced the moment the real
+    /// picture lands. Every callback is generation-guarded, so a load that
+    /// arrives after the user has arrowed on is dropped.
+    private func loadLoupeImage() {
+        loupeGeneration += 1
+        let generation = loupeGeneration
+        loupeTexture = nil
+        loupeImageSize = .zero
+        loupeIsFullResolution = false
+        loupeMessage = nil
+        loupeUsesPipeline = false
+        guard let photo = loupePhoto else { return }
+        guard let url = photo.url else {
+            loupeMessage = "\(photo.originalName) is not where the library left it"
+            return
+        }
+
+        if photo.developmentFingerprint != nil {
+            loupeUsesPipeline = true
+            // The photo the develop view already has open: its decode and its
+            // render are done, so this costs nothing and the loupe is full
+            // resolution on this frame.
+            if currentPhotoID != photo.id || imageURL == nil {
+                // Walking the loupe opens photos, and opening one throws the
+                // previous edit's undo history away. The autosave is a
+                // one-second timer, so an arrow key pressed straight after a
+                // slider move would otherwise lose it.
+                if store.isDirty { persistEdit(announce: false) }
+                open(url: url, knownPhotoID: photo.id)
+            }
+            pushLoupeRender()
+        } else {
+            loupeImages.image(for: photo) { [weak self] image in
+                guard let self, self.loupeGeneration == generation else { return }
+                guard let image, let texture = self.makeLoupeTexture(image) else {
+                    if self.loupeTexture == nil {
+                        self.loupeMessage = "\(photo.originalName) could not be read"
+                    }
+                    return
+                }
+                self.setLoupeTexture(texture, size: self.loupeFrameSize(of: texture),
+                                     fullResolution: true)
+            }
+        }
+
+        // The stand-in, if the real thing is not already up.
+        guard !loupeIsFullResolution else { return }
+        if let thumbnail = previews.cached(photo) {
+            showLoupeStandIn(thumbnail)
+        } else {
+            previews.image(for: photo) { [weak self] image in
+                guard let self, self.loupeGeneration == generation,
+                      !self.loupeIsFullResolution, let image else { return }
+                self.showLoupeStandIn(image)
+            }
+        }
+    }
+
+    /// Puts the render loop's current frame in the loupe — but only when it is
+    /// a frame of *this* photo, rendered from the edit the photo actually has.
+    ///
+    /// That second half is what keeps this app's black-and-white defaults off
+    /// the screen. `open(url:)` starts from an empty `EditState` and the stored
+    /// development arrives a moment later on the library queue, so between the
+    /// two the loop is rendering a picture that is not what this photo looks
+    /// like. `developmentID` is what says the lookup has landed, and comparing
+    /// the rendered edit against the one the app is holding is what says the
+    /// render is of *that* edit and not of the empty one still in flight. Until
+    /// both hold, the grid's 512 px preview stays up.
+    private func pushLoupeRender() {
+        guard loupeUsesPipeline, let photo = loupePhoto, currentPhotoID == photo.id,
+              developmentID != nil, let texture = currentTexture, previewSize != .zero,
+              lastRenderedEdit?.fingerprint == store.edit.fingerprint
+        else { return }
+        setLoupeTexture(texture, size: previewSize, fullResolution: true)
+    }
+
+    /// The grid's own 512 px preview, on the loupe's canvas, until the real
+    /// picture lands.
+    private func showLoupeStandIn(_ image: CGImage) {
+        guard let texture = makeLoupeTexture(image) else { return }
+        setLoupeTexture(texture, size: loupeFrameSize(of: texture), fullResolution: false)
+    }
+
+    /// The frame the loupe fits and zooms, for a picture that is not the
+    /// pipeline's: the **photo's** size, not the texture's.
+    ///
+    /// A camera that embeds a 640 px preview of a 50 MP frame would otherwise
+    /// put a postage stamp in the middle of the window, because fit never
+    /// magnifies (`CanvasTransform.fitZoom`) — and the 512 px stand-in would sit
+    /// smaller still and then jump. So the frame is the photo and the texture is
+    /// whatever resolution of it is in hand, which is exactly the arrangement
+    /// the develop view's draft pass already has: 1:1 means one *photo* pixel,
+    /// the stand-in and the real picture share one frame, and a zoom set on one
+    /// survives the other arriving.
+    ///
+    /// Scaled by the long edge rather than taken outright, so a preview whose
+    /// aspect ratio differs slightly from the frame's is never stretched.
+    private func loupeFrameSize(of texture: MTLTexture) -> CGSize {
+        let w = Double(texture.width), h = Double(texture.height)
+        guard w > 0, h > 0 else { return .zero }
+        let own = CGSize(width: w, height: h)
+        guard let photo = loupePhoto else { return own }
+        let longEdge = Double(max(photo.width ?? 0, photo.height ?? 0))
+        guard longEdge > max(w, h) else { return own }
+        let scale = longEdge / max(w, h)
+        return CGSize(width: (w * scale).rounded(), height: (h * scale).rounded())
+    }
+
+    private func makeLoupeTexture(_ image: CGImage) -> MTLTexture? {
+        try? service?.metal.makeDisplayTexture(from: image)
+    }
+
+    private func setLoupeTexture(_ texture: MTLTexture, size: CGSize, fullResolution: Bool) {
+        loupeTexture = texture
+        loupeIsFullResolution = fullResolution
+        // A new frame size refits — which is what the stand-in giving way to
+        // the full-size picture is, and what stepping to the next photo is.
+        if size != loupeImageSize {
+            loupeImageSize = size
+            loupeCanvas?.setImageSize(size)
+        }
+        loupeCanvas?.imageTexture = texture
+    }
+
+    private func clearLoupe() {
+        loupeGeneration += 1
+        loupeTexture = nil
+        loupeImageSize = .zero
+        loupeIsFullResolution = false
+        loupeMessage = nil
+        loupeUsesPipeline = false
+        loupeCanvas?.imageTexture = nil
     }
 
     /// Opens a photo the catalog already knows.
@@ -398,6 +678,8 @@ final class AppModel {
             return
         }
         browser.selectPhotos([id])
+        _ = browser.exitLoupe()
+        clearLoupe()
         open(url: URL(fileURLWithPath: path), knownPhotoID: id)
         mode = .develop
     }
@@ -493,6 +775,40 @@ final class AppModel {
     // MARK: - Canvas wiring
 
     func makeCanvas() -> CanvasNSView {
+        let view = makeBareCanvas()
+        view.tool = tool
+        view.brushSize = store.brush.size
+        view.brushFeather = store.brush.feather
+        canvas = view
+        if previewSize != .zero { view.setImageSize(previewSize) }
+        pushTextureToCanvas()
+        return view
+    }
+
+    /// The loupe's canvas: the same view, read-only.
+    ///
+    /// Pan is the only tool — there is nothing here to paint into and no B&W mix
+    /// to drag — so the brush and the targeted tool are simply never selected on
+    /// it, and `canvasKeyCommand` refuses their keys while the Library is the
+    /// module on screen. Everything else is deliberately identical to Develop's:
+    /// the same EDR drawable, the same zoom gestures, the same double-click
+    /// toggle.
+    func makeLoupeCanvas() -> CanvasNSView {
+        let view = makeBareCanvas()
+        view.identifier = NSUserInterfaceItemIdentifier(AppModel.loupeCanvasIdentifier)
+        view.tool = .pan
+        loupeCanvas = view
+        if loupeImageSize != .zero { view.setImageSize(loupeImageSize) }
+        view.imageTexture = loupeTexture
+        return view
+    }
+
+    /// How the loupe's canvas is told apart from the develop view's, which is
+    /// the same class — the self-test has to be able to say "the develop canvas
+    /// is not in the window" while the loupe is up.
+    static let loupeCanvasIdentifier = "loupe-canvas"
+
+    private func makeBareCanvas() -> CanvasNSView {
         guard let service else {
             // No Metal: hand back a stub so the app still shows its error.
             let device = MTLCreateSystemDefaultDevice()!
@@ -501,13 +817,13 @@ final class AppModel {
         let view = CanvasNSView(device: service.metal.device,
                                 commandQueue: service.metal.commandQueue)
         view.handler = self
-        view.tool = tool
-        view.brushSize = store.brush.size
-        view.brushFeather = store.brush.feather
-        canvas = view
-        if previewSize != .zero { view.setImageSize(previewSize) }
-        pushTextureToCanvas()
         return view
+    }
+
+    /// The canvas the zoom commands and the zoom percentage belong to: the
+    /// loupe's while the Library is showing one, the develop view's otherwise.
+    private var activeCanvas: CanvasNSView? {
+        (mode == .library && browser.ownsCanvas) ? loupeCanvas : canvas
     }
 
     // MARK: - Opening files
@@ -525,6 +841,13 @@ final class AppModel {
             mode = .develop
             return
         }
+        // Never in a self-test: the file the *real* user last had open is
+        // remembered in a preference that `CFFIXED_USER_HOME` does not
+        // redirect, so reopening it here silently imports it into the
+        // throwaway library the test is measuring — see
+        // `SelfTest.startIfRequested`. A test that wants a document is given
+        // one on the command line.
+        guard !SelfTest.isRequested else { return }
         if let path = UserDefaults.standard.string(forKey: AppModel.lastFileDefaultsKey),
            FileManager.default.fileExists(atPath: path) {
             open(url: URL(fileURLWithPath: path))
@@ -587,6 +910,11 @@ final class AppModel {
         histogram = .empty
         statusMessage = nil
         errorMessage = nil
+        // The probe below is what fills these in, and it is asynchronous: left
+        // standing they would name the *previous* photo's camera and lens for
+        // as long as the new file takes to open.
+        cameraDescription = ""
+        lensDescription = ""
         UserDefaults.standard.set(url.path, forKey: AppModel.lastFileDefaultsKey)
 
         store.replace(EditState(), named: nil)
@@ -603,6 +931,11 @@ final class AppModel {
                 let make = info.cameraMake ?? ""
                 let model = info.cameraModel ?? ""
                 self.cameraDescription = "\(make) \(model)".trimmingCharacters(in: .whitespaces)
+                let lensMake = info.lensMake ?? ""
+                let lensModel = info.lensModel ?? ""
+                self.lensDescription = lensModel.isEmpty
+                    ? ""
+                    : "\(lensMake) \(lensModel)".trimmingCharacters(in: .whitespaces)
             }
         }
         requestRender(force: true)
@@ -741,10 +1074,15 @@ final class AppModel {
     }
 
     private func pushTextureToCanvas() {
-        guard let canvas else { return }
-        canvas.imageTexture = (showBeforeAfter ? (beforeTexture ?? currentTexture) : currentTexture)
-        canvas.coverageTexture = coverageTexture
-        canvas.showOverlay = showMaskOverlay && coverageTexture != nil && !showBeforeAfter
+        if let canvas {
+            canvas.imageTexture = showBeforeAfter
+                ? (beforeTexture ?? currentTexture) : currentTexture
+            canvas.coverageTexture = coverageTexture
+            canvas.showOverlay = showMaskOverlay && coverageTexture != nil && !showBeforeAfter
+        }
+        // The same frame is what the loupe shows for a developed photo — see
+        // `pushLoupeRender`, which decides whether this one is that photo's.
+        pushLoupeRender()
     }
 
     // MARK: - Library
@@ -800,6 +1138,10 @@ final class AppModel {
                     } else if self.store.isDirty {
                         self.persistEdit(announce: false)
                     }
+                    // The lookup is what the loupe was waiting for: with the
+                    // development in hand, an already-finished render of it is
+                    // this photo's picture.
+                    self.pushLoupeRender()
                 }
             }
         }
@@ -876,8 +1218,8 @@ final class AppModel {
 
     // MARK: - Zoom commands
 
-    func zoomToFit() { canvas?.zoomToFit() }
-    func zoomToActualSize() { canvas?.zoomToActualSize() }
+    func zoomToFit() { activeCanvas?.zoomToFit() }
+    func zoomToActualSize() { activeCanvas?.zoomToActualSize() }
 
     // MARK: - Export
 
@@ -1000,13 +1342,25 @@ extension AppModel: CanvasInputHandler {
     }
 
     func canvasKeyCommand(_ command: CanvasKeyCommand) {
+        // The loupe is read-only: it draws the same canvas, so the same keys
+        // reach it, and the ones that would edit something are refused here
+        // rather than in the view — the view is shared.
+        if mode == .library {
+            switch command {
+            case .fit: zoomToFit()
+            case .actualSize: zoomToActualSize()
+            case .colorLabel(let raw):
+                if let color = ColorLabel(rawValue: raw) { toggleColorLabel(color) }
+            case .toggleBrush, .toggleTargeted, .sizeStep, .featherStep:
+                break
+            }
+            return
+        }
         switch command {
         case .toggleBrush:
             tool = (tool == .brush) ? .pan : .brush
         case .toggleTargeted:
             tool = (tool == .targeted) ? .pan : .targeted
-        case .toggleEraser:
-            eraserActive.toggle()
         case .sizeStep(let n):
             updateBrush { $0.size = BrushSizing.adjustedSize($0.size, steps: n) }
             statusMessage = String(format: "Brush %.0f px", brushDiameterPixels)
@@ -1023,6 +1377,9 @@ extension AppModel: CanvasInputHandler {
     }
 
     func canvasBeforeAfterHeld(_ held: Bool) {
+        // "Before" is a comparison against an edit, and the loupe is not
+        // editing anything.
+        guard mode == .develop else { return }
         showBeforeAfter = held
     }
 }

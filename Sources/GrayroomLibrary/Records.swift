@@ -38,6 +38,34 @@ public struct Camera: LibraryRecord, Identifiable, Equatable, Sendable {
     }
 }
 
+// MARK: - Lens
+
+/// The glass in front of the camera, kept the same way the body is: one row per
+/// distinct `(make, model)`, found-or-created at import.
+///
+/// `make` is allowed to be empty, and often is — plenty of cameras write
+/// `LensModel` with no `LensMake` beside it (adapted and manual glass in
+/// particular), and dropping those would lose the only thing the file says
+/// about the lens. `model` is what identifies a lens, so a row is never made
+/// without one.
+public struct Lens: LibraryRecord, Identifiable, Equatable, Sendable {
+    public static let databaseTableName = "lenses"
+
+    public var id: Int64?
+    public var make: String
+    public var model: String
+
+    public init(id: Int64? = nil, make: String = "", model: String) {
+        self.id = id
+        self.make = make
+        self.model = model
+    }
+
+    public mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
+}
+
 // MARK: - Photo
 
 public struct Photo: LibraryRecord, Identifiable, Equatable, Sendable {
@@ -51,6 +79,7 @@ public struct Photo: LibraryRecord, Identifiable, Equatable, Sendable {
     public var importedAt: Date
     public var capturedAt: Date?
     public var cameraId: Int64?
+    public var lensId: Int64?
     public var width: Int?
     public var height: Int?
     public var latitude: Double?
@@ -66,6 +95,7 @@ public struct Photo: LibraryRecord, Identifiable, Equatable, Sendable {
         importedAt: Date = Date(),
         capturedAt: Date? = nil,
         cameraId: Int64? = nil,
+        lensId: Int64? = nil,
         width: Int? = nil,
         height: Int? = nil,
         latitude: Double? = nil,
@@ -80,6 +110,7 @@ public struct Photo: LibraryRecord, Identifiable, Equatable, Sendable {
         self.importedAt = importedAt
         self.capturedAt = capturedAt
         self.cameraId = cameraId
+        self.lensId = lensId
         self.width = width
         self.height = height
         self.latitude = latitude

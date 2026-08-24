@@ -9,13 +9,15 @@ import Metal
 import Observation
 import UniformTypeIdentifiers
 
-/// `GRAYROOM_SELFTEST=paint|undo|import|library swift run GrayroomApp <file.DNG>`
+/// `GRAYROOM_SELFTEST=paint|undo|import|library|library2 swift run GrayroomApp <file.DNG>`
 ///
 /// Whole-app checks, each in its own process: `paint` (a stroke drawn with real
 /// mouse events), `undo` (Cmd-Z / Cmd-Shift-Z pushed through the real menu-bar
 /// key-equivalent path), `import` (the second window scene, its menu item, its
-/// grid and its selection commands) and `library` (the grid, the g/d module
-/// keys and the colour-label keys, all as real keystrokes). All print PASS/FAIL
+/// grid and its selection commands), `library` (the grid, the g/d module keys
+/// and the colour-label keys, all as real keystrokes) and `library2` (the
+/// Library module's two views — the grid's scroll position and the loupe — and
+/// the Folders panel, the toolbar and the export sheet). All print PASS/FAIL
 /// lines and exit non-zero on failure.
 ///
 /// Repro (c): the whole app, in its own process, painting a stroke with real
@@ -66,7 +68,26 @@ enum SelfTest {
         ///     swift run GrayroomApp
         /// ```
         case library
+        /// The other half of the Library run, in a process of its own: the
+        /// grid's scroll position across a trip through Develop, the loupe,
+        /// the Folders panel, the toolbar, the menus and the export sheet.
+        ///
+        /// Two processes rather than one because the Library test covers two
+        /// unrelated halves — the grid and its previews here, the module's
+        /// views and the window's furniture there — and each half then has a
+        /// whole run's deadline to itself and can be driven on its own while it
+        /// is being worked on. Both import `testdata` into a throwaway library
+        /// of their own and are run the same way:
+        ///
+        /// ```
+        /// CFFIXED_USER_HOME=$(mktemp -d) GRAYROOM_SELFTEST=library2 \
+        ///     swift run GrayroomApp
+        /// ```
+        case library2
     }
+
+    /// Whether this run is one of the two halves of the Library test.
+    static var isLibraryRun: Bool { mode == .library || mode == .library2 }
 
     static var mode: Mode? {
         ProcessInfo.processInfo.environment["GRAYROOM_SELFTEST"].flatMap(Mode.init(rawValue:))
@@ -77,6 +98,17 @@ enum SelfTest {
     static var outputDirectory: URL {
         let path = ProcessInfo.processInfo.environment["GRAYROOM_SELFTEST_OUT"] ?? "out"
         return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    /// When the run began — set at launch, so a phase line says how far into
+    /// the run it is and not how far into the checks.
+    static var startedAt = Date()
+
+    /// Marks a phase of a run, with how long the run has taken so far. The
+    /// Library test is split across two processes because it does not fit in
+    /// one deadline; these lines are how the split is kept balanced.
+    static func phase(_ name: String) {
+        log(String(format: "self-test: --- %@ at %.1f s", name, -startedAt.timeIntervalSinceNow))
     }
 
     /// How long a whole self-test may take before every `wait…` gives up and
@@ -99,7 +131,20 @@ enum SelfTest {
     /// `hidesOnDeactivate` stays false so an inactive app keeps its windows
     /// (and therefore its layout, its rows and its click targets) alive.
     static func stayOutOfTheWay() {
-        guard isRequested, windowObserver == nil else { return }
+        guard isRequested else { return }
+        // Before anything opens a file, because opening one overwrites this.
+        //
+        // These tests open photos, and the app remembers the last file it
+        // opened in a preference `CFFIXED_USER_HOME` does *not* redirect —
+        // cfprefsd keys off the real user. Left alone it leaks into the next
+        // self-test's library (measured: it made the import test's "the JPEG is
+        // new to the library" fail on every second run), so every mode puts it
+        // back before it exits, and `openInitialDocument` does not act on it
+        // during a self-test at all.
+        if previousLastFile == nil {
+            previousLastFile = UserDefaults.standard.string(forKey: AppModel.lastFileDefaultsKey)
+        }
+        guard windowObserver == nil else { return }
         windowObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didUpdateNotification, object: nil, queue: .main
         ) { notification in
@@ -128,13 +173,8 @@ enum SelfTest {
 
     static func startIfRequested() {
         guard isRequested else { return }
-        // These tests open photos, and opening a photo is what the app reopens
-        // at the next launch — a preference `CFFIXED_USER_HOME` does *not*
-        // redirect, because cfprefsd keys off the real user. Left alone it
-        // leaks into the next self-test's library (measured: it made the import
-        // test's "the JPEG is new to the library" fail on every second run), so
-        // the grid tests put it back before they exit.
-        previousLastFile = UserDefaults.standard.string(forKey: AppModel.lastFileDefaultsKey)
+        startedAt = Date()
+        deadline = startedAt.addingTimeInterval(300)
         // The import window does not need a document, so it does not wait for
         // one — pointing this mode at a RAW file just to get past the poll
         // would be a decode the test has no use for.
@@ -144,7 +184,7 @@ enum SelfTest {
         }
         // Same reason: the library test starts from an empty library and no
         // document at all — waiting for a first render would wait forever.
-        if mode == .library {
+        if isLibraryRun {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { runLibrary() }
             return
         }
@@ -733,21 +773,34 @@ enum SelfTest {
             switch mode {
             case .paint, nil: run(canvas: canvas, model: model)
             case .undo: runUndo(canvas: canvas, model: model)
-            case .importWindow, .library: break
+            case .importWindow, .library, .library2: break
             }
         }
     }
 
+    /// The **develop** view's canvas. The loupe draws the same class of view, so
+    /// it is told apart by the identifier `AppModel.makeLoupeCanvas` puts on
+    /// it — "the develop canvas is not in the window" has to stay a question a
+    /// test can ask while the loupe is up.
     static func findCanvas() -> CanvasNSView? {
-        func search(_ view: NSView) -> CanvasNSView? {
-            if let c = view as? CanvasNSView { return c }
-            for sub in view.subviews { if let c = search(sub) { return c } }
-            return nil
+        canvases().first { $0.identifier?.rawValue != AppModel.loupeCanvasIdentifier }
+    }
+
+    /// The Library loupe's canvas.
+    static func findLoupeCanvas() -> CanvasNSView? {
+        canvases().first { $0.identifier?.rawValue == AppModel.loupeCanvasIdentifier }
+    }
+
+    static func canvases() -> [CanvasNSView] {
+        var found: [CanvasNSView] = []
+        func search(_ view: NSView) {
+            if let c = view as? CanvasNSView { found.append(c) }
+            view.subviews.forEach(search)
         }
         for window in NSApp.windows {
-            if let root = window.contentView, let c = search(root) { return c }
+            if let root = window.contentView { search(root) }
         }
-        return nil
+        return found
     }
 
     static func settle(_ model: AppModel, then body: @escaping () -> Void) {

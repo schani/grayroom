@@ -31,8 +31,6 @@ final class CanvasKeyAndCursorTests: XCTestCase {
             ("B", [.shift], "toggleBrush"),
             ("t", [], "toggleTargeted"),
             ("T", [.shift], "toggleTargeted"),
-            ("e", [], "toggleEraser"),
-            ("E", [.shift], "toggleEraser"),
             ("[", [], "sizeStep(-1)"),
             ("]", [], "sizeStep(1)"),
             ("{", [], "sizeStep(-1)"),

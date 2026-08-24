@@ -55,7 +55,6 @@ extension CanvasKeyCommand {
         switch self {
         case .toggleBrush: return "toggleBrush"
         case .toggleTargeted: return "toggleTargeted"
-        case .toggleEraser: return "toggleEraser"
         case .sizeStep(let n): return "sizeStep(\(n))"
         case .featherStep(let n): return "featherStep(\(n))"
         case .fit: return "fit"

@@ -69,7 +69,8 @@ extension Library {
     /// id, so photos with no EXIF date sort first but stay stable.
     public func photos(color: ColorLabel? = nil,
                        tag: String? = nil,
-                       cameraID: Int64? = nil) throws -> [Photo] {
+                       cameraID: Int64? = nil,
+                       lensID: Int64? = nil) throws -> [Photo] {
         var sql = "SELECT photos.* FROM photos"
         var arguments: [DatabaseValueConvertible] = []
         if tag != nil {
@@ -90,6 +91,10 @@ extension Library {
         if let cameraID {
             conditions.append("photos.camera_id = ?")
             arguments.append(cameraID)
+        }
+        if let lensID {
+            conditions.append("photos.lens_id = ?")
+            arguments.append(lensID)
         }
         if !conditions.isEmpty {
             sql += " WHERE " + conditions.joined(separator: " AND ")
@@ -235,6 +240,45 @@ extension Library {
         var camera = Camera(make: make, model: model)
         try camera.insert(db)
         return camera
+    }
+
+    // MARK: - Lenses
+
+    public func lens(id: Int64) throws -> Lens? {
+        try dbPool.read { db in try Lens.fetchOne(db, key: id) }
+    }
+
+    public func allLenses() throws -> [Lens] {
+        try dbPool.read { db in
+            try Lens.order(Column("make"), Column("model")).fetchAll(db)
+        }
+    }
+
+    /// Find-or-create by `(make, model)`, which is the table's unique key.
+    ///
+    /// Unlike a camera, a lens is allowed an empty make — a file that names the
+    /// glass but not who ground it still names the glass. An empty *model* is
+    /// not a lens at all, and is rejected rather than stored as a row nobody
+    /// could tell from another.
+    @discardableResult
+    public func lens(make: String = "", model: String) throws -> Lens {
+        try dbPool.write { db in try Library.findOrCreateLens(db, make: make, model: model) }
+    }
+
+    /// Trims both fields; throws `LibraryError.emptyLensModel` when nothing is
+    /// left of the model.
+    static func findOrCreateLens(_ db: Database, make: String, model: String) throws -> Lens {
+        let make = make.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else { throw LibraryError.emptyLensModel }
+        if let existing = try Lens
+            .filter(Column("make") == make && Column("model") == model)
+            .fetchOne(db) {
+            return existing
+        }
+        var lens = Lens(make: make, model: model)
+        try lens.insert(db)
+        return lens
     }
 
     // MARK: - Locations

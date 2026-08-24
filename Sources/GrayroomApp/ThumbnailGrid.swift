@@ -41,6 +41,10 @@ struct ThumbnailGrid<Item: Identifiable, Cell: View>: View {
     /// because the cell is not hit-testable (see below) and a tooltip needs a
     /// tracking area on something that is.
     var help: ((Item) -> String?)?
+    /// A name for the grid's `NSScrollView`, so the self-test can find it and
+    /// read the grid's real position — see `ScrollBridge`. `nil` for a grid
+    /// nobody addresses from outside (the import window's).
+    var scrollIdentifier: String?
     @ViewBuilder let cell: (Item) -> Cell
 
     static var spacing: Double { 12 }
@@ -71,6 +75,15 @@ struct ThumbnailGrid<Item: Identifiable, Cell: View>: View {
                         }
                     }
                     .padding(ThumbnailGrid.padding)
+                    // Inside the scrolled content, because that is what has an
+                    // `enclosingScrollView` — see `ScrollBridge`. Only a grid
+                    // that was given a name gets one, so the self-test cannot
+                    // find the import window's instead of the library's.
+                    .background {
+                        if let scrollIdentifier {
+                            ScrollBridge(identifier: scrollIdentifier)
+                        }
+                    }
                 }
                 .onChange(of: scrollTarget) { _, target in
                     guard let target else { return }

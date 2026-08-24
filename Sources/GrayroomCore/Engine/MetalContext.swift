@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Metal
 
@@ -102,6 +103,54 @@ public final class MetalContext {
         d.storageMode = .shared
         guard let t = device.makeTexture(descriptor: d) else { throw MetalError.textureAllocationFailed }
         return t
+    }
+
+    /// A displayable texture holding one `CGImage`.
+    ///
+    /// `rgba8Unorm_srgb`, so the *sampler* decodes to linear light and the
+    /// canvas shader — which composites in linear and writes an extended-linear
+    /// drawable — needs no conversion pass. That is what lets an 8-bit picture
+    /// that never went through the pipeline (the camera's own embedded preview,
+    /// the grid's 512 px thumbnail) be drawn on the same canvas as a pipeline
+    /// render, at the same zoom, without a per-pixel CPU conversion first.
+    ///
+    /// Mipmapped for the same reason `makeWorkingTexture` offers it: the canvas
+    /// samples an explicit level, so a picture shown below 100 % has to be
+    /// minified through the chain rather than point-sampled through a bilinear
+    /// filter.
+    public func makeDisplayTexture(from image: CGImage) throws -> MTLTexture {
+        let w = image.width, h = image.height
+        guard w > 0, h > 0 else { throw MetalError.textureAllocationFailed }
+        // A bitmap context's rows are stored top first, which is also the
+        // texture's row order — the picture goes in the right way up.
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                      bytesPerRow: w * 4, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+              let base = context.data
+        else { throw MetalError.textureAllocationFailed }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        let d = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm_srgb, width: w, height: h, mipmapped: true)
+        // `.renderTarget` as well as `.shaderRead`: a blit mipmap generation
+        // renders each level.
+        d.usage = [.shaderRead, .renderTarget]
+        d.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: d) else {
+            throw MetalError.textureAllocationFailed
+        }
+        texture.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
+                        withBytes: base, bytesPerRow: w * 4)
+        if texture.mipmapLevelCount > 1 {
+            guard let buffer = commandQueue.makeCommandBuffer(),
+                  let blit = buffer.makeBlitCommandEncoder() else { throw MetalError.encoderFailed }
+            blit.generateMipmaps(for: texture)
+            blit.endEncoding()
+            buffer.commit()
+            buffer.waitUntilCompleted()
+        }
+        return texture
     }
 
     /// A single-channel `r32Float` scratch texture (clarity pyramids). Full

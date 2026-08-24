@@ -6,11 +6,26 @@ import SwiftUI
 /// The window, in either of the app's two modules.
 ///
 /// **Library** (`g`) is the Folders panel left and the grid right — there is no
-/// develop sidebar because none of it applies to a selection of photos.
+/// develop sidebar because none of it applies to a selection of photos — or, on
+/// `e`, the loupe with the whole window to itself, panel collapsed.
 /// **Develop** (`d`) is the canvas left/centre with a fixed 320 pt scrollable
 /// sidebar right. Both hang their controls in the window's own title bar and
 /// keep the one-line status bar at the bottom, so the activity indicator and
 /// the error line never move.
+///
+/// # Why the Library is never taken out of the window
+///
+/// The two modules are a `ZStack` and not a `switch`, with the Library merely
+/// made invisible while Develop is frontmost. The grid is an `NSScrollView`,
+/// and a scroll view that is torn down and rebuilt starts at the top: `g` from
+/// Develop would paint at least one frame of the grid scrolled to zero before
+/// anything could put it back, whatever the something was. Keeping the view
+/// mounted means the clip view is the *same object* with the *same* offset when
+/// the grid comes back — there is nothing to save and nothing to restore.
+///
+/// Develop stays conditional, so its canvas really does leave the window (the
+/// self-test asserts exactly that, by walking the view tree), and its textures
+/// go with it.
 struct RootView: View {
     @Bindable var model: AppModel
     /// Held here rather than in the toolbar builder: `ToolbarContent` is not a
@@ -19,11 +34,17 @@ struct RootView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            switch model.mode {
-            case .library:
+            ZStack {
                 LibraryView(model: model)
-            case .develop:
-                develop
+                    .opacity(model.mode == .library ? 1 : 0)
+                    // Nothing behind Develop may take a click: the grid's cells
+                    // are `ClickCatcher` views, and one of those under the
+                    // canvas would select a photo when the user meant to paint.
+                    .allowsHitTesting(model.mode == .library)
+                    .accessibilityHidden(model.mode != .library)
+                if model.mode == .develop {
+                    develop
+                }
             }
             Divider()
             StatusBar(model: model)
@@ -179,12 +200,16 @@ private struct StatusBar: View {
     var body: some View {
         HStack(spacing: 12) {
             if model.mode == .library {
-                Text(model.libraryCountLabel)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .fixedSize()
-                    .controlProbe("library-count")
+                if model.libraryViewMode == .loupe {
+                    loupeIdentity
+                } else {
+                    Text(model.libraryCountLabel)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .fixedSize()
+                        .controlProbe("library-count")
+                }
             } else {
                 developIdentity
             }
@@ -203,7 +228,11 @@ private struct StatusBar: View {
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
-            if model.mode == .library { thumbnailSizeSlider }
+            // The size of a thumbnail means nothing in the loupe, which is
+            // showing exactly one photo.
+            if model.mode == .library, model.libraryViewMode == .grid {
+                thumbnailSizeSlider
+            }
             Circle()
                 .fill(model.store.isDirty ? Color.orange : Color.green.opacity(0.6))
                 .frame(width: 7, height: 7)
@@ -220,6 +249,7 @@ private struct StatusBar: View {
     private var developIdentity: some View {
         Text(model.imageURL?.lastPathComponent ?? "No image")
             .font(.system(size: 11, weight: .medium))
+            .controlProbe("develop-name")
         if model.previewSize != .zero {
             Text(String(format: "%.0f×%.0f",
                         model.previewSize.width, model.previewSize.height))
@@ -227,7 +257,19 @@ private struct StatusBar: View {
                 .foregroundStyle(.secondary)
         }
         if !model.cameraDescription.isEmpty {
-            Text(model.cameraDescription).font(.system(size: 11)).foregroundStyle(.secondary)
+            Text(model.cameraDescription)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .controlProbe("develop-camera")
+        }
+        // The glass, after the body that carried it and in the same secondary
+        // weight — a file that does not name its lens gets no label at all
+        // rather than a dash, exactly as the camera does.
+        if !model.lensDescription.isEmpty {
+            Text(model.lensDescription)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .controlProbe("develop-lens")
         }
         // The colour label of the photo on the canvas. The grid shows this by
         // tinting the whole cell, so this dot is develop's only sign of one —
@@ -239,6 +281,58 @@ private struct StatusBar: View {
                 .frame(width: 8, height: 8)
                 .help("Colour label: \(model.currentColorLabel.name)")
         }
+    }
+
+    /// The loupe's end of the bar: the photo it is showing, said the way the
+    /// develop view says it — and Lightroom's position in the filtered list,
+    /// "3 / 11", where the grid puts its count.
+    @ViewBuilder
+    private var loupeIdentity: some View {
+        Text(model.loupePositionLabel)
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .fixedSize()
+            .controlProbe("loupe-position")
+        Text(model.loupeName)
+            .font(.system(size: 11, weight: .medium))
+            .controlProbe("loupe-name")
+        if !model.loupeResolution.isEmpty {
+            Text(model.loupeResolution)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .controlProbe("loupe-resolution")
+        }
+        if !model.loupeCameraDescription.isEmpty {
+            Text(model.loupeCameraDescription)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .controlProbe("loupe-camera")
+        }
+        if !model.loupeLensDescription.isEmpty {
+            Text(model.loupeLensDescription)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .controlProbe("loupe-lens")
+        }
+        if let photo = model.loupePhoto, photo.color != .unlabeled {
+            Circle()
+                .fill(LibraryCell.swatch(photo.color))
+                .frame(width: 8, height: 8)
+                .help("Colour label: \(photo.color.name)")
+                .controlProbe("loupe-color")
+        }
+        // The loupe zooms, so it says what it is zoomed to. The develop view
+        // puts this in the title bar next to its Fit and 1:1 buttons; the loupe
+        // has no buttons of its own — 0 and 1 are the whole interface — so the
+        // number goes where the rest of the loupe's identity is.
+        Text(String(format: "%.0f%%", model.zoomPercent))
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .fixedSize()
+            .help("Zoom to fit (0) · 100 % (1) · double-click toggles")
+            .controlProbe("loupe-zoom")
     }
 
     /// Lightroom's thumbnail-size slider, at the trailing end of the grid's own

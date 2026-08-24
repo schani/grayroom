@@ -70,8 +70,9 @@ final class KeyRouter {
         // menu and never from the keyboard). The item keeps the shortcut for
         // discoverability, exactly as `g` and `d` do.
         if modifiers == [.command, .option], characters == "s" {
-            guard window == KeyRouter.mainWindow(), model.mode == .library else { return false }
-            model.isFolderSidebarVisible.toggle()
+            guard window == KeyRouter.mainWindow(), model.mode == .library,
+                  model.libraryViewMode == .grid else { return false }
+            model.toggleFolderSidebar()
             return true
         }
         // Anything else with Control or Option in it belongs to whatever else
@@ -95,6 +96,12 @@ final class KeyRouter {
     // MARK: - The grids
 
     private func handleLibrary(_ characters: String, shift: Bool, command: Bool) -> Bool {
+        // The loupe is a *view* of the Library module, not a module of its own —
+        // Lightroom's G/E pair — so it is routed from inside the library rather
+        // than beside it.
+        if model.libraryViewMode == .loupe {
+            return handleLoupe(characters, shift: shift, command: command)
+        }
         if command {
             // Lightroom's Select All. Not a menu item: SwiftUI drops a ⌘A
             // shortcut on the floor while AppKit's own (disabled, unhandled)
@@ -120,6 +127,8 @@ final class KeyRouter {
         switch characters {
         case "g": return true                       // already here
         case "d": model.showDevelop()
+        // Lightroom's two ways into the loupe from the grid.
+        case "e", "\r", "\u{3}": model.showLoupe()
         case "6": model.toggleColorLabel(.red)
         case "7": model.toggleColorLabel(.yellow)
         case "8": model.toggleColorLabel(.green)
@@ -127,6 +136,37 @@ final class KeyRouter {
         case "+", "=": model.stepLibraryThumbnailSize(1)
         case "-", "_": model.stepLibraryThumbnailSize(-1)
         default: return false
+        }
+        return true
+    }
+
+    /// The Library module's loupe. One photo, so the arrows walk the filtered
+    /// list instead of the grid: left and right by one, stopping at the ends,
+    /// and up and down mean nothing at all.
+    ///
+    /// The table itself is `LoupeKeys`, in `GrayroomUI`, so that "0 zooms to fit
+    /// in the loupe" is a claim a test can make without a window.
+    private func handleLoupe(_ characters: String, shift: Bool, command: Bool) -> Bool {
+        guard !command else { return false }
+        let action: LoupeCommand
+        if let (dx, dy) = KeyRouter.arrow(characters) {
+            SelfTest.note("loupe arrow dx=\(dx) dy=\(dy) "
+                + "photo=\(String(describing: model.loupePhotoID))")
+            action = LoupeKeys.command(forArrow: dx, dy)
+        } else if let command = LoupeKeys.command(for: characters) {
+            action = command
+        } else {
+            return false
+        }
+        switch action {
+        case .step(let delta): model.stepLoupe(delta)
+        case .grid: model.showGrid()
+        case .develop: model.showDevelop()
+        case .colorLabel(let raw):
+            if let color = ColorLabel(rawValue: raw) { model.toggleColorLabel(color) }
+        case .zoomToFit: model.zoomToFit()
+        case .zoomToActualSize: model.zoomToActualSize()
+        case .nothing: break
         }
         return true
     }
@@ -146,7 +186,10 @@ final class KeyRouter {
         // already tracks.
         case "b": model.canvasKeyCommand(.toggleBrush)
         case "t": model.canvasKeyCommand(.toggleTargeted)
-        case "e": model.canvasKeyCommand(.toggleEraser)
+        // Lightroom's `e`: back to the Library, in the loupe, on this photo.
+        // The brush's eraser is Option-drag (and the sidebar's own toggle),
+        // which is where Lightroom keeps it too.
+        case "e": model.showLoupe()
         case "[", "{": model.canvasKeyCommand(shift ? .featherStep(-1) : .sizeStep(-1))
         case "]", "}": model.canvasKeyCommand(shift ? .featherStep(1) : .sizeStep(1))
         case "0": model.canvasKeyCommand(.fit)

@@ -34,6 +34,11 @@ struct Show: ParsableCommand {
         } else {
             out += "camera:        -\n"
         }
+        if let lens = try record.lensId.flatMap({ try library.lens(id: $0) }) {
+            out += "lens:          \(Format.lens(lens)) (id \(lens.id.map(String.init) ?? "-"))\n"
+        } else {
+            out += "lens:          -\n"
+        }
         if let w = record.width, let h = record.height {
             out += "size:          \(w) x \(h)\n"
         } else {

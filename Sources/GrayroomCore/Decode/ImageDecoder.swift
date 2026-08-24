@@ -42,6 +42,10 @@ public struct ImageInfo {
     public var lensCorrectionSupported: Bool
     public var cameraMake: String?
     public var cameraModel: String?
+    /// EXIF `LensMake` / `LensModel`. Plenty of files carry a model with no
+    /// make beside it (adapted and manual glass), so the two are independent.
+    public var lensMake: String?
+    public var lensModel: String?
     /// EXIF `DateTimeOriginal`, resolved against `OffsetTimeOriginal` when the
     /// file carries one and against the local time zone otherwise.
     public var capturedAt: Date?
@@ -188,12 +192,13 @@ public final class ImageDecoder {
 
         // CIRAWFilter's own property dictionary is the primary source; the
         // image source's is the fallback for files where it omits EXIF/GPS.
-        let exif = (f.properties[kCGImagePropertyExifDictionary as String] as? [String: Any])
-            ?? (fileProperties[kCGImagePropertyExifDictionary as String] as? [String: Any])
-        let gps = (f.properties[kCGImagePropertyGPSDictionary as String] as? [String: Any])
-            ?? (fileProperties[kCGImagePropertyGPSDictionary as String] as? [String: Any])
+        let exif = ImageDecoder.section(kCGImagePropertyExifDictionary,
+                                        primary: f.properties, fallback: fileProperties)
+        let gps = ImageDecoder.section(kCGImagePropertyGPSDictionary,
+                                       primary: f.properties, fallback: fileProperties)
         let capturedAt = ImageDecoder.captureDate(exif: exif)
         let (lat, lon, alt) = ImageDecoder.gpsPosition(gps: gps)
+        let lens = ImageDecoder.lens(exif: exif)
 
         return ImageInfo(
             url: url,
@@ -210,6 +215,8 @@ public final class ImageDecoder {
             lensCorrectionSupported: f.isLensCorrectionSupported,
             cameraMake: make,
             cameraModel: model,
+            lensMake: lens.make,
+            lensModel: lens.model,
             capturedAt: capturedAt,
             latitude: lat,
             longitude: lon,
@@ -245,6 +252,7 @@ public final class ImageDecoder {
         let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any]
         let gps = properties[kCGImagePropertyGPSDictionary as String] as? [String: Any]
         let (lat, lon, alt) = ImageDecoder.gpsPosition(gps: gps)
+        let lens = ImageDecoder.lens(exif: exif)
 
         let thumbnailOptions: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
@@ -274,6 +282,8 @@ public final class ImageDecoder {
             lensCorrectionSupported: false,
             cameraMake: tiff?[kCGImagePropertyTIFFMake as String] as? String,
             cameraModel: tiff?[kCGImagePropertyTIFFModel as String] as? String,
+            lensMake: lens.make,
+            lensModel: lens.model,
             capturedAt: ImageDecoder.captureDate(exif: exif),
             latitude: lat,
             longitude: lon,
@@ -281,6 +291,31 @@ public final class ImageDecoder {
     }
 
     // MARK: - EXIF / GPS
+
+    /// One of a property dictionary's sub-dictionaries, taken from `primary`
+    /// and from `fallback` only when `primary` has none.
+    ///
+    /// `CIRAWFilter.properties` is the primary source for a RAW, and it does
+    /// omit whole sections for some files — where ImageIO's own dictionary for
+    /// the same file still has them. Falling back per *section* rather than per
+    /// key keeps the two dictionaries from being interleaved: a file is
+    /// described by one of them, whichever one describes it.
+    static func section(_ key: CFString, primary: [AnyHashable: Any],
+                        fallback: [AnyHashable: Any]) -> [String: Any]? {
+        (primary[key as String] as? [String: Any])
+            ?? (fallback[key as String] as? [String: Any])
+    }
+
+    /// EXIF `LensMake` / `LensModel`, blank-trimmed, with empty strings
+    /// reported as "not there" rather than as a lens with no name.
+    static func lens(exif: [String: Any]?) -> (make: String?, model: String?) {
+        func string(_ key: CFString) -> String? {
+            guard let raw = exif?[key as String] as? String else { return nil }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return (string(kCGImagePropertyExifLensMake), string(kCGImagePropertyExifLensModel))
+    }
 
     /// The file's capture date read straight from ImageIO's property
     /// dictionary — no `CIRAWFilter`, so this costs a header read rather than a

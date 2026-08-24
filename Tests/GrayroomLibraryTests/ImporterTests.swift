@@ -156,6 +156,63 @@ final class ImporterTests: XCTestCase {
         XCTAssertEqual(try library.allCameras().count, 0)
     }
 
+    func testLensIsRecordedAndFoundOrCreatedOnce() throws {
+        let metadata = PhotoMetadata(cameraMake: "Leica Camera AG", cameraModel: "LEICA M11",
+                                     lensMake: "Leica Camera AG",
+                                     lensModel: "Summilux-M 1:1.4/35 ASPH.")
+        let importer = self.importer(metadata)
+        let a = try importer.importFile(at: try temp.writeFile("1.raw", Data("1".utf8)))
+        let b = try importer.importFile(at: try temp.writeFile("2.raw", Data("2".utf8)))
+
+        let lensID = try XCTUnwrap(XCTUnwrap(library.photo(id: a.photoID)).lensId)
+        XCTAssertEqual(try XCTUnwrap(library.photo(id: b.photoID)).lensId, lensID)
+        let lens = try XCTUnwrap(library.lens(id: lensID))
+        XCTAssertEqual(lens.make, "Leica Camera AG")
+        XCTAssertEqual(lens.model, "Summilux-M 1:1.4/35 ASPH.")
+        XCTAssertEqual(try library.allLenses().count, 1)
+        // The lens is its own dimension: the camera row is untouched by it.
+        XCTAssertEqual(try library.allCameras().count, 1)
+    }
+
+    /// A model with no make is a lens; a make with no model is not.
+    func testALensNeedsOnlyItsModel() throws {
+        let modelOnly = PhotoMetadata(lensModel: "Summicron 50")
+        let a = try importer(modelOnly).importFile(at: try temp.writeFile("1.raw",
+                                                                         Data("1".utf8)))
+        let lensID = try XCTUnwrap(XCTUnwrap(library.photo(id: a.photoID)).lensId)
+        XCTAssertEqual(try library.lens(id: lensID)?.make, "")
+        XCTAssertEqual(try library.lens(id: lensID)?.model, "Summicron 50")
+
+        let makeOnly = PhotoMetadata(lensMake: "Leica Camera AG", lensModel: "  ")
+        let b = try importer(makeOnly).importFile(at: try temp.writeFile("2.raw",
+                                                                        Data("2".utf8)))
+        XCTAssertNil(try XCTUnwrap(library.photo(id: b.photoID)).lensId)
+
+        let neither = PhotoMetadata()
+        let c = try importer(neither).importFile(at: try temp.writeFile("3.raw",
+                                                                        Data("3".utf8)))
+        XCTAssertNil(try XCTUnwrap(library.photo(id: c.photoID)).lensId)
+        XCTAssertEqual(try library.allLenses().count, 1)
+    }
+
+    /// The importer's own probe reads the same two EXIF fields the decoder
+    /// reports, so a file with a lens comes in with one.
+    func testTheRealProbeCarriesTheLensThrough() throws {
+        guard let url = testDataURL("L1000003.DNG") else {
+            throw XCTSkip("testdata/L1000003.DNG not present (set GRAYROOM_TEST_DNG to override)")
+        }
+        let metadata = try Importer.probeRAW(url)
+        guard let model = metadata.lensModel else {
+            throw XCTSkip("\(url.lastPathComponent) carries no EXIF lens")
+        }
+        XCTAssertFalse(model.isEmpty)
+
+        let photoID = try Importer(library: library).importFile(at: url).photoID
+        let lensID = try XCTUnwrap(XCTUnwrap(library.photo(id: photoID)).lensId)
+        XCTAssertEqual(try library.lens(id: lensID)?.model, model)
+        XCTAssertEqual(try library.lens(id: lensID)?.make, metadata.lensMake ?? "")
+    }
+
     // MARK: - Directories
 
     func testImportDirectoryPicksUpOnlyRAWFiles() throws {

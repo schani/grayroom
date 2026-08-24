@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import GrayroomCore
 import GrayroomLibrary
 import GrayroomUI
 
@@ -46,16 +47,13 @@ extension SelfTest {
             + "mainWindow=\(NSApp.mainWindow?.title ?? "nil") "
             + "error=\(app.errorMessage ?? "none")")
         check(findCanvas() == nil, "the develop canvas is not in the window in library mode")
-        // Not asserted to be empty: `CFFIXED_USER_HOME` moves the library but
-        // not `cfprefsd`, so the app may still reopen — and therefore import —
-        // the file the *real* user last had open, on a background queue whose
-        // timing this test does not control. The import below is checked by
-        // hash instead of by count.
+        // Checked by hash rather than by count below, so that a run pointed at
+        // a home that already holds photos still says something true.
         log("library self-test: the library starts with \(app.catalog.count) photo(s)")
 
         // 2. Lightroom's keys, as AppKit sees them. A disabled item would
         //    swallow its key equivalent silently (see UndoMenu.swift).
-        for (title, key) in [("Library", "g"), ("Develop", "d"), ("Red", "6"),
+        for (title, key) in [("Library", "g"), ("Loupe", "e"), ("Develop", "d"), ("Red", "6"),
                              ("Yellow", "7"), ("Green", "8"), ("Blue", "9")] {
             let item = findMenuItemDeep(titled: title)
             check(item?.keyEquivalent == key,
@@ -98,10 +96,9 @@ extension SelfTest {
         log("library self-test: importing \(source.path)")
         app.importModel.setSource(source)
         waitForScan(app.importModel) {
-            // By hash, not by count: the reopened last file (see above) may be
-            // importing itself in the background while this runs, so "how many
-            // photos" is not a number this test can pin down. "Every file I
-            // imported has a cell" is.
+            // By hash, not by count: "how many photos" is a number that
+            // depends on what the home this run was pointed at already held.
+            // "Every file I imported has a cell" does not.
             let expected = Set(app.importModel.checkedEntries.compactMap(\.hash)
                 .map { $0.lowercased() })
             app.importModel.runImport()
@@ -131,6 +128,20 @@ extension SelfTest {
                           + "\(undecodable.count) undecodable)")
                 check(app.catalog.photos.allSatisfy { $0.firstLocation != nil },
                       "every catalogued photo has a file on disk")
+                // The run is split in two — see `SelfTest.Mode.library2`. Both
+                // halves import into a throwaway library of their own; from
+                // here they check different things.
+                guard mode == .library else {
+                    waitForPreviews(app) {
+                        guard let window = KeyRouter.mainWindow() else {
+                            check(false, "a window to drive the grid with")
+                            finishLibrary(failures)
+                        }
+                        runGridScrollChecks(app: app, window: window, check: check,
+                                            failures: { failures })
+                    }
+                    return
+                }
                 runLibraryKeys(app: app, check: check, failures: { failures })
             }
         }
@@ -139,6 +150,7 @@ extension SelfTest {
     static func runLibraryKeys(app: AppModel,
                                        check: @escaping (Bool, String) -> Void,
                                        failures: @escaping () -> [String]) {
+        phase("grid keys")
         let ids = app.catalog.ids
         guard ids.count >= 4, let window = KeyRouter.mainWindow() else {
             check(false, "four photos and a window to drive the grid with")
@@ -203,12 +215,21 @@ extension SelfTest {
                 check(app.highlightedPhotoIDs == [ids[1]],
                       "shift-left shrank it back to the anchor "
                           + "(\(app.librarySelection.count))")
-                // 6. Return does *not* open the develop view. Only d and a
-                //    double-click do.
-                sendKey("", modifiers: [], window: window, virtualKey: 36)
+                // 6. Return opens the *loupe*, which is Lightroom's binding for
+                //    it: the Library module's other view, not the develop
+                //    module. (The loupe itself is checked in `library2`.)
+                sendKey("", modifiers: [], window: window, virtualKey: 36, viaQueue: true)
             },
             {
-                check(app.mode == .library, "Return does not leave the library")
+                check(app.mode == .library, "Return does not leave the Library module")
+                check(app.libraryViewMode == .loupe,
+                      "…it opens the loupe, as in Lightroom "
+                          + "(\(app.libraryViewMode.rawValue))")
+                check(findCanvas() == nil, "…and never the develop canvas")
+                sendKey("g", modifiers: [], window: window, virtualKey: 5)
+            },
+            {
+                check(app.libraryViewMode == .grid, "g came back to the grid")
                 _ = clickCell(cellID(ids[1]))
                 _ = clickCell(cellID(ids[2]), modifiers: .shift)
                 check(app.highlightedPhotoIDs == [ids[1], ids[2]],
@@ -268,13 +289,15 @@ extension SelfTest {
                 check(app.highlightedPhotoIDs == [subject],
                       "…with the photo that was being developed highlighted")
                 check(findCanvas() == nil, "…and the develop canvas gone again")
-                // 12. A double-click opens too.
+                // 12. A double-click opens the loupe (Lightroom), not Develop.
                 check(clickCell(cellID(ids[0]), clickCount: 2), "double-clicked the first cell")
             },
             {
-                check(app.mode == .develop && app.currentPhotoID == ids[0],
-                      "a double-click opened that photo in develop "
+                check(app.mode == .library && app.libraryViewMode == .loupe
+                          && app.loupePhoto?.id == ids[0],
+                      "a double-click opened that photo in the loupe "
                           + "(mode \(app.mode.rawValue))")
+                check(findCanvas() == nil, "…without a develop canvas")
                 sendKey("g", modifiers: [], window: window, virtualKey: 5)
             },
         ]
@@ -302,6 +325,7 @@ extension SelfTest {
     static func runPreviewChecks(app: AppModel, window: NSWindow, subject: Int64,
                                          check: @escaping (Bool, String) -> Void,
                                          failures: @escaping () -> [String]) {
+        phase("previews")
         let ids = app.catalog.ids
         waitForPreviews(app) {
             // 14. Every cell the grid built has an embedded preview, in memory
@@ -392,7 +416,152 @@ extension SelfTest {
         try? FileManager.default.createDirectory(at: outputDirectory,
                                                  withIntermediateDirectories: true)
         writeScreenshot(of: window, named: "selftest-library-previews.png")
-        runFolderChecks(app: app, window: window, check: check, failures: failures)
+        // The same claim in the loupe, where the picture is a pipeline render
+        // rather than a stored 512 px preview.
+        runDevelopedLoupeChecks(app: app, window: window, subject: subject,
+                                beforeLuminance: beforeLuminance, check: check) {
+            runLensChecks(app: app, window: window, check: check, failures: failures)
+        }
+    }
+
+    // MARK: - The lens in the develop status bar
+
+    /// The develop bar names the lens the open photo was taken through, after
+    /// the camera and in the same secondary style — and names nothing at all
+    /// for a file that does not say, without the line moving.
+    ///
+    /// The expected text is probed from the *file*, not read out of the
+    /// library, so this cannot pass by agreeing with the same import that
+    /// filled the bar.
+    static func runLensChecks(app: AppModel, window: NSWindow,
+                              check: @escaping (Bool, String) -> Void,
+                              failures: @escaping () -> [String]) {
+        phase("lens")
+        // Candidates come from the catalog — one photo the import gave a lens
+        // and one it did not — and the text to expect is then read back out of
+        // the *file*. Two probes rather than one per photo: a RAW probe is a
+        // decoder set-up, and this run has a deadline to keep.
+        // Smallest file first, in both cases: opening a photo decodes it, and a
+        // hundred-megapixel frame costs seconds this run does not need to spend
+        // to read a label off the status bar.
+        let byCost = app.catalog.photos.filter { $0.url != nil }
+            .sorted { $0.byteSize < $1.byteSize }
+        let lensCandidate = byCost.first { $0.lensId != nil }
+        let plainCandidate = byCost.first { $0.lensId == nil }
+        var withLens: (id: Int64, description: String)?
+        if let candidate = lensCandidate, let url = candidate.url,
+           let info = try? ImageDecoder.probe(url: url), let model = info.lensModel,
+           !model.isEmpty {
+            let make = info.lensMake ?? ""
+            withLens = (candidate.id, "\(make) \(model)".trimmingCharacters(in: .whitespaces))
+        }
+        check(lensCandidate == nil || withLens != nil,
+              "a photo the import gave a lens has one in its file too "
+                  + "(\(lensCandidate?.originalName ?? "none"))")
+        var withoutLens: Int64?
+        if let candidate = plainCandidate, let url = candidate.url,
+           let info = try? ImageDecoder.probe(url: url),
+           (info.lensModel ?? "").isEmpty {
+            withoutLens = candidate.id
+        }
+        let subjectLabel = withLens.map { "\($0.id) '\($0.description)'" } ?? "none"
+        let plainLabel = withoutLens.map(String.init) ?? "none"
+        log("library self-test: lens subject = \(subjectLabel), lensless subject = \(plainLabel)")
+
+        guard let subject = withLens else {
+            // Nothing in this folder names its glass. Then the one thing to
+            // check is that the bar does not invent a label — and that the
+            // line it would have gone on is where it always is.
+            checkNoLensLabel(app: app, window: window, photoID: withoutLens,
+                             reference: nil, check: check) {
+                finishLibrary(failures())
+            }
+            return
+        }
+
+        _ = clickCell(cellID(subject.id))
+        sendKey("d", modifiers: [], window: window, virtualKey: 2)
+        waitForProbe(app, photoID: subject.id) {
+            check(app.mode == .develop && app.currentPhotoID == subject.id,
+                  "d opened the photo whose file names a lens")
+            check(app.lensDescription == subject.description,
+                  "the model says the lens the file says (got '\(app.lensDescription)', "
+                      + "want '\(subject.description)')")
+            let lens = controlFrame(named: "develop-lens")
+            let camera = controlFrame(named: "develop-camera")
+            let name = controlFrame(named: "develop-name")
+            check(lens != nil, "the develop status bar draws a lens label")
+            check(camera != nil, "…and the camera label it follows")
+            if let lens, let camera {
+                check(lens.minX >= camera.maxX,
+                      "…after the camera, not before it (lens \(lens.minX), "
+                          + "camera ends \(camera.maxX))")
+                check(sameLine(lens, camera),
+                      "…on the camera's own line (lens \(lens), camera \(camera))")
+            }
+            writeScreenshot(of: window, named: "selftest-develop-lens.png")
+            // The same bar, on a file that names no lens: no label, and the
+            // filename at the other end of the bar has not moved a pixel.
+            checkNoLensLabel(app: app, window: window, photoID: withoutLens,
+                             reference: name, check: check) {
+                finishLibrary(failures())
+            }
+        }
+    }
+
+    /// Opens `photoID` in develop (when there is one) and asserts the bar shows
+    /// no lens, on the same line `reference` was drawn on.
+    static func checkNoLensLabel(app: AppModel, window: NSWindow, photoID: Int64?,
+                                 reference: NSRect?,
+                                 check: @escaping (Bool, String) -> Void,
+                                 then done: @escaping () -> Void) {
+        guard let photoID else {
+            log("library self-test: every importable file here names its lens")
+            backToTheGrid(app: app, window: window, then: done)
+            return
+        }
+        if app.mode == .library { _ = clickCell(cellID(photoID)) }
+        sendKey("g", modifiers: [], window: window, virtualKey: 5)
+        settle(app) {
+            _ = clickCell(cellID(photoID))
+            sendKey("d", modifiers: [], window: window, virtualKey: 2)
+            waitForProbe(app, photoID: photoID) {
+                check(app.lensDescription.isEmpty,
+                      "a file with no EXIF lens gets no lens in the bar "
+                          + "(got '\(app.lensDescription)')")
+                check(controlFrame(named: "develop-lens") == nil,
+                      "…and no label is drawn for it at all")
+                if let reference, let name = controlFrame(named: "develop-name") {
+                    check(sameLine(name, reference),
+                          "…and the bar's line has not moved (\(name) vs \(reference))")
+                }
+                backToTheGrid(app: app, window: window, then: done)
+            }
+        }
+    }
+
+    static func backToTheGrid(app: AppModel, window: NSWindow,
+                              then done: @escaping () -> Void) {
+        sendKey("g", modifiers: [], window: window, virtualKey: 5)
+        settle(app) { done() }
+    }
+
+    /// Polls until the open photo's metadata probe has landed — the camera and
+    /// lens labels are cleared when a file is opened and filled in by an
+    /// asynchronous probe, so "the bar is empty" is only an answer once it has
+    /// come back. Bounded on its own so a photo whose file names neither can
+    /// never eat the whole run's deadline.
+    static func waitForProbe(_ app: AppModel, photoID: Int64, attemptsLeft: Int = 100,
+                             then body: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            let landed = app.currentPhotoID == photoID
+                && (!app.cameraDescription.isEmpty || !app.lensDescription.isEmpty)
+            if !landed, attemptsLeft > 0, Date() < deadline {
+                waitForProbe(app, photoID: photoID, attemptsLeft: attemptsLeft - 1, then: body)
+            } else {
+                body()
+            }
+        }
     }
 
     /// Deletes every location row of a photo through the library API — the

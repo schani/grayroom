@@ -1,6 +1,15 @@
 import Foundation
 import Observation
 
+/// Lightroom's two Library views, and its two keys for them: `g` for the grid,
+/// `e` (or Return) for the loupe. Both are the Library module — the Folders
+/// panel stays, the module picker stays on Library — which is why this is a
+/// mode *inside* the browser and not a third `AppModel.Mode`.
+public enum LibraryViewMode: String, Equatable, Sendable {
+    case grid
+    case loupe
+}
+
 /// Everything the Library module's browser — the Folders panel plus the grid it
 /// filters — knows, with no view in it.
 ///
@@ -36,11 +45,46 @@ public final class LibraryBrowserState {
     /// first appear; after that it is the user's business.
     public var expandedFolders: Set<String> = []
 
-    /// Whether the Folders panel is showing at all.
+    /// Whether the user wants the Folders panel. It is a *preference*, not what
+    /// is on screen — see `isSidebarShowing`, which is the one the window binds
+    /// to.
     public var isSidebarVisible = true
 
     /// The grid's highlight — a set of photo ids, moved by clicks and arrows.
     public var photoSelection = LibrarySelection()
+
+    /// Grid or loupe. The loupe is a view of the Library module, not a module
+    /// of its own.
+    public private(set) var viewMode: LibraryViewMode = .grid
+
+    /// The one photo the loupe is showing, `nil` in the grid. It is always the
+    /// grid's whole selection too, so `g` comes back to it highlighted.
+    public private(set) var loupePhotoID: Int64?
+
+    /// What the grid was anchored on when the loupe took over.
+    ///
+    /// It is the whole of "does the grid need to be scrolled on the way out".
+    /// The photo the loupe opened on was, by construction, the cell the user
+    /// had just picked — so it was on screen, and a grid that has not moved
+    /// since is already showing it. Only a loupe that *walked* somewhere else
+    /// leaves the grid pointing at a photo it may not be showing.
+    private var loupeEntryAnchor: Int64?
+
+    /// Whether the Folders panel is on screen.
+    ///
+    /// The loupe never shows it: one photo fills the module's whole content
+    /// area, as it does in Lightroom's `E`. That is a *derived* fact rather than
+    /// a stored one on purpose — the panel's own visibility is never written to
+    /// on the way in, so there is nothing to restore on the way out and no way
+    /// for the two to drift apart. `g` from a loupe entered with the panel
+    /// hidden comes back to a hidden panel; entered with it showing, to a
+    /// showing one.
+    public var isSidebarShowing: Bool { viewMode == .grid && isSidebarVisible }
+
+    /// Whether the Library module is the one drawing a canvas right now, and
+    /// therefore whose zoom the zoom keys and the zoom percentage belong to.
+    /// The loupe draws the same `CanvasNSView` the develop view does.
+    public var ownsCanvas: Bool { viewMode == .loupe }
 
     /// What the grid draws, by id, in the catalog's order.
     public private(set) var visiblePhotoIDs: [Int64] = []
@@ -82,6 +126,14 @@ public final class LibraryBrowserState {
         visiblePhotoIDs = selection == .all ? catalogIDs : folders.photoIDs(for: selection)
         visibleIDs = Set(visiblePhotoIDs)
         photoSelection.retain(visibleIDs)
+        // The photo the loupe was showing is not in the grid any more — the
+        // source moved, or it was deleted. There is nothing to be in the loupe
+        // *of*, so the Library falls back to the grid.
+        if let id = loupePhotoID, !visibleIDs.contains(id) {
+            loupePhotoID = nil
+            loupeEntryAnchor = nil
+            viewMode = .grid
+        }
     }
 
     // MARK: - What the grid shows
@@ -144,6 +196,78 @@ public final class LibraryBrowserState {
         let visible = ids.filter { visibleIDs.contains($0) }
         guard !visible.isEmpty else { return }
         photoSelection.select(visible)
+    }
+
+    // MARK: - The loupe
+
+    /// `e`, or Return: the loupe, on one photo.
+    ///
+    /// `id` is the photo to show; with none given it is the selection's
+    /// anchor — Lightroom's *active* photo, the one it draws lighter than the
+    /// rest of a multi-selection — and failing that the first cell in the grid.
+    /// Returns the photo the loupe is now showing, and `nil` (staying in the
+    /// grid) when there is none: an empty grid has nothing to be a loupe of.
+    @discardableResult
+    public func enterLoupe(on id: Int64? = nil) -> Int64? {
+        let candidate = id
+            ?? photoSelection.anchor
+            ?? highlightedPhotoIDs.first
+            ?? visiblePhotoIDs.first
+        guard let candidate, visibleIDs.contains(candidate) else { return nil }
+        // Before the loupe overwrites the selection with its own photo.
+        loupeEntryAnchor = photoSelection.anchor
+        loupePhotoID = candidate
+        // Single selection, always: the loupe *is* the selection, so `g` comes
+        // back to the photo that was on screen with the ring around it.
+        photoSelection.select([candidate])
+        viewMode = .loupe
+        return candidate
+    }
+
+    /// `g` or Esc, from the loupe. Returns the cell to scroll into view — the
+    /// loupe's photo, which the arrows may have walked a long way from wherever
+    /// the grid was left — or `nil` when there is nothing to scroll to.
+    ///
+    /// `nil` is the common case and it matters: the grid is not taken out of
+    /// the window while the loupe has it (see `LibraryView`), so it is still at
+    /// the offset it was left at, showing the cell the loupe opened on. Asking
+    /// for that cell to be scrolled into view anyway would *move* a grid that
+    /// is already right — SwiftUI's `scrollTo` centres its target whether or
+    /// not it is on screen.
+    @discardableResult
+    public func exitLoupe() -> Int64? {
+        let photo = loupePhotoID
+        let walked = photo != loupeEntryAnchor
+        loupePhotoID = nil
+        loupeEntryAnchor = nil
+        viewMode = .grid
+        return walked ? photo : nil
+    }
+
+    /// The left and right arrows in the loupe: one photo along the grid's own
+    /// order, stopping at both ends rather than wrapping — as Lightroom does.
+    /// Returns the photo now being shown.
+    @discardableResult
+    public func stepLoupe(_ delta: Int) -> Int64? {
+        guard let current = loupePhotoID,
+              let index = visiblePhotoIDs.firstIndex(of: current) else {
+            return enterLoupe()
+        }
+        let next = min(max(index + delta, 0), visiblePhotoIDs.count - 1)
+        guard next != index else { return current }
+        let id = visiblePhotoIDs[next]
+        loupePhotoID = id
+        photoSelection.select([id])
+        return id
+    }
+
+    /// Lightroom's "3 / 11" in the loupe's bottom bar: where this photo is in
+    /// the filtered list, and how long that list is.
+    public var loupePositionLabel: String {
+        guard let id = loupePhotoID, let index = visiblePhotoIDs.firstIndex(of: id) else {
+            return "\(visibleCount) photo" + (visibleCount == 1 ? "" : "s")
+        }
+        return "\(index + 1) / \(visibleCount)"
     }
 
     // MARK: - Disclosure

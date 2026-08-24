@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CoreGraphics
 import GrayroomLibrary
 import GrayroomUI
@@ -6,7 +7,8 @@ import SwiftUI
 
 /// Lightroom's Library module: the Folders panel on the left, the grid — every
 /// photo in the selected source, at a size the slider sets, with the colour
-/// labels visible at a glance — on the right.
+/// labels visible at a glance — on the right. On `e` the module's other view,
+/// the loupe, takes the detail column and the panel collapses out of its way.
 ///
 /// The develop sidebar is not here, because nothing in it applies to a
 /// selection of photos. The grid is `ThumbnailGrid`, shared with the import
@@ -19,14 +21,83 @@ struct LibraryView: View {
     @Bindable var model: AppModel
 
     var body: some View {
+        // The panel's visibility is the model's `isSidebarShowing`, which is the
+        // user's preference *and* the view mode: the loupe never shows the
+        // panel, and it does so without writing to the preference, so there is
+        // nothing to restore when `g` comes back and no way for the two to
+        // disagree. The setter is refused in the loupe for the same reason —
+        // the standard title-bar sidebar button is still in the bar there.
         NavigationSplitView(columnVisibility: Binding(
-            get: { model.isFolderSidebarVisible ? .all : .detailOnly },
-            set: { model.isFolderSidebarVisible = $0 != .detailOnly }
+            get: { model.isFolderSidebarShowing ? .all : .detailOnly },
+            set: { visibility in
+                // The Library stays in the window while Develop is frontmost
+                // (`RootView`), and so does the split view's own title-bar
+                // button. Pressing it there would flip a preference with
+                // nothing on screen to show for it.
+                guard model.mode == .library, model.libraryViewMode == .grid else { return }
+                model.isFolderSidebarVisible = visibility != .detailOnly
+            }
         )) {
             FolderSidebar(model: model)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 420)
         } detail: {
-            grid
+            // Lightroom's G/E: the loupe fills the module's content area, and
+            // in the loupe that is the whole window.
+            //
+            // The grid is hidden underneath it rather than taken out, for the
+            // same reason Develop does not take the whole Library out (see
+            // `RootView`): the grid is an `NSScrollView`, and one that is
+            // rebuilt starts at the top, so `g` painted a frame of grid-at-zero
+            // before the scroll-into-view could land. Kept mounted, the scroll
+            // view survives the trip and there is nothing to put back.
+            GeometryReader { geometry in
+                ZStack {
+                    grid
+                        // Held at the width the grid had while it was showing,
+                        // for as long as this column is wider than that. The
+                        // loupe takes the Folders panel off the window, which
+                        // widens the column by the panel's whole width — and a
+                        // grid that reflowed into it would fit another column,
+                        // shorten its own content and have its scroll offset
+                        // *clamped* to the shorter one (measured: 3 columns and
+                        // 1440 pt of content became 4 and 1083, and 300 pt of
+                        // scroll became 264 — permanently, because nothing puts
+                        // a clamped offset back).
+                        //
+                        // The condition is the column's own width and not the
+                        // view mode on purpose. AppKit gives the column its
+                        // width back a layout pass *after* the model says the
+                        // loupe is gone, so a pin keyed on the mode is lifted
+                        // one pass too early — which is exactly when the
+                        // reflow, and the clamp, happened.
+                        .frame(width: pinnedWidth(inColumnOf: geometry.size.width),
+                               alignment: .leading)
+                        .opacity(model.libraryViewMode == .grid ? 1 : 0)
+                        .allowsHitTesting(model.libraryViewMode == .grid)
+                        .accessibilityHidden(model.libraryViewMode != .grid)
+                    if model.libraryViewMode == .loupe {
+                        LoupeView(model: model)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .onChange(of: geometry.size.width, initial: true) { _, width in
+                    // Only a column that is *not* wider than the grid's own
+                    // width is a settled one — see above. A column that is
+                    // legitimately wider (the user hid the panel, or the window
+                    // grew) says so by clearing the record first.
+                    if model.libraryGridWidth <= 0 || width <= model.libraryGridWidth + 1 {
+                        model.libraryGridWidth = width
+                    }
+                }
+            }
+            // The two things that widen this column for real. Both clear the
+            // record, so the next layout pass measures the grid afresh instead
+            // of holding it at a width that no longer means anything.
+            .onChange(of: model.isFolderSidebarVisible) { model.libraryGridWidth = 0 }
+            .onReceive(NotificationCenter.default.publisher(
+                for: NSWindow.didResizeNotification)) { _ in
+                model.libraryGridWidth = 0
+            }
         }
         // `.balanced` and not the default: the grid is not a detail *view* of
         // the panel, it is the module, and it should not push the panel off the
@@ -39,6 +110,15 @@ struct LibraryView: View {
         .navigationSplitViewStyle(.balanced)
     }
 
+    /// The width to hold the grid at inside a column of `columnWidth`, or
+    /// `nil` to let it fill that column — which is what it does whenever the
+    /// column is the width the grid last had.
+    private func pinnedWidth(inColumnOf columnWidth: Double) -> CGFloat? {
+        let own = model.libraryGridWidth
+        guard own > 0, columnWidth > own + 1 else { return nil }
+        return CGFloat(own)
+    }
+
     private var grid: some View {
         ThumbnailGrid(
             items: model.visiblePhotos,
@@ -46,8 +126,17 @@ struct LibraryView: View {
             columns: $model.libraryColumns,
             scrollTarget: $model.libraryScrollTarget,
             onClick: { model.libraryClick($0.id, modifiers: $1) },
-            onOpen: { model.openPhoto(id: $0.id) },
+            // Lightroom's double-click: into the loupe, not Develop (`d` is
+            // the only way there from the grid).
+            onOpen: { model.libraryClick($0.id, modifiers: []); model.showLoupe() },
             help: { $0.firstLocation ?? "\($0.originalName) — no file on disk" },
+            // The grid's scroll position is not state anybody keeps: this view
+            // is never taken out of the window, so the scroll view holds it
+            // itself (see `RootView`). The name is how the self-test reads it.
+            scrollIdentifier: ScrollBridge.gridIdentifier,
+            // Only while it is showing: the width a *hidden* grid reports is
+            // the pinned one, and recording that would make the pin its own
+            // input.
             cell: { photo in
                 LibraryCell(photo: photo,
                             size: model.libraryThumbnailSize,
