@@ -26,7 +26,7 @@ import SwiftUI
 /// on and the catcher never hears about it (measured — every click was
 /// swallowed until the cells stood aside). What a cell leaves hit-testable — the
 /// import window's checkbox — keeps taking its own clicks.
-struct ThumbnailGrid<Item: Identifiable, Cell: View>: View {
+struct ThumbnailGrid<Item: Identifiable, Cell: View>: View where Item.ID: Sendable {
     let items: [Item]
     /// The cell's edge, in points; the grid is adaptive to it.
     let thumbnailSize: Double
@@ -47,54 +47,53 @@ struct ThumbnailGrid<Item: Identifiable, Cell: View>: View {
     var scrollIdentifier: String?
     @ViewBuilder let cell: (Item) -> Cell
 
+    /// The scroll view's position, which is how a cell is scrolled to.
+    @State private var position = ScrollPosition(idType: Item.ID.self)
+
     static var spacing: Double { 12 }
     static var padding: Double { 12 }
 
     var body: some View {
         GeometryReader { geometry in
-            ScrollViewReader { scroller in
-                ScrollView {
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: thumbnailSize),
-                                           spacing: ThumbnailGrid.spacing)],
-                        spacing: ThumbnailGrid.spacing
-                    ) {
-                        ForEach(items) { item in
-                            cell(item)
-                                .background(ClickCatcher(
-                                    identifier: ThumbnailGrid.cellIdentifier(item.id),
-                                    help: help?(item)
-                                ) { modifiers, clickCount in
-                                    if clickCount >= 2, let onOpen {
-                                        onOpen(item)
-                                    } else {
-                                        onClick(item, modifiers)
-                                    }
-                                })
-                                .id(item.id)
-                        }
-                    }
-                    .padding(ThumbnailGrid.padding)
-                    // Inside the scrolled content, because that is what has an
-                    // `enclosingScrollView` — see `ScrollBridge`. Only a grid
-                    // that was given a name gets one, so the self-test cannot
-                    // find the import window's instead of the library's.
-                    .background {
-                        if let scrollIdentifier {
-                            ScrollBridge(identifier: scrollIdentifier)
-                        }
+            ScrollView {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: thumbnailSize),
+                                       spacing: ThumbnailGrid.spacing)],
+                    spacing: ThumbnailGrid.spacing
+                ) {
+                    ForEach(items) { item in
+                        cell(item)
+                            .background(ClickCatcher(
+                                identifier: ThumbnailGrid.cellIdentifier(item.id),
+                                help: help?(item)
+                            ) { modifiers, clickCount in
+                                if clickCount >= 2, let onOpen {
+                                    onOpen(item)
+                                } else {
+                                    onClick(item, modifiers)
+                                }
+                            })
+                            .id(item.id)
                     }
                 }
-                .onChange(of: scrollTarget) { _, target in
-                    guard let target else { return }
-                    scroller.scrollTo(target, anchor: .center)
-                    scrollTarget = nil
+                // What makes the cells' `.id`s addressable by `ScrollPosition`.
+                .scrollTargetLayout()
+                .padding(ThumbnailGrid.padding)
+                // Inside the scrolled content, because that is what has an
+                // `enclosingScrollView` — see `ScrollBridge`. Only a grid
+                // that was given a name gets one, so the self-test cannot
+                // find the import window's instead of the library's.
+                .background {
+                    if let scrollIdentifier {
+                        ScrollBridge(identifier: scrollIdentifier)
+                    }
                 }
-                .onAppear {
-                    guard let target = scrollTarget else { return }
-                    scroller.scrollTo(target, anchor: .center)
-                    scrollTarget = nil
-                }
+            }
+            .scrollPosition($position)
+            .onChange(of: scrollTarget, initial: true) { _, target in
+                guard let target else { return }
+                position.scrollTo(id: target, anchor: .center)
+                scrollTarget = nil
             }
             // `LazyVGrid(.adaptive(minimum:))` never says what column count it
             // settled on, so it is recomputed here with the same arithmetic:
