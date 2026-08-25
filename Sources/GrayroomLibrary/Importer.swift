@@ -109,13 +109,19 @@ public enum ImportScanner {
 public final class Importer {
     /// Injectable so tests can import arbitrary bytes without a RAW decoder.
     public typealias MetadataProbe = (URL) throws -> PhotoMetadata
+    /// The culling aids, computed at import. `nil` for a file Vision could not
+    /// be run on — one unscored frame is not a reason to refuse the import.
+    public typealias Analyzer = (URL) -> PhotoAnalysis?
 
     public let library: Library
     private let probe: MetadataProbe
+    private let analyzer: Analyzer
 
-    public init(library: Library, probe: @escaping MetadataProbe = Importer.probeRAW) {
+    public init(library: Library, probe: @escaping MetadataProbe = Importer.probeRAW,
+                analyze: @escaping Analyzer = Importer.analyzePreview) {
         self.library = library
         self.probe = probe
+        self.analyzer = analyze
     }
 
     /// The real probe: CIRAWFilter (RAW) or ImageIO (everything else), no GPU
@@ -158,6 +164,10 @@ public final class Importer {
         }
 
         let metadata = try probe(standardized)
+        // Outside the transaction: it is a small decode plus two Vision passes
+        // (measured at 12 ms a frame once the models are warm), and a write
+        // transaction is not the place to spend them.
+        let analysis = analyzer(standardized)
         let attributes = try FileManager.default.attributesOfItem(atPath: path)
         let byteSize = (attributes[.size] as? NSNumber)?.int64Value ?? 0
 
@@ -202,9 +212,14 @@ public final class Importer {
                 latitude: metadata.latitude,
                 longitude: metadata.longitude,
                 altitude: metadata.altitude,
-                color: .unlabeled)
+                color: .unlabeled,
+                aestheticScore: analysis?.aestheticScore)
             try photo.insert(db)
             let photoID = photo.id!
+            if let featurePrint = analysis?.featurePrint {
+                try db.execute(sql: "UPDATE photos SET feature_print = ? WHERE id = ?",
+                               arguments: [featurePrint, photoID])
+            }
             let outcome = try Library.addLocation(db, photoID: photoID, path: path).outcome
             return ImportResult(photoID: photoID, isNewPhoto: true, location: outcome,
                                 path: path)
@@ -246,6 +261,13 @@ public final class Importer {
     @discardableResult
     public func importDirectory(at url: URL, recursive: Bool = true) throws -> [ImportResult] {
         importFiles(try ImportScanner.scan(directory: url, recursive: recursive))
+    }
+
+    /// The default analyzer: Vision over the file's embedded preview, never a
+    /// full RAW decode. Blocks, so it must not be called on the main thread —
+    /// which is why import runs on a queue of its own.
+    public static func analyzePreview(_ url: URL) -> PhotoAnalysis? {
+        try? PhotoAnalyzer.analyze(url: url)
     }
 
     /// Everything the decoder will open: camera RAW plus the standard still

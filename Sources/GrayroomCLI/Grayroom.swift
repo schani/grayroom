@@ -9,7 +9,8 @@ public struct Grayroom: ParsableCommand {
         version: "0.4.0 (M6)",
         subcommands: [Probe.self, Render.self, MaskPreview.self,
                       Import.self, List.self, Show.self,
-                      Tag.self, Color.self, Developments.self, Previews.self],
+                      Tag.self, Color.self, Developments.self, Previews.self,
+                      Analyze.self, Similar.self, Duplicates.self],
         defaultSubcommand: nil)
 
     public init() {}
@@ -80,6 +81,14 @@ extension ColorLabel: ExpressibleByArgument {
     public static var allValueStrings: [String] { allNames }
 }
 
+extension PhotoSortKey: ExpressibleByArgument {
+    public init?(argument: String) {
+        self.init(rawValue: argument.lowercased())
+    }
+
+    public static var allValueStrings: [String] { allCases.map(\.rawValue) }
+}
+
 // MARK: - Formatting
 
 enum Format {
@@ -96,6 +105,13 @@ enum Format {
 
     static func hashPrefix(_ photo: Photo, length: Int = 12) -> String {
         String(photo.hashHexString.prefix(length))
+    }
+
+    /// Vision's aesthetics score, −1…1, and a dash for a photo nobody has
+    /// analysed yet.
+    static func score(_ score: Double?) -> String {
+        guard let score else { return "-" }
+        return String(format: "%+.2f", score)
     }
 
     static func orDash(_ s: String?) -> String {

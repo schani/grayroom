@@ -65,12 +65,15 @@ extension Library {
         try dbPool.read { db in try Photo.fetchOne(db, key: id) }
     }
 
-    /// Filters compose (all of them are ANDed). Ordered by capture date, then
-    /// id, so photos with no EXIF date sort first but stay stable.
+    /// Filters compose (all of them are ANDed). Ordered by capture date by
+    /// default, then id, so photos with no EXIF date sort first but stay
+    /// stable; `sort` picks another key (see `PhotoSortKey`).
     public func photos(color: ColorLabel? = nil,
                        tag: String? = nil,
                        cameraID: Int64? = nil,
-                       lensID: Int64? = nil) throws -> [Photo] {
+                       lensID: Int64? = nil,
+                       sort: PhotoSortKey = .captureTime,
+                       ascending: Bool = true) throws -> [Photo] {
         var sql = "SELECT photos.* FROM photos"
         var arguments: [DatabaseValueConvertible] = []
         if tag != nil {
@@ -99,7 +102,7 @@ extension Library {
         if !conditions.isEmpty {
             sql += " WHERE " + conditions.joined(separator: " AND ")
         }
-        sql += " ORDER BY photos.captured_at, photos.id"
+        sql += " ORDER BY " + sort.orderBy(ascending: ascending)
         return try dbPool.read { db in
             try Photo.fetchAll(db, sql: sql, arguments: StatementArguments(arguments))
         }
@@ -435,5 +438,77 @@ extension Library {
                 """, arguments: [photoID, trimmed])
             return db.changesCount > 0
         }
+    }
+}
+
+// MARK: - Culling aids
+
+/// The two Vision columns: what a photo scores, and what it looks like.
+///
+/// `feature_print` is read only here. It is kilobytes per row where the rest of
+/// the table is bytes, so it is kept out of the `Photo` record and off every
+/// path that reads the whole catalogue.
+extension Library {
+    public func setAnalysis(photoID: Int64, _ analysis: PhotoAnalysis?) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE photos SET aesthetic_score = ?, feature_print = ? WHERE id = ?",
+                arguments: [analysis?.aestheticScore, analysis?.featurePrint, photoID])
+            guard db.changesCount > 0 else { throw LibraryError.noSuchPhoto(photoID) }
+        }
+    }
+
+    public func analysis(photoID: Int64) throws -> PhotoAnalysis? {
+        try dbPool.read { db in
+            guard let row = try Row.fetchOne(
+                db, sql: "SELECT aesthetic_score, feature_print FROM photos WHERE id = ?",
+                arguments: [photoID]) else { return nil }
+            guard let score = row["aesthetic_score"] as Double?,
+                  let featurePrint = row["feature_print"] as Data? else { return nil }
+            return PhotoAnalysis(aestheticScore: score, featurePrint: featurePrint)
+        }
+    }
+
+    /// Photos with no analysis yet — what `grayroom analyze --missing` works
+    /// through. In id order, so a run that is interrupted and started again
+    /// picks up where it left off.
+    public func photoIDsMissingAnalysis() throws -> [Int64] {
+        try dbPool.read { db in
+            try Int64.fetchAll(db, sql: """
+                SELECT id FROM photos \
+                WHERE aesthetic_score IS NULL OR feature_print IS NULL ORDER BY id
+                """)
+        }
+    }
+
+    /// Every stored feature print, in id order.
+    ///
+    /// Read whole: comparing prints means comparing every pair, and SQLite
+    /// cannot do that. A hundred thousand photos is a few hundred megabytes,
+    /// which is why nothing but the two comparison commands calls this.
+    public func featurePrintIndex() throws -> FeaturePrintIndex {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT id, feature_print FROM photos WHERE feature_print IS NOT NULL ORDER BY id
+                """)
+            return FeaturePrintIndex(rows.compactMap { row in
+                guard let data = row["feature_print"] as Data? else { return nil }
+                return (id: row["id"] as Int64, featurePrint: data)
+            })
+        }
+    }
+
+    /// The photos nearest this one, nearest first.
+    public func similarPhotos(to photoID: Int64,
+                              threshold: Double = PhotoAnalyzer.defaultSimilarityThreshold,
+                              limit: Int? = nil) throws -> [(id: Int64, distance: Double)] {
+        try featurePrintIndex().nearest(to: photoID, threshold: threshold, limit: limit)
+    }
+
+    /// Groups of near-identical photos, by single linkage — see
+    /// `FeaturePrintIndex.duplicateGroups`.
+    public func duplicateGroups(
+        threshold: Double = PhotoAnalyzer.defaultSimilarityThreshold) throws -> [[Int64]] {
+        try featurePrintIndex().duplicateGroups(threshold: threshold)
     }
 }

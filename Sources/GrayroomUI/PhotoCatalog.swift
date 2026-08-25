@@ -24,6 +24,9 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
     public var altitude: Double?
     public var byteSize: Int64
     public var color: ColorLabel
+    /// Vision's aesthetics score, −1…1, `nil` until the photo is analysed —
+    /// one of the three keys the grid can be sorted by.
+    public var aestheticScore: Double?
     /// Every path the library has for this photo, sorted. Empty when it has
     /// none at all — the "missing" case the Folders panel gathers.
     public var locations: [String]
@@ -50,6 +53,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
                 altitude: Double? = nil,
                 byteSize: Int64 = 0,
                 color: ColorLabel = .unlabeled,
+                aestheticScore: Double? = nil,
                 locations: [String] = [],
                 developmentCount: Int = 0,
                 tags: [String] = [],
@@ -68,6 +72,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
         self.altitude = altitude
         self.byteSize = byteSize
         self.color = color
+        self.aestheticScore = aestheticScore
         self.locations = locations
         self.developmentCount = developmentCount
         self.tags = tags
@@ -92,6 +97,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
                   altitude: photo.altitude,
                   byteSize: photo.byteSize,
                   color: photo.color,
+                  aestheticScore: photo.aestheticScore,
                   locations: summary.locations,
                   developmentCount: summary.developmentCount,
                   tags: summary.tags,
@@ -130,10 +136,12 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
 ///
 /// # Order
 ///
-/// Capture date ascending, undated photos last, ties broken by row id — the
-/// same rule the import grid sorts by, so a card looks the same before and
-/// after it is imported. Undated frames go last rather than pretending to have
-/// been shot at the epoch.
+/// Lightroom's Sort control: one of three keys, ascending or descending. The
+/// default is capture date ascending, ties broken by row id — the same rule the
+/// import grid sorts by, so a card looks the same before and after it is
+/// imported. A photo with no value for the key (an undated frame, an unscored
+/// one) goes last whichever way round the sort runs, rather than pretending to
+/// have been shot at the epoch or scored zero.
 @Observable
 public final class PhotoCatalog {
     public private(set) var photos: [CatalogPhoto] = []
@@ -148,10 +156,24 @@ public final class PhotoCatalog {
     public var cameraNames: [Int64: String] = [:]
     public var lensNames: [Int64: String] = [:]
 
+    /// What the grid is sorted by — Library › Sort By. Written through
+    /// `setSort`, which is what re-sorts what is already loaded.
+    public private(set) var sortKey: PhotoSortKey = .captureTime
+    public private(set) var sortAscending = true
+
     public init() {}
 
     public init(photos: [CatalogPhoto]) {
         replace(photos)
+    }
+
+    /// The key and the direction together, so changing both sorts once.
+    public func setSort(_ key: PhotoSortKey, ascending: Bool) {
+        guard sortKey != key || sortAscending != ascending else { return }
+        sortKey = key
+        sortAscending = ascending
+        photos.sort(by: isOrderedBefore)
+        reindex()
     }
 
     public var count: Int { photos.count }
@@ -205,17 +227,37 @@ public final class PhotoCatalog {
     }
 
     public func replace(_ photos: [CatalogPhoto]) {
-        self.photos = photos.sorted(by: PhotoCatalog.isOrderedBefore)
+        self.photos = photos.sorted(by: isOrderedBefore)
         reindex()
     }
 
-    /// Capture date ascending, `nil` last, then row id.
-    public static func isOrderedBefore(_ a: CatalogPhoto, _ b: CatalogPhoto) -> Bool {
-        switch (a.capturedAt, b.capturedAt) {
-        case let (x?, y?) where x != y: return x < y
+    private func isOrderedBefore(_ a: CatalogPhoto, _ b: CatalogPhoto) -> Bool {
+        PhotoCatalog.isOrderedBefore(a, b, by: sortKey, ascending: sortAscending)
+    }
+
+    /// The grid's order, by key and direction. A photo with no value for the
+    /// key sorts last in both directions; everything else, ties included,
+    /// reverses.
+    public static func isOrderedBefore(_ a: CatalogPhoto, _ b: CatalogPhoto,
+                                       by key: PhotoSortKey, ascending: Bool) -> Bool {
+        switch key {
+        case .captureTime:
+            return ordered(a, b, ascending: ascending) { $0.capturedAt }
+        case .fileName:
+            return ordered(a, b, ascending: ascending) { $0.originalName.lowercased() }
+        case .aestheticScore:
+            return ordered(a, b, ascending: ascending) { $0.aestheticScore }
+        }
+    }
+
+    private static func ordered<T: Comparable>(
+        _ a: CatalogPhoto, _ b: CatalogPhoto, ascending: Bool,
+        by value: (CatalogPhoto) -> T?) -> Bool {
+        switch (value(a), value(b)) {
+        case let (x?, y?) where x != y: return ascending ? x < y : x > y
         case (nil, _?): return false
         case (_?, nil): return true
-        default: return a.id < b.id
+        default: return ascending ? a.id < b.id : a.id > b.id
         }
     }
 
@@ -236,15 +278,25 @@ public final class PhotoCatalog {
         if let index = indexByID[photo.id] {
             let existing = photos[index]
             photos[index] = photo
-            guard existing.capturedAt != photo.capturedAt else { return }
-            photos.sort(by: PhotoCatalog.isOrderedBefore)
+            guard movedInSortOrder(from: existing, to: photo) else { return }
+            photos.sort(by: isOrderedBefore)
             reindex()
             return
         }
-        let insertion = photos.firstIndex { !PhotoCatalog.isOrderedBefore($0, photo) }
+        let insertion = photos.firstIndex { !isOrderedBefore($0, photo) }
             ?? photos.count
         photos.insert(photo, at: insertion)
         reindex()
+    }
+
+    /// Whether an updated row can still sit where it is. Only the key being
+    /// sorted on matters: a colour label must not reshuffle the grid.
+    private func movedInSortOrder(from existing: CatalogPhoto, to photo: CatalogPhoto) -> Bool {
+        switch sortKey {
+        case .captureTime: return existing.capturedAt != photo.capturedAt
+        case .fileName: return existing.originalName != photo.originalName
+        case .aestheticScore: return existing.aestheticScore != photo.aestheticScore
+        }
     }
 
     public func remove(id: Int64) {

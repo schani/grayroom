@@ -207,6 +207,7 @@ final class AppModel {
     private let libraryQueue = DispatchQueue(label: "grayroom.library", qos: .userInitiated)
     /// The import in flight, if any — one at a time.
     private var importTaskID: TaskCenter.BackgroundTask.ID?
+    private var similarTaskID: TaskCenter.BackgroundTask.ID?
 
     private struct TargetedSession {
         var baseline: [Double]
@@ -771,6 +772,77 @@ final class AppModel {
         }
     }
 
+
+    // MARK: Sort order
+
+    /// Library › Sort By — Lightroom's Sort control, with its direction button.
+    var sortKey: PhotoSortKey { catalog.sortKey }
+    var sortAscending: Bool { catalog.sortAscending }
+
+    func setSortKey(_ key: PhotoSortKey) { setSort(key, ascending: catalog.sortAscending) }
+
+    func setSortAscending(_ ascending: Bool) { setSort(catalog.sortKey, ascending: ascending) }
+
+    /// The catalog is the grid's order, and the browser's filtered list is a
+    /// projection of it — so both move, and the highlighted photo is scrolled
+    /// back to wherever the new order put it.
+    func setSort(_ key: PhotoSortKey, ascending: Bool) {
+        guard catalog.sortKey != key || catalog.sortAscending != ascending else { return }
+        catalog.setSort(key, ascending: ascending)
+        browser.rebuild(from: catalog.photos)
+        libraryScrollTarget = browser.photoSelection.anchor
+        statusMessage = "Sorted by \(key.title), "
+            + (ascending ? "ascending" : "descending")
+    }
+
+    // MARK: Similar photos
+
+    /// The photo Select Similar Photos measures from: the one in the loupe, or
+    /// the grid's active cell.
+    var similaritySubjectID: Int64? {
+        if let id = browser.loupePhotoID { return id }
+        return browser.photoSelection.anchor ?? highlightedPhotoIDs.first
+    }
+
+    /// Library › Select Similar Photos: adds every photo within the default
+    /// feature-print distance of the current one to the grid's highlight.
+    ///
+    /// The comparison reads every stored feature print and measures the subject
+    /// against all of them, so it runs on the library queue with a task in the
+    /// activity centre — never on the main thread.
+    func selectSimilarPhotos() {
+        guard mode == .library, let library, similarTaskID == nil else { return }
+        guard let subject = similaritySubjectID else {
+            statusMessage = "Select a photo first"
+            return
+        }
+        let taskID = tasks.begin(title: "Finding similar photos")
+        similarTaskID = taskID
+        libraryQueue.async { [weak self] in
+            let outcome = Result { () -> [Int64]? in
+                guard try library.analysis(photoID: subject) != nil else { return nil }
+                return try library.similarPhotos(to: subject).map(\.id)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.tasks.finish(taskID)
+                self.similarTaskID = nil
+                switch outcome {
+                case .success(let matches):
+                    guard let matches else {
+                        self.statusMessage = "That photo has not been analysed yet"
+                        return
+                    }
+                    let added = self.browser.extendSelection(with: [subject] + matches)
+                    self.statusMessage = added.count > 1
+                        ? "Selected \(added.count) similar photos"
+                        : "No similar photos"
+                case .failure(let error):
+                    self.errorMessage = "Could not compare photos: \(error)"
+                }
+            }
+        }
+    }
 
     // MARK: - Canvas wiring
 

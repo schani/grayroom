@@ -305,3 +305,105 @@ final class PhotoCatalogTests: XCTestCase {
         XCTAssertEqual(catalog.count, 1)
     }
 }
+
+// MARK: - Sort order
+
+extension PhotoCatalogTests {
+    private func sorted() -> PhotoCatalog {
+        PhotoCatalog(photos: [
+            CatalogPhoto(id: 1, originalName: "charlie", capturedAt: date(0),
+                         aestheticScore: 0.2),
+            CatalogPhoto(id: 2, originalName: "Alpha", capturedAt: date(60),
+                         aestheticScore: -0.5),
+            CatalogPhoto(id: 3, originalName: "bravo", capturedAt: date(120),
+                         aestheticScore: 0.9),
+            CatalogPhoto(id: 4, originalName: "delta", capturedAt: nil,
+                         aestheticScore: nil),
+        ])
+    }
+
+    func testTheDefaultSortIsCaptureTimeAscending() {
+        let catalog = sorted()
+        XCTAssertEqual(catalog.sortKey, .captureTime)
+        XCTAssertTrue(catalog.sortAscending)
+        XCTAssertEqual(catalog.ids, [1, 2, 3, 4])
+    }
+
+    /// Case-insensitive, as the Finder's is — "Alpha" before "bravo".
+    func testSortByFileName() {
+        let catalog = sorted()
+        catalog.setSort(.fileName, ascending: true)
+        XCTAssertEqual(catalog.ids, [2, 3, 1, 4])
+        catalog.setSort(.fileName, ascending: false)
+        XCTAssertEqual(catalog.ids, [4, 1, 3, 2])
+    }
+
+    /// The unscored photo goes last whichever way round the sort runs.
+    func testSortByAestheticScoreKeepsUnscoredPhotosLast() {
+        let catalog = sorted()
+        catalog.setSort(.aestheticScore, ascending: false)
+        XCTAssertEqual(catalog.ids, [3, 1, 2, 4])
+        catalog.setSort(.aestheticScore, ascending: true)
+        XCTAssertEqual(catalog.ids, [2, 1, 3, 4])
+    }
+
+    func testDescendingCaptureTimeKeepsUndatedPhotosLast() {
+        let catalog = sorted()
+        catalog.setSort(.captureTime, ascending: false)
+        XCTAssertEqual(catalog.ids, [3, 2, 1, 4])
+    }
+
+    func testTheIndexFollowsAResort() {
+        let catalog = sorted()
+        catalog.setSort(.fileName, ascending: true)
+        XCTAssertEqual(catalog.index(of: 2), 0)
+        XCTAssertEqual(catalog.index(of: 4), 3)
+        XCTAssertEqual(catalog.photo(id: 1)?.originalName, "charlie")
+    }
+
+    /// Insertion and in-place update follow whatever the current key is.
+    func testApplyRespectsTheCurrentSortKey() {
+        let catalog = sorted()
+        catalog.setSort(.fileName, ascending: true)
+        catalog.apply(CatalogPhoto(id: 5, originalName: "beta", aestheticScore: 0.1))
+        XCTAssertEqual(catalog.ids, [2, 5, 3, 1, 4], "beta lands between Alpha and bravo")
+
+        var relabelled = catalog.photo(id: 3)!
+        relabelled.color = .green
+        catalog.apply(relabelled)
+        XCTAssertEqual(catalog.ids, [2, 5, 3, 1, 4], "a colour label does not reshuffle the grid")
+
+        var renamed = catalog.photo(id: 2)!
+        renamed.originalName = "zulu"
+        catalog.apply(renamed)
+        XCTAssertEqual(catalog.ids, [5, 3, 1, 4, 2])
+    }
+
+    /// Sorting by score has to move a photo whose score is what changed.
+    func testApplyResortsWhenTheScoreChanges() {
+        let catalog = sorted()
+        catalog.setSort(.aestheticScore, ascending: false)
+        XCTAssertEqual(catalog.ids, [3, 1, 2, 4])
+        var scored = catalog.photo(id: 2)!
+        scored.aestheticScore = 1.0
+        catalog.apply(scored)
+        XCTAssertEqual(catalog.ids, [2, 3, 1, 4])
+    }
+
+    func testSettingTheSameSortAgainChangesNothing() {
+        let catalog = sorted()
+        catalog.setSort(.captureTime, ascending: true)
+        XCTAssertEqual(catalog.ids, [1, 2, 3, 4])
+    }
+
+    /// The score comes off the row, so a sort by it works on a loaded library.
+    func testLoadCarriesTheAestheticScore() throws {
+        let id = try temp.importFile("a.dng")
+        try temp.library.setAnalysis(photoID: id,
+                                     PhotoAnalysis(aestheticScore: 0.4,
+                                                   featurePrint: Data([1])))
+        let catalog = PhotoCatalog()
+        try catalog.load(from: temp.library)
+        XCTAssertEqual(catalog.photo(id: id)?.aestheticScore, 0.4)
+    }
+}

@@ -1,5 +1,6 @@
 import AppKit
 import GrayroomLibrary
+import GrayroomUI
 import SwiftUI
 
 /// `swift run GrayroomApp [file.DNG]`.
@@ -154,6 +155,26 @@ struct GrayroomApp: App {
                 Button("Show/Hide Folders") { model.toggleFolderSidebar() }
                     .keyboardShortcut("s", modifiers: [.command, .option])
                 Divider()
+            }
+            // Lightroom Classic keeps the Sort control in the grid's toolbar
+            // and its keys under View › Sort; this app has neither yet, so both
+            // halves of the control live here, in the module's own menu, next
+            // to the other command that works on a whole selection.
+            //
+            // No checkmarks and no `.disabled(…)`: this builder runs once, at
+            // launch (see the undo note above), so a state read here would
+            // freeze at what it said then.
+            CommandMenu("Library") {
+                Menu("Sort By") {
+                    ForEach(PhotoSortKey.allCases, id: \.self) { key in
+                        Button(key.title) { model.setSortKey(key) }
+                    }
+                    Divider()
+                    Button("Ascending") { model.setSortAscending(true) }
+                    Button("Descending") { model.setSortAscending(false) }
+                }
+                Divider()
+                Button("Select Similar Photos") { model.selectSimilarPhotos() }
             }
             // Lightroom's colour labels, on Lightroom's keys: 6/7/8/9 for
             // red/yellow/green/blue, and purple with no key at all (Lightroom

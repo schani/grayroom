@@ -86,6 +86,13 @@ public struct Photo: LibraryRecord, Identifiable, Equatable, Sendable {
     public var longitude: Double?
     public var altitude: Double?
     public var color: ColorLabel
+    /// Vision's `overallScore`, −1…1, and `nil` until the photo is analysed.
+    ///
+    /// Its companion column, `feature_print`, is deliberately *not* here: it is
+    /// kilobytes per row, and this record is what `catalogSnapshot` decodes for
+    /// every photo in the library. Feature prints are read only by the queries
+    /// that compare them.
+    public var aestheticScore: Double?
 
     public init(
         id: Int64? = nil,
@@ -101,7 +108,8 @@ public struct Photo: LibraryRecord, Identifiable, Equatable, Sendable {
         latitude: Double? = nil,
         longitude: Double? = nil,
         altitude: Double? = nil,
-        color: ColorLabel = .unlabeled
+        color: ColorLabel = .unlabeled,
+        aestheticScore: Double? = nil
     ) {
         self.id = id
         self.hash = hash
@@ -117,6 +125,7 @@ public struct Photo: LibraryRecord, Identifiable, Equatable, Sendable {
         self.longitude = longitude
         self.altitude = altitude
         self.color = color
+        self.aestheticScore = aestheticScore
     }
 
     public mutating func didInsert(_ inserted: InsertionSuccess) {

@@ -7,8 +7,9 @@ struct List: ParsableCommand {
         commandName: "ls",
         abstract: "List photos in the library.",
         discussion: """
-        One line per photo: id, hash prefix, capture date, camera, colour, tags, \
-        development count, first location. Filters compose.
+        One line per photo: id, hash prefix, capture date, aesthetics score, \
+        camera, colour, tags, development count, first location. Filters \
+        compose.
         """)
 
     @OptionGroup var libraryOptions: LibraryOptions
@@ -25,9 +26,18 @@ struct List: ParsableCommand {
     @Option(name: .customLong("lens"), help: "Only photos taken through this lens id.")
     var lens: Int64?
 
+    @Option(name: .customLong("sort"),
+            help: ArgumentHelp("Order: capture, name or score.",
+                               discussion: "capture and name run ascending; score runs "
+                                   + "best first, and photos with no score go last."))
+    var sort: PhotoSortKey = .captureTime
+
     func run() throws {
         let library = try libraryOptions.open()
-        let photos = try library.photos(color: color, tag: tag, cameraID: camera, lensID: lens)
+        // Score is the one key whose useful direction is downwards: a list of
+        // the best frames should open on the best frame.
+        let photos = try library.photos(color: color, tag: tag, cameraID: camera, lensID: lens,
+                                        sort: sort, ascending: sort != .aestheticScore)
 
         var cameras: [Int64: Camera] = [:]
         var out = ""
@@ -43,6 +53,7 @@ struct List: ParsableCommand {
                 String(id),
                 Format.hashPrefix(photo),
                 Format.date(photo.capturedAt),
+                Format.score(photo.aestheticScore),
                 Format.camera(photo.cameraId.flatMap { cameras[$0] }),
                 photo.color.name,
                 Format.orDash(tags),

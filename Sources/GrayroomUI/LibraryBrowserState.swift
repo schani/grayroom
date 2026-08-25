@@ -198,6 +198,16 @@ public final class LibraryBrowserState {
         photoSelection.select(visible)
     }
 
+    /// Adds photos to the highlight, ignoring any the current source does not
+    /// show — Select Similar Photos, which must not ring a cell that is not on
+    /// screen. Returns what it actually added to.
+    @discardableResult
+    public func extendSelection(with ids: [Int64]) -> [Int64] {
+        let visible = ids.filter { visibleIDs.contains($0) }
+        photoSelection.extend(with: visible)
+        return visible
+    }
+
     // MARK: - The loupe
 
     /// `e`, or Return: the loupe, on one photo.

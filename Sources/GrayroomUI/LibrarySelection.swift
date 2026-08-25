@@ -69,6 +69,16 @@ public struct GridSelection<ID: Hashable & Sendable>: Equatable, Sendable {
         cursor = ids.last
     }
 
+    /// Adds to the highlight without disturbing what is already in it — what
+    /// Select Similar Photos does. The anchor stays where it was, so the next
+    /// shift-click still measures from the photo the user picked.
+    public mutating func extend(with ids: [ID]) {
+        guard !ids.isEmpty else { return }
+        highlighted.formUnion(ids)
+        if anchor == nil { anchor = ids.first }
+        cursor = ids.last
+    }
+
     /// `order` is the grid's displayed order: sorted and filtered, i.e. what a
     /// shift-range spans.
     public mutating func click(_ id: ID, modifiers: GridClickModifiers = [], order: [ID]) {

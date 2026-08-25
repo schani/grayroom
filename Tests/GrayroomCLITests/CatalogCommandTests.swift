@@ -44,11 +44,12 @@ final class CatalogCommandTests: XCTestCase {
         let photo = try XCTUnwrap(library.photo(id: id))
         XCTAssertEqual(fields[1], String(photo.hashHexString.prefix(12)))
         XCTAssertEqual(fields[2], "-", "no capture date")
-        XCTAssertEqual(fields[3], "-", "no camera")
-        XCTAssertEqual(fields[4], "green")
-        XCTAssertEqual(fields[5], "keeper,street")
-        XCTAssertEqual(fields[6], "1", "development count")
-        XCTAssertTrue(fields[7].hasSuffix("a.dng"), fields[7])
+        XCTAssertEqual(fields[3], "-", "no aesthetics score")
+        XCTAssertEqual(fields[4], "-", "no camera")
+        XCTAssertEqual(fields[5], "green")
+        XCTAssertEqual(fields[6], "keeper,street")
+        XCTAssertEqual(fields[7], "1", "development count")
+        XCTAssertTrue(fields[8].hasSuffix("a.dng"), fields[8])
         XCTAssertTrue(output.stderr.contains("1 photo(s)"), output.stderr)
     }
 
