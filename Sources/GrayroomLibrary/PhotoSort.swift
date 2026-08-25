@@ -1,6 +1,6 @@
 import Foundation
 
-/// What a list of photos is ordered by — Lightroom's Sort control, reduced to
+/// What a list of photos is ordered by — Lightroom's View › Sort, reduced to
 /// the three keys this app has.
 ///
 /// It lives in the library target rather than in the UI because both orderings

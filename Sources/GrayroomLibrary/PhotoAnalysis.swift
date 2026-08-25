@@ -5,11 +5,11 @@ import Vision
 
 /// What Vision says about a picture: how good it looks, and what it looks like.
 ///
-/// `aestheticScore` is `CalculateImageAestheticsScoresRequest`'s
-/// `overallScore`, −1…1. `featurePrint` is a `FeaturePrintObservation` encoded
-/// whole (see `PhotoAnalyzer.encode`), because the only way back to one is its
-/// own `Codable` conformance — there is no public initializer that takes the
-/// float vector, and `distance(to:)` is a method on the observation.
+/// `aestheticScore` is `VNImageAestheticsScoresObservation.overallScore`, −1…1.
+/// `featurePrint` is a `VNFeaturePrintObservation` archived whole (see
+/// `PhotoAnalyzer.encode`), because the only way back to one is its own
+/// `NSSecureCoding` conformance — there is no initializer that takes the float
+/// vector, and `computeDistance` is a method on the observation.
 public struct PhotoAnalysis: Equatable, Sendable {
     public var aestheticScore: Double
     public var featurePrint: Data
@@ -22,10 +22,12 @@ public struct PhotoAnalysis: Equatable, Sendable {
 
 public enum PhotoAnalysisError: Error, CustomStringConvertible {
     case noImage(URL)
+    case noObservation
 
     public var description: String {
         switch self {
         case .noImage(let url): return "no readable preview in \(url.path)"
+        case .noObservation: return "Vision returned no observation"
         }
     }
 }
@@ -33,13 +35,7 @@ public enum PhotoAnalysisError: Error, CustomStringConvertible {
 /// The culling aids: Vision's aesthetics score and image feature print, both
 /// computed from a small decoded image and never from a full RAW decode.
 ///
-/// # Threading
-///
-/// `analyze` is synchronous and blocks its caller, like every other operation
-/// in this target — the importer runs on a background queue of its own and the
-/// CLI has no run loop to yield to. So it belongs on a `DispatchQueue`, never
-/// on the main thread and never inside an `async` function, where blocking
-/// would take a cooperative thread out with it.
+/// Synchronous; runs on the caller's thread.
 public enum PhotoAnalyzer {
     /// The size the analysis sees. The same 512 px the grid's previews use, so
     /// a photo that has a preview has already paid for this decode.
@@ -48,16 +44,22 @@ public enum PhotoAnalyzer {
     /// How far apart two feature prints may be and still be the same picture.
     ///
     /// Measured on `testdata/`: the same frame re-exposed, cropped by a fifth,
-    /// halved in size, or converted to black and white lands between 0.015 and
-    /// 0.51 of its original, while the closest pair of *different* photographs
-    /// in that folder is 0.83 apart. 0.6 sits between the two with room on both
-    /// sides.
-    public static let defaultSimilarityThreshold = 0.6
+    /// halved in size, or converted to black and white lands between 0.12 and
+    /// 0.71 of its original, while the closest pair of *different* photographs
+    /// in that folder is 0.90 apart. 0.8 sits between the two.
+    public static let defaultSimilarityThreshold = 0.8
 
-    /// Aesthetics and feature print for one decoded image.
+    /// Aesthetics and feature print for one decoded image, in one pass over it.
     public static func analyze(image: CGImage) throws -> PhotoAnalysis {
-        let input = UnsafeBox(image)
-        return try blocking { try await analyze(image: input.value) }
+        let aesthetics = VNCalculateImageAestheticsScoresRequest()
+        let featurePrint = VNGenerateImageFeaturePrintRequest()
+        try VNImageRequestHandler(cgImage: image, options: [:])
+            .perform([aesthetics, featurePrint])
+        guard let scores = aesthetics.results?.first,
+              let print = featurePrint.results?.first
+        else { throw PhotoAnalysisError.noObservation }
+        return PhotoAnalysis(aestheticScore: Double(scores.overallScore),
+                             featurePrint: try encode(print))
     }
 
     /// The same, from the file's embedded preview — the cheap thumbnail path,
@@ -70,48 +72,25 @@ public enum PhotoAnalyzer {
 
     /// How far apart two stored feature prints are; 0 is the same picture.
     public static func distance(_ a: Data, _ b: Data) throws -> Double {
-        try decode(a).distance(to: decode(b))
+        var distance = Float(0)
+        try decode(a).computeDistance(&distance, to: decode(b))
+        return Double(distance)
     }
 
-    static func analyze(image: CGImage) async throws -> PhotoAnalysis {
-        let scores = try await CalculateImageAestheticsScoresRequest().perform(on: image)
-        let print = try await GenerateImageFeaturePrintRequest().perform(on: image)
-        return PhotoAnalysis(aestheticScore: Double(scores.overallScore),
-                             featurePrint: try encode(print))
+    /// A keyed archive. Measured: 4264 B for a 768-element print against 4383 B
+    /// for a JSON encoding of the same print, and a round trip is bit-exact
+    /// (`distance` to the decoded copy is 0).
+    static func encode(_ observation: VNFeaturePrintObservation) throws -> Data {
+        try NSKeyedArchiver.archivedData(withRootObject: observation,
+                                         requiringSecureCoding: true)
     }
 
-    /// JSON, because `FeaturePrintObservation` is `Codable` and nothing else
-    /// rebuilds one. Measured: 4.3 kB per photo for a 768-element print, and a
-    /// round trip is bit-exact (`distance` to the decoded copy is 0).
-    static func encode(_ observation: FeaturePrintObservation) throws -> Data {
-        try JSONEncoder().encode(observation)
+    static func decode(_ data: Data) throws -> VNFeaturePrintObservation {
+        guard let observation = try NSKeyedUnarchiver.unarchivedObject(
+            ofClass: VNFeaturePrintObservation.self, from: data)
+        else { throw PhotoAnalysisError.noObservation }
+        return observation
     }
-
-    static func decode(_ data: Data) throws -> FeaturePrintObservation {
-        try JSONDecoder().decode(FeaturePrintObservation.self, from: data)
-    }
-
-    /// Runs an async body to completion on the calling thread's behalf.
-    ///
-    /// Vision's Swift API is async-only and this target is synchronous
-    /// throughout, so there is one bridge and it is here.
-    private static func blocking<T>(_ body: @escaping @Sendable () async throws -> T) throws -> T {
-        let result = UnsafeBox<Result<T, Error>?>(nil)
-        let semaphore = DispatchSemaphore(value: 0)
-        Task.detached {
-            do { result.value = .success(try await body()) } catch { result.value = .failure(error) }
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return try result.value!.get()
-    }
-}
-
-/// Hands a value across the concurrency boundary the semaphore already
-/// serializes.
-private final class UnsafeBox<T>: @unchecked Sendable {
-    var value: T
-    init(_ value: T) { self.value = value }
 }
 
 /// Nearest neighbours and near-duplicate groups over a set of stored feature

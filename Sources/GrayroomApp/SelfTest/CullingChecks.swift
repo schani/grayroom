@@ -19,22 +19,22 @@ extension SelfTest {
                                  failures: @escaping () -> [String]) {
         phase("culling aids")
 
-        // 1. The menu, as AppKit sees it. Bare `Button`s with no key
-        //    equivalents: Lightroom gives its sort commands none either.
-        for title in ["Sort By", "Capture Time", "File Name", "Aesthetic Score",
-                      "Ascending", "Descending", "Select Similar Photos"] {
+        // 1. The menu, as AppKit sees it, in Lightroom's two places: Sort under
+        //    View, the selection command under Edit. Bare `Button`s with no key
+        //    equivalents, as Lightroom gives them none either.
+        for title in ["Sort", "Capture Time", "File Name", "Aesthetic Score",
+                      "Ascending", "Descending"] {
             let item = findMenuItemDeep(titled: title)
             check(item != nil, "'\(title)' is in the menu bar")
-            check(menu(containing: item) == "Library",
-                  "…in the Library menu (got \(menu(containing: item) ?? "nowhere"))")
+            check(menu(containing: item) == "View",
+                  "…in the View menu (got \(menu(containing: item) ?? "nowhere"))")
             check(item?.isEnabled == true, "…and enabled, so picking it does something")
         }
-        // The View menu's module switch is also called "Library"; the new
-        // top-level menu must not have taken its key away.
-        let module = findMenuItemDeep(titled: "Library")
-        check(module?.keyEquivalent == "g",
-              "View › Library still carries the bare 'g' "
-                  + "(got '\(module?.keyEquivalent ?? "missing")')")
+        let similar = findMenuItemDeep(titled: "Select Similar Photos")
+        check(similar != nil, "'Select Similar Photos' is in the menu bar")
+        check(menu(containing: similar) == "Edit",
+              "…in the Edit menu (got \(menu(containing: similar) ?? "nowhere"))")
+        check(similar?.isEnabled == true, "…and enabled")
 
         // 2. The import scored every photo it could — the whole point of doing
         //    it at import rather than on demand. Read back through a second
@@ -60,7 +60,7 @@ extension SelfTest {
         let steps: [() -> Void] = [
             {
                 // 3. Sort By, driven through the real menu items.
-                check(sendMenuItem(titled: "File Name"), "picked Sort By › File Name")
+                check(sendMenuItem(titled: "File Name"), "picked View › Sort › File Name")
             },
             {
                 let byName = app.catalog.photos
@@ -73,7 +73,7 @@ extension SelfTest {
                 check(app.visiblePhotoIDs == byName,
                       "…and so is the list the arrows and shift-ranges walk")
                 check(app.sortKey == .fileName && app.sortAscending, "…ascending")
-                check(sendMenuItem(titled: "Descending"), "picked Sort By › Descending")
+                check(sendMenuItem(titled: "Descending"), "picked View › Sort › Descending")
             },
             {
                 let ascending = app.catalog.photos
@@ -83,7 +83,7 @@ extension SelfTest {
                       "Descending turns the grid round (\(names(app, app.catalog.ids)))")
                 check(app.visiblePhotoIDs == app.catalog.ids,
                       "…and the grid's list with it")
-                check(sendMenuItem(titled: "Aesthetic Score"), "picked Sort By › Aesthetic Score")
+                check(sendMenuItem(titled: "Aesthetic Score"), "picked View › Sort › Aesthetic Score")
             },
             {
                 let worstFirst = app.catalog.ids.compactMap { app.catalog.photo(id: $0) }
@@ -93,8 +93,8 @@ extension SelfTest {
                           + "(\(worstFirst.map { String(format: "%.2f", $0) }))")
                 // Back to Lightroom's default before anything else looks at the
                 // grid.
-                check(sendMenuItem(titled: "Capture Time"), "picked Sort By › Capture Time")
-                check(sendMenuItem(titled: "Ascending"), "picked Sort By › Ascending")
+                check(sendMenuItem(titled: "Capture Time"), "picked View › Sort › Capture Time")
+                check(sendMenuItem(titled: "Ascending"), "picked View › Sort › Ascending")
             },
             {
                 check(app.sortKey == .captureTime && app.sortAscending,
@@ -116,7 +116,7 @@ extension SelfTest {
             app.libraryClick(twins[0], modifiers: [])
             check(app.highlightedPhotoIDs == [twins[0]], "one of them is selected")
             check(sendMenuItem(titled: "Select Similar Photos"),
-                  "picked Library › Select Similar Photos")
+                  "picked Edit › Select Similar Photos")
             waitForSimilar(app) {
                 let selected = Set(app.highlightedPhotoIDs)
                 check(selected == Set(twins),

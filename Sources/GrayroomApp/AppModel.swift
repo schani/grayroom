@@ -775,7 +775,7 @@ final class AppModel {
 
     // MARK: Sort order
 
-    /// Library › Sort By — Lightroom's Sort control, with its direction button.
+    /// View › Sort — Lightroom's Sort control, with its direction button.
     var sortKey: PhotoSortKey { catalog.sortKey }
     var sortAscending: Bool { catalog.sortAscending }
 
@@ -804,7 +804,7 @@ final class AppModel {
         return browser.photoSelection.anchor ?? highlightedPhotoIDs.first
     }
 
-    /// Library › Select Similar Photos: adds every photo within the default
+    /// Edit › Select Similar Photos: adds every photo within the default
     /// feature-print distance of the current one to the grid's highlight.
     ///
     /// The comparison reads every stored feature print and measures the subject

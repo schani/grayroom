@@ -155,17 +155,8 @@ struct GrayroomApp: App {
                 Button("Show/Hide Folders") { model.toggleFolderSidebar() }
                     .keyboardShortcut("s", modifiers: [.command, .option])
                 Divider()
-            }
-            // Lightroom Classic keeps the Sort control in the grid's toolbar
-            // and its keys under View › Sort; this app has neither yet, so both
-            // halves of the control live here, in the module's own menu, next
-            // to the other command that works on a whole selection.
-            //
-            // No checkmarks and no `.disabled(…)`: this builder runs once, at
-            // launch (see the undo note above), so a state read here would
-            // freeze at what it said then.
-            CommandMenu("Library") {
-                Menu("Sort By") {
+                // Lightroom's View › Sort, with its direction at the bottom.
+                Menu("Sort") {
                     ForEach(PhotoSortKey.allCases, id: \.self) { key in
                         Button(key.title) { model.setSortKey(key) }
                     }
@@ -173,6 +164,10 @@ struct GrayroomApp: App {
                     Button("Ascending") { model.setSortAscending(true) }
                     Button("Descending") { model.setSortAscending(false) }
                 }
+                Divider()
+            }
+            // Lightroom keeps its selection commands in the Edit menu.
+            CommandGroup(after: .pasteboard) {
                 Divider()
                 Button("Select Similar Photos") { model.selectSimilarPhotos() }
             }

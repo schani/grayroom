@@ -156,7 +156,7 @@ public final class PhotoCatalog {
     public var cameraNames: [Int64: String] = [:]
     public var lensNames: [Int64: String] = [:]
 
-    /// What the grid is sorted by — Library › Sort By. Written through
+    /// What the grid is sorted by — View › Sort. Written through
     /// `setSort`, which is what re-sorts what is already loaded.
     public private(set) var sortKey: PhotoSortKey = .captureTime
     public private(set) var sortAscending = true

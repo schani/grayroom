@@ -164,8 +164,8 @@ public final class Importer {
         }
 
         let metadata = try probe(standardized)
-        // Outside the transaction: a 512 px decode plus two Vision passes,
-        // measured at about 65 ms a frame, and a write transaction is not the
+        // Outside the transaction: a 512 px decode plus one Vision pass,
+        // measured at about 47 ms a frame, and a write transaction is not the
         // place to spend that.
         let analysis = analyzer(standardized)
         let attributes = try FileManager.default.attributesOfItem(atPath: path)
@@ -264,8 +264,7 @@ public final class Importer {
     }
 
     /// The default analyzer: Vision over the file's embedded preview, never a
-    /// full RAW decode. Blocks, so it must not be called on the main thread —
-    /// which is why import runs on a queue of its own.
+    /// full RAW decode.
     public static func analyzePreview(_ url: URL) -> PhotoAnalysis? {
         try? PhotoAnalyzer.analyze(url: url)
     }
