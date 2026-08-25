@@ -23,9 +23,6 @@ struct Analyze: ParsableCommand {
     var photos: [String] = []
 
     func run() throws {
-        guard PhotoAnalyzer.isAvailable else {
-            throw fail(PhotoAnalysisError.unavailable.description)
-        }
         let library = try libraryOptions.open()
 
         var ids: [Int64]

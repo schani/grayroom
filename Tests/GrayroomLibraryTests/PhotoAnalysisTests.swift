@@ -204,8 +204,7 @@ final class PhotoAnalysisTests: XCTestCase {
     // MARK: - Helpers
 
     private func analyze(_ image: CGImage) throws -> PhotoAnalysis {
-        guard PhotoAnalyzer.isAvailable else { throw XCTSkip("Vision needs macOS 15") }
-        return try PhotoAnalyzer.analyze(image: image)
+        try PhotoAnalyzer.analyze(image: image)
     }
 
     @discardableResult

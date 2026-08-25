@@ -17,7 +17,6 @@ final class CullingCommandTests: XCTestCase {
     private var library: Library { temp.library }
 
     override func setUpWithError() throws {
-        try XCTSkipUnless(PhotoAnalyzer.isAvailable, "Vision needs macOS 15")
         temp = try TempLibrary()
     }
 

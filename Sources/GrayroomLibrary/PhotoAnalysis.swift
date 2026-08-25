@@ -21,12 +21,10 @@ public struct PhotoAnalysis: Equatable, Sendable {
 }
 
 public enum PhotoAnalysisError: Error, CustomStringConvertible {
-    case unavailable
     case noImage(URL)
 
     public var description: String {
         switch self {
-        case .unavailable: return "image analysis needs macOS 15 or later"
         case .noImage(let url): return "no readable preview in \(url.path)"
         }
     }
@@ -54,14 +52,8 @@ public enum PhotoAnalyzer {
     /// sides.
     public static let defaultSimilarityThreshold = 0.6
 
-    public static var isAvailable: Bool {
-        if #available(macOS 15.0, *) { return true }
-        return false
-    }
-
     /// Aesthetics and feature print for one decoded image.
     public static func analyze(image: CGImage) throws -> PhotoAnalysis {
-        guard #available(macOS 15.0, *) else { throw PhotoAnalysisError.unavailable }
         let input = UnsafeBox(image)
         return try blocking { try await analyze(image: input.value) }
     }
@@ -76,11 +68,9 @@ public enum PhotoAnalyzer {
 
     /// How far apart two stored feature prints are; 0 is the same picture.
     public static func distance(_ a: Data, _ b: Data) throws -> Double {
-        guard #available(macOS 15.0, *) else { throw PhotoAnalysisError.unavailable }
-        return try decode(a).distance(to: decode(b))
+        try decode(a).distance(to: decode(b))
     }
 
-    @available(macOS 15.0, *)
     static func analyze(image: CGImage) async throws -> PhotoAnalysis {
         let scores = try await CalculateImageAestheticsScoresRequest().perform(on: image)
         let print = try await GenerateImageFeaturePrintRequest().perform(on: image)
@@ -91,12 +81,10 @@ public enum PhotoAnalyzer {
     /// JSON, because `FeaturePrintObservation` is `Codable` and nothing else
     /// rebuilds one. Measured: 4.3 kB per photo for a 768-element print, and a
     /// round trip is bit-exact (`distance` to the decoded copy is 0).
-    @available(macOS 15.0, *)
     static func encode(_ observation: FeaturePrintObservation) throws -> Data {
         try JSONEncoder().encode(observation)
     }
 
-    @available(macOS 15.0, *)
     static func decode(_ data: Data) throws -> FeaturePrintObservation {
         try JSONDecoder().decode(FeaturePrintObservation.self, from: data)
     }
