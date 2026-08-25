@@ -159,13 +159,25 @@ cameras      id, make, model                          UNIQUE(make, model)
 photos       id, hash BLOB UNIQUE, byte_size, original_name, imported_at, captured_at,
              camera_id → cameras (nullable), width, height,
              latitude, longitude, altitude (nullable),
-             color INTEGER DEFAULT 0 (0 unlabeled, 1 red, 2 yellow, 3 green, 4 blue, 5 purple)
+             color INTEGER DEFAULT 0 (0 unlabeled, 1 red, 2 yellow, 3 green, 4 blue, 5 purple),
+             aesthetic_score REAL (nullable), feature_print BLOB (nullable)
 locations    id, photo_id → photos (cascade), path TEXT UNIQUE
 developments id, photo_id → photos (cascade), ordinal, edit_json (json_valid, EditState),
              created_at, updated_at                   UNIQUE(photo_id, ordinal)
 tags         id, name UNIQUE COLLATE NOCASE
 photo_tags   photo_id → photos, tag_id → tags          PRIMARY KEY(photo_id, tag_id)
 ```
+
+`aesthetic_score` and `feature_print` are Vision's two culling aids
+(`CalculateImageAestheticsScoresRequest.overallScore`, −1…1, and a
+`FeaturePrintObservation` stored as its own `Codable` form, ~4 kB). Both are
+computed at import from the 512 px embedded preview — never a full RAW decode —
+and cost about 65 ms a frame. The print is the one column the `Photo` record
+does not carry: it is kilobytes a row where the rest is bytes, and
+`catalogSnapshot` reads every row. Photos are near-identical below a
+feature-print distance of **0.6** (measured on `testdata/`: the same frame
+re-exposed, cropped or desaturated lands at 0.015–0.51 of its original, the
+closest pair of different photographs at 0.83).
 
 A photo has any number of locations (including zero) and any number of
 **developments** (a development = one `EditState`; common counts are 0 and 1).
@@ -180,10 +192,13 @@ picked); tags are free-form many-to-many. No ratings for now.
    records (`Camera`, `Photo`, `Location`, `Development`, `Tag`), `Importer` (hash →
    upsert photo/location, metadata incl. capture date, camera, GPS via the decoder's
    probe), operations (tags, color, developments, queries). Tests on a temp DB.
-2. CLI: `import`, `ls` (filter by color/tag/camera), `tag`, `color`, `developments`;
-   `render` takes its edit from the library (`--development`) or `--edit file.json`.
-   Sidecar code removed entirely. App: `open` hashes, looks up/creates the photo,
-   loads/autosaves development #1 from the library.
+2. CLI: `import`, `ls` (filter by color/tag/camera, `--sort capture|name|score`,
+   score column), `tag`, `color`, `developments`, `analyze [--missing]`,
+   `similar <photo> [--threshold] [--limit]`, `duplicates [--threshold]`
+   (single-linkage groups); `render` takes its edit from the library
+   (`--development`) or `--edit file.json`. Sidecar code removed entirely. App:
+   `open` hashes, looks up/creates the photo, loads/autosaves development #1
+   from the library.
 3. **Library module.** The app has Lightroom's two modules and Lightroom's keys
    for them: `g` for the Library grid, `d` for Develop, both as bare-key menu
    items (View › Library / Develop) so they work wherever the focus is. It opens
@@ -308,11 +323,22 @@ picked); tags are free-form many-to-many. No ratings for now.
      the real canvas, a scroll pans it, and the percentage in the status bar
      follows; and an edit made in Develop is in the loupe on the keystroke, at
      the decode's own resolution, on the very texture the develop view had
-     rendered) — and then the Folders panel, the toolbar, the menus and the
-     export sheet.
+     rendered) — and then the Folders panel, the toolbar, the menus, the
+     export sheet, and last the culling aids: every imported photo scored, the
+     three Sort By keys and both directions reordering the grid through the
+     real menu items, and Select Similar Photos ringing exactly the two frames
+     it staged of one picture.
 
-   Still later: filtering (by colour, tag, camera, date), collections, the
-   filmstrip in Develop, and sorting other than capture time.
+   - **Sort and similarity.** Library › Sort By is Lightroom's Sort control:
+     Capture Time / File Name / Aesthetic Score plus Ascending/Descending,
+     driving `PhotoCatalog`'s order (a photo with no value for the key sorts
+     last either way). Library › Select Similar Photos adds every photo within
+     the default feature-print distance of the current one to the grid's
+     highlight, through `GridSelection.extend`; the comparison runs on the
+     library queue with a task in the activity centre.
+
+   Still later: filtering (by colour, tag, camera, date), collections and the
+   filmstrip in Develop.
 
 ## Testing inputs
 

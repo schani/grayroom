@@ -48,8 +48,13 @@ extension SelfTest {
         check(storedMissingAnalysisCount() == 0,
               "…and the database agrees (\(storedMissingAnalysisCount()) unanalysed)")
 
-        // The Folders panel may have been left on a folder; the sort and the
-        // similarity both work on what the grid shows.
+        // The export checks leave the app in Develop on an open file. Both
+        // commands under test are the Library module's, and the Folders panel
+        // may have been left on a folder; the sort and the similarity both work
+        // on what the grid shows.
+        app.showLibrary()
+        check(app.mode == .library,
+              "back in the Library module (got \(app.mode.rawValue))")
         app.folderSelection = .all
 
         let steps: [() -> Void] = [
