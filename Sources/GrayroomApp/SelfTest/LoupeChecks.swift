@@ -380,7 +380,7 @@ extension SelfTest {
         ]
         runSteps(steps, model: app) {
             waitForLoupeImage(app) {
-                check(app.loupeIsFullResolution,
+                check(app.loupeIsOwnPicture,
                       "the loupe built a picture of its own for it")
                 let canvas = findLoupeCanvas()
                 check(canvas != nil, "…on the real canvas, the one the develop view uses")
@@ -406,6 +406,89 @@ extension SelfTest {
                       "…and the render loop is on that photo, so d is free")
                 checkLoupeIsEDR(app: app, check: check)
                 writeScreenshot(of: window, named: "selftest-loupe-developed.png")
+                runColdDevelopedLoupeChecks(app: app, window: window, subject: subject,
+                                            beforeLuminance: beforeLuminance,
+                                            check: check, then: done)
+            }
+        }
+    }
+
+    /// The other half of it: the same development on a photo the develop view is
+    /// **not** holding, which is every photo but one.
+    ///
+    /// Nothing is reused here — the loupe decodes and renders it itself, at the
+    /// window's size rather than the file's — and the pixels still have to be
+    /// development #1's. The witness for that is a `Renderer` run over the
+    /// *stored* edit at the *same* size, through a second connection to the
+    /// library: the app's own copy of the edit is what is under test.
+    static func runColdDevelopedLoupeChecks(app: AppModel, window: NSWindow, subject: Int64,
+                                            beforeLuminance: Double,
+                                            check: @escaping (Bool, String) -> Void,
+                                            then done: @escaping () -> Void) {
+        phase("developed loupe, cold")
+        // The cheapest other photo to open: all this one has to do is take the
+        // render loop away from the subject.
+        guard let other = app.visiblePhotos
+            .filter({ $0.id != subject && $0.url != nil })
+            .min(by: { $0.byteSize < $1.byteSize })?.id else {
+            check(false, "another photo to take the develop view away")
+            done()
+            return
+        }
+        let steps: [() -> Void] = [
+            {
+                sendKey("g", modifiers: [], window: window, virtualKey: 5)
+            },
+            {
+                check(clickCell(cellID(other)), "clicked another photo's cell")
+                sendKey("d", modifiers: [], window: window, virtualKey: 2)
+            },
+            {
+                check(app.currentPhotoID == other,
+                      "the develop view moved to it, so the subject's render is gone")
+                sendKey("g", modifiers: [], window: window, virtualKey: 5)
+            },
+            {
+                check(clickCell(cellID(subject)), "clicked the developed photo's cell again")
+                sendKey("e", modifiers: [], window: window, virtualKey: 14)
+            },
+        ]
+
+        runSteps(steps, model: app) {
+            waitForLoupeImage(app) {
+                check(app.currentPhotoID == other,
+                      "the render loop is still on the other photo, so nothing was reused")
+                check(app.loupeIsOwnPicture, "…and the loupe built the development itself")
+                let texture = findLoupeCanvas()?.imageTexture
+                let photo = app.catalog.photo(id: subject)
+                let native = max(photo?.width ?? 0, photo?.height ?? 0)
+                let edge = texture.map { max($0.width, $0.height) } ?? 0
+                check(edge > PreviewBuilder.pixelSize,
+                      "…bigger than the \(PreviewBuilder.pixelSize) px the grid holds "
+                          + "(\(edge) px)")
+                check(edge < native,
+                      "…and sized for the window rather than the file, which is the "
+                          + "whole point of not decoding a hundred megapixels to fill "
+                          + "one (\(edge) of \(native) px)")
+                check(app.loupeLoaded?.fingerprint == photo?.developmentFingerprint,
+                      "…and it is a picture of development #1")
+                let luminance = texture.flatMap(meanEncodedLuminance) ?? 0
+                check(luminance > beforeLuminance,
+                      String(format: "…the +2 EV development, not the camera's picture "
+                             + "(%.4f > %.4f)", luminance, beforeLuminance))
+                // The pipeline's own answer for that edit at that size.
+                if let url = photo?.url, let edit = storedDevelopment(subject), edge > 0,
+                   let reference = try? Renderer().renderPreview(url: url, edit: edit,
+                                                                 maxDimension: edge) {
+                    let expected = meanLuminance(reference)
+                    check(abs(luminance - expected) < 0.02,
+                          String(format: "…and it is what the pipeline makes of that edit, "
+                                 + "run again from the stored development (%.4f vs %.4f)",
+                                 luminance, expected))
+                } else {
+                    check(false, "a reference render of the stored development")
+                }
+                writeScreenshot(of: window, named: "selftest-loupe-developed-cold.png")
                 sendKey("g", modifiers: [], window: window, virtualKey: 5)
                 settle(app, then: done)
             }
@@ -471,6 +554,68 @@ extension SelfTest {
         return total / Double(image.width * image.height)
     }
 
+    /// How far the picture's pixels are from grey, on average: the mean of
+    /// `max(r,g,b) − min(r,g,b)`, sRGB encoded.
+    ///
+    /// The one number that tells the camera's own colour rendering apart from
+    /// this app's black-and-white defaults, whatever the picture is of. The two
+    /// overloads produce the same number for the same picture, so a texture on
+    /// the canvas and a `CGImage` in the grid are comparable.
+    /// The two texture formats the loupe's canvas draws: a pipeline render is
+    /// `rgba16Float` display-linear, the camera's own picture is an
+    /// `rgba8Unorm_srgb` copy of a `CGImage`. Both end up as the same number.
+    static func meanSaturation(_ texture: MTLTexture) -> Double? {
+        if texture.pixelFormat == .rgba8Unorm_srgb {
+            let w = texture.width, h = texture.height
+            guard w > 0, h > 0 else { return nil }
+            var bytes = [UInt8](repeating: 0, count: w * h * 4)
+            bytes.withUnsafeMutableBytes { raw in
+                texture.getBytes(raw.baseAddress!, bytesPerRow: w * 4,
+                                 from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+            }
+            var total = 0.0
+            for i in 0..<(w * h) {
+                let r = Double(bytes[i * 4]) / 255, g = Double(bytes[i * 4 + 1]) / 255
+                let b = Double(bytes[i * 4 + 2]) / 255
+                total += max(r, g, b) - min(r, g, b)
+            }
+            return total / Double(w * h)
+        }
+        guard let image = try? TextureReadback.read(texture) else { return nil }
+        var total = 0.0
+        for i in stride(from: 0, to: image.pixels.count, by: 4) {
+            let r = srgb(image.pixels[i]), g = srgb(image.pixels[i + 1])
+            let b = srgb(image.pixels[i + 2])
+            total += max(r, g, b) - min(r, g, b)
+        }
+        return total / Double(image.width * image.height)
+    }
+
+    static func meanSaturation(_ image: CGImage) -> Double {
+        let w = image.width, h = image.height
+        guard w > 0, h > 0,
+              let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                      bytesPerRow: w * 4, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { return 0 }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let base = context.data else { return 0 }
+        let pixels = base.assumingMemoryBound(to: UInt8.self)
+        var total = 0.0
+        for i in 0..<(w * h) {
+            let r = Double(pixels[i * 4]) / 255, g = Double(pixels[i * 4 + 1]) / 255
+            let b = Double(pixels[i * 4 + 2]) / 255
+            total += max(r, g, b) - min(r, g, b)
+        }
+        return total / Double(w * h)
+    }
+
+    private static func srgb(_ v: Float) -> Double {
+        let x = min(max(Double(v), 0), 1)
+        return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1 / 2.4) - 0.055
+    }
+
     // MARK: - The loupe
 
     /// Feature 2: Lightroom's Library loupe, driven by its own keys.
@@ -488,10 +633,21 @@ extension SelfTest {
         // somewhere to walk to.
         let drawable = app.visiblePhotos.filter { app.previews.cached($0) != nil }.map(\.id)
         let order = app.visiblePhotoIDs
-        guard let subject = drawable.first(where: { id in
-            guard let index = order.firstIndex(of: id), index + 1 < order.count else { return false }
-            return drawable.contains(order[index + 1])
-        }), let index = order.firstIndex(of: subject) else {
+        func walkable(_ candidates: [Int64]) -> Int64? {
+            candidates.first { id in
+                guard let index = order.firstIndex(of: id),
+                      index + 1 < order.count else { return false }
+                return drawable.contains(order[index + 1])
+            }
+        }
+        // Preferably one with colour in it: "the loupe shows the camera's
+        // picture and not this app's black and white" is only a claim about a
+        // photo that was not black and white to begin with.
+        let colourful = app.visiblePhotos
+            .filter { app.previews.cached($0).map { meanSaturation($0) > 0.02 } == true }
+            .map(\.id)
+        guard let subject = walkable(colourful) ?? walkable(drawable),
+              let index = order.firstIndex(of: subject) else {
             check(false, "two neighbouring photos the grid has pictures of")
             finishLibrary(failures())
         }
@@ -508,7 +664,7 @@ extension SelfTest {
                 check(app.libraryViewMode == .loupe, "e opened the loupe")
                 check(app.loupeTexture != nil,
                       "…with a picture in it immediately, before any render")
-                check(!app.loupeIsFullResolution,
+                check(!app.loupeIsOwnPicture,
                       "…the grid's own 512 px preview, standing in")
             },
             {
@@ -554,7 +710,7 @@ extension SelfTest {
 
         runSteps(steps, model: app) {
             waitForLoupeImage(app) {
-                check(app.loupeIsFullResolution,
+                check(app.loupeIsOwnPicture,
                       "…and a loupe-sized picture replaced it")
                 // How big it is depends on the camera: an undeveloped photo is
                 // its own embedded preview, and cameras embed everything from a
@@ -587,6 +743,24 @@ extension SelfTest {
                       "…which is the photo's own long edge, whatever resolution the "
                           + "picture of it is (\(frameEdge) of \(longEdge))")
                 check(canvas?.transform.isFit == true, "…fitted to the window")
+                // …and it is the camera's own colour rendering. This app's
+                // defaults are black and white, so a photo nobody has developed
+                // going grey the moment it is looked at is exactly the bug.
+                check(photo?.developmentFingerprint == nil,
+                      "the photo in the loupe has never been developed")
+                let inGrid = photo.flatMap { app.previews.cached($0) }.map(meanSaturation) ?? 0
+                let inLoupe = canvas?.imageTexture.flatMap(meanSaturation) ?? 0
+                if inGrid > 0.02 {
+                    check(inLoupe > 0.02,
+                          String(format: "…so the loupe draws the camera's colour picture, "
+                                 + "not this app's black and white (saturation %.4f)", inLoupe))
+                    check(abs(inLoupe - inGrid) < 0.05,
+                          String(format: "…the same picture the grid draws, at loupe size "
+                                 + "(%.4f vs %.4f)", inLoupe, inGrid))
+                } else {
+                    check(false, "a colour photo in the grid to check the loupe against "
+                              + "(saturation \(inGrid))")
+                }
                 checkLoupeIsEDR(app: app, check: check)
                 runLoupeNavigationChecks(app: app, window: window, subject: subject,
                                          index: index, order: order,
@@ -601,7 +775,7 @@ extension SelfTest {
     static func waitForLoupeImage(_ app: AppModel, attemptsLeft: Int = 300,
                                   then body: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            if !app.loupeIsFullResolution, attemptsLeft > 0, Date() < deadline {
+            if !app.loupeIsOwnPicture, attemptsLeft > 0, Date() < deadline {
                 waitForLoupeImage(app, attemptsLeft: attemptsLeft - 1, then: body)
             } else {
                 body()
@@ -776,11 +950,13 @@ extension SelfTest {
         phase("loupe zoom")
         // A photo big enough to have somewhere to zoom *to*: fit has to be below
         // 100 %, or every one of these checks is trivially satisfied by an image
-        // that is already at 1:1.
-        let candidates = app.visiblePhotos
-            .filter { $0.url != nil }
-            .sorted { max($0.width ?? 0, $0.height ?? 0) > max($1.width ?? 0, $1.height ?? 0) }
-        guard let subject = candidates.first?.id else {
+        // that is already at 1:1. The cheapest such file, not the biggest —
+        // 1:1 now loads the file's own pixels, and a hundred-megapixel decode is
+        // a minute of run time to make a point about the zoom.
+        guard let subject = moderateSubject(app)
+                ?? app.visiblePhotos.filter({ $0.url != nil })
+                    .max(by: { max($0.width ?? 0, $0.height ?? 0)
+                             < max($1.width ?? 0, $1.height ?? 0) })?.id else {
             check(false, "a photo to zoom in the loupe")
             finishLibrary(failures())
         }
@@ -893,7 +1069,108 @@ extension SelfTest {
 
         runSteps(steps, model: app) {
             check(app.libraryViewMode == .grid, "g came back to the grid")
-            runLoupeHandoffChecks(app: app, window: window, check: check, failures: failures)
+            runLoupeResolutionChecks(app: app, window: window, check: check, failures: failures)
+        }
+    }
+
+    // MARK: - 1:1 is the file's own pixels
+
+    /// The smallest file with room to zoom in — a few thousand pixels on its
+    /// long edge, which is every modern camera and none of the hundred-megapixel
+    /// backs in `testdata`.
+    static func moderateSubject(_ app: AppModel) -> Int64? {
+        app.visiblePhotos
+            .filter { $0.url != nil && max($0.width ?? 0, $0.height ?? 0) >= 5000
+                        && max($0.width ?? 0, $0.height ?? 0) < 9000 }
+            .min(by: { $0.byteSize < $1.byteSize })?.id
+    }
+
+    /// Feature 5: Fit is sized for the window, 1:1 is sized for the file.
+    ///
+    /// Rendering a hundred megapixels to fill a 3 MP window is the better part
+    /// of a second of work with nothing on screen to show for it, so Fit loads
+    /// what the view can draw and no more. Zooming past it has to *replace* that
+    /// picture with the file's own pixels, in place, on the same frame — a swap,
+    /// not a reload, so the zoom the user set survives it.
+    static func runLoupeResolutionChecks(app: AppModel, window: NSWindow,
+                                         check: @escaping (Bool, String) -> Void,
+                                         failures: @escaping () -> [String]) {
+        phase("loupe at 1:1")
+        guard let subject = moderateSubject(app), let photo = app.catalog.photo(id: subject) else {
+            check(false, "a moderate RAW to zoom to 1:1")
+            finishLibrary(failures())
+        }
+        let native = max(photo.width ?? 0, photo.height ?? 0)
+        var fitEdge = 0
+
+        let steps: [() -> Void] = [
+            {
+                check(clickCell(cellID(subject)), "clicked a moderate RAW's cell")
+                sendKey("e", modifiers: [], window: window, virtualKey: 14)
+            },
+            {
+                check(app.loupePhotoID == subject, "e opened the loupe on it")
+            },
+        ]
+
+        runSteps(steps, model: app) {
+            waitForLoupeImage(app) {
+                guard let canvas = findLoupeCanvas() else {
+                    check(false, "the loupe's canvas to zoom")
+                    finishLibrary(failures())
+                }
+                let scale = window.backingScaleFactor
+                let viewEdge = Int((max(canvas.bounds.width, canvas.bounds.height) * scale)
+                    .rounded())
+                fitEdge = canvas.imageTexture.map { max($0.width, $0.height) } ?? 0
+                check(app.loupeLoaded?.isFullResolution == false,
+                      "fit loaded a picture sized for the window, not the file")
+                check(fitEdge < native,
+                      "…and the canvas has that one (\(fitEdge) of \(native) px)")
+                check(fitEdge <= viewEdge + 64,
+                      "…no more pixels than the window can draw (\(fitEdge) vs \(viewEdge) px)")
+                let frame = canvas.transform.imageSize
+                check(Int(max(frame.width, frame.height).rounded()) == native,
+                      "…on the photo's own frame all the same, so 1:1 means one file "
+                          + "pixel (\(frame))")
+                // 1 — and the bigger picture has to come and replace it.
+                sendKey("1", modifiers: [], window: window, virtualKey: 18, viaQueue: true)
+                waitForLoupeFullResolution(app) {
+                    let canvas = findLoupeCanvas()
+                    let edge = canvas?.imageTexture.map { max($0.width, $0.height) } ?? 0
+                    check(app.loupeLoaded?.isFullResolution == true,
+                          "1 loaded the file's own pixels")
+                    check(edge > fitEdge && abs(edge - native) <= 16,
+                          "…and the canvas swapped to them (\(edge) px of \(native), "
+                              + "was \(fitEdge) px)")
+                    check(canvas?.transform.zoom == 1,
+                          String(format: "…while the zoom stayed at 100 %% (%.3f)",
+                                 canvas?.transform.zoom ?? -1))
+                    check(canvas?.transform.imageSize == frame,
+                          "…on the same frame, so the swap did not refit the window "
+                              + "(\(canvas.map { "\($0.transform.imageSize)" } ?? "none"))")
+                    writeScreenshot(of: window, named: "selftest-loupe-full-resolution.png")
+                    sendKey("g", modifiers: [], window: window, virtualKey: 5)
+                    settle(app) {
+                        runLoupeHandoffChecks(app: app, window: window,
+                                              check: check, failures: failures)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Polls until the file's own pixels are on the canvas. The load is
+    /// deliberately behind a beat — a double-click through 1:1 and back must not
+    /// put a full decode on the queue — so this waits for both.
+    static func waitForLoupeFullResolution(_ app: AppModel, attemptsLeft: Int = 300,
+                                           then body: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            if app.loupeLoaded?.isFullResolution != true, attemptsLeft > 0, Date() < deadline {
+                waitForLoupeFullResolution(app, attemptsLeft: attemptsLeft - 1, then: body)
+            } else {
+                body()
+            }
         }
     }
 
@@ -991,7 +1268,7 @@ extension SelfTest {
                 sendKey("e", modifiers: [], window: window, virtualKey: 14)
                 check(app.libraryViewMode == .loupe && app.loupePhotoID == subject,
                       "e opened the loupe on the photo that was being edited")
-                check(app.loupeIsFullResolution,
+                check(app.loupeIsOwnPicture,
                       "…already showing its own picture, with no 512 px preview in between")
                 check(app.loupeTexture === developTexture,
                       "…the very texture the develop view had just rendered, reused")

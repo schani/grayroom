@@ -19,9 +19,11 @@ final class RenderService {
     private let queue = DispatchQueue(label: "com.grayroom.render", qos: .userInitiated)
     private let exportQueue = DispatchQueue(label: "com.grayroom.export", qos: .utility)
     private let previewQueue = DispatchQueue(label: "com.grayroom.gridpreview", qos: .utility)
+    private let loupeQueue = DispatchQueue(label: "com.grayroom.loupe", qos: .userInitiated)
     private let renderer: Renderer
     private var exportRenderer: Renderer?
     private var gridPreviewRenderer: Renderer?
+    private var loupeRenderer: Renderer?
 
     var metal: MetalContext { renderer.metal }
 
@@ -214,6 +216,60 @@ final class RenderService {
             }
             return try r.renderPreview(url: url, edit: edit, maxDimension: maxDimension)
         } completion: { completion($0) }
+    }
+
+    // MARK: - The library loupe
+
+    /// The loupe's picture of one photo: a decode capped at `maxDimension`
+    /// (`nil` for the file's own pixels) through the real pipeline, handed back
+    /// as a **display texture** rather than a `CGImage` so it keeps the
+    /// headroom an 8-bit image would throw away.
+    ///
+    /// Its own `Renderer` on its own queue, for the reason export has one: this
+    /// is a whole decode of a file the develop view is not editing, and the
+    /// mask cache it fills is keyed by a resolution the interactive loop never
+    /// asks for. Its context shares the interactive one's *device* — so the
+    /// texture is one the canvas can draw — and nothing else.
+    func renderLoupe(url: URL, edit: EditState, maxDimension: Int?,
+                     completion: @escaping (Result<MTLTexture, Error>) -> Void) {
+        run(loupeQueue) { () -> MTLTexture in
+            let renderer = try self.loupe()
+            let decoded = try renderer.decoder.decode(url: url, edit: edit,
+                                                      maxDimension: maxDimension)
+            return try renderer.pipeline.render(input: decoded.texture, edit: edit,
+                                                output: .display,
+                                                computeHistogram: false,
+                                                generateDisplayMipmaps: true).texture
+        } completion: { completion($0) }
+    }
+
+    /// The camera's own rendering of a file, for a photo with no development
+    /// whose embedded preview has run out of pixels.
+    ///
+    /// Handed back as a texture rather than a `CGImage` because the copy into
+    /// one is not free either: at a hundred megapixels it is 400 MB and a
+    /// mipmap chain, which is not something to do on the main thread.
+    func decodeCameraTexture(url: URL, maxDimension: Int?,
+                             completion: @escaping (Result<MTLTexture, Error>) -> Void) {
+        run(loupeQueue) { () -> MTLTexture in
+            let renderer = try self.loupe()
+            let image = try renderer.decoder.cameraImage(url: url, maxDimension: maxDimension)
+            return try renderer.metal.makeDisplayTexture(from: image)
+        } completion: { completion($0) }
+    }
+
+    /// Drops the rasterised masks the loupe's renderer holds. At a hundred
+    /// megapixels they are the largest thing it keeps between photos, and
+    /// stepping to another photo is the moment they are certainly dead.
+    func clearLoupeMaskCache() {
+        loupeQueue.async { self.loupeRenderer?.pipeline.clearMaskCache() }
+    }
+
+    private func loupe() throws -> Renderer {
+        if let existing = loupeRenderer { return existing }
+        let renderer = try Renderer(metal: MetalContext(sharing: self.renderer.metal))
+        loupeRenderer = renderer
+        return renderer
     }
 
     // MARK: - Plumbing

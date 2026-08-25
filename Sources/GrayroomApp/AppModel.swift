@@ -101,16 +101,33 @@ final class AppModel {
     private(set) var loupeImageSize: CGSize = .zero
     /// Whether `loupeTexture` is the loupe's own picture rather than the grid
     /// preview standing in for it.
-    private(set) var loupeIsFullResolution = false
+    private(set) var loupeIsOwnPicture = false
     /// Why there is no picture, when there is none — a photo whose file the
     /// library has lost.
     private(set) var loupeMessage: String?
+    /// What `loupeTexture` is a picture of — which is what says whether the
+    /// zoom has outgrown it.
+    private(set) var loupeLoaded: LoupeRenderKey?
     /// Bumped on every photo change; a load that lands after the user has
     /// arrowed on is discarded.
     private var loupeGeneration = 0
-    /// Whether the loupe's picture comes from the render loop (a developed
-    /// photo) rather than from the camera's embedded preview.
+    /// Whether the loupe's picture comes from the pipeline (a developed photo)
+    /// rather than from the camera's own rendering.
     private var loupeUsesPipeline = false
+    /// The load in flight, if any.
+    private var loupeInFlight: LoupeRenderKey?
+    /// Pictures of photos the arrows have walked past, and the one
+    /// full-resolution frame the loupe is allowed to hold.
+    private var loupeCache = LoupeImageCache<MTLTexture>(capacity: 3)
+    /// Development #1 of the photo in the loupe, once the library has answered.
+    private var loupeEdit: (photoID: Int64, edit: EditState)?
+    /// The full-resolution load, waiting for the zoom to settle.
+    private var loupeUpgradeTask: Task<Void, Never>?
+    /// Its row in the activity centre, while there is one.
+    private var loupeTaskID: TaskCenter.BackgroundTask.ID?
+    /// Set while `loadLoupeImage` is assembling the first pass: setting the
+    /// frame refits the canvas, and a refit calls back in to ask for a picture.
+    private var isLoadingLoupe = false
 
     // MARK: Document
 
@@ -550,78 +567,228 @@ final class AppModel {
 
     /// The picture, in as many passes as it takes.
     ///
-    /// # A developed photo is the real pipeline
+    /// # What is on the canvas
     ///
-    /// …run through the *same render loop the develop view uses*, not a copy of
-    /// it. That is what makes `d`/`e` between the two views free: the loop
-    /// already holds this photo's decode and its rendered frame, so the loupe
-    /// only has to point its canvas at them. It is also what gives the loupe
-    /// EDR and full resolution, neither of which an 8-bit `CGImage` can carry.
+    /// The photo as it *looks*, which is the grid's rule at loupe size: the real
+    /// pipeline over development #1 for a photo that has one, the camera's own
+    /// rendering for a photo that has never been developed. This app's defaults
+    /// are black and white, and a frame nobody has edited must not turn grey
+    /// just because it was looked at.
     ///
-    /// # An undeveloped photo is the camera's own picture
+    /// # How big
     ///
-    /// Exactly as in the grid: this app's defaults are black and white, and a
-    /// frame nobody has edited must not turn grey just because it was looked
-    /// at. So it goes on the same canvas — same zoom, same pan — with no
-    /// pipeline over it at all (`LoupeImageStore`).
+    /// As big as the view can show and no bigger — see `LoupeSizing`. Fitting a
+    /// hundred-megapixel frame into a 3 MP window through a full decode is the
+    /// better part of a second of work with nothing on screen to show for it. So
+    /// Fit renders at the window's own pixel count, and zooming past it loads
+    /// the file's own pixels, with the smaller picture staying up meanwhile.
     ///
     /// # In the meantime
     ///
-    /// Whatever the grid already has, scaled up: on screen in the same turn of
-    /// the run loop the key was pressed in, and replaced the moment the real
-    /// picture lands. Every callback is generation-guarded, so a load that
-    /// arrives after the user has arrowed on is dropped.
+    /// Whatever is already in hand: the develop view's own frame when it happens
+    /// to be this photo's (`pushLoupeRender`), else a picture of it the arrows
+    /// walked past, else the grid's 512 px preview — on screen in the same turn
+    /// of the run loop the key was pressed in. Every callback is
+    /// generation-guarded, so a load that lands after the user has arrowed on is
+    /// dropped.
     private func loadLoupeImage() {
         loupeGeneration += 1
         let generation = loupeGeneration
+        loupeUpgradeTask?.cancel()
+        finishLoupeTask()
         loupeTexture = nil
         loupeImageSize = .zero
-        loupeIsFullResolution = false
+        loupeIsOwnPicture = false
         loupeMessage = nil
         loupeUsesPipeline = false
+        loupeLoaded = nil
+        loupeInFlight = nil
+        loupeEdit = nil
+        // Two hundred-megapixel frames is most of a gigabyte, so the one the
+        // loupe is allowed to hold belongs to the photo on screen.
+        loupeCache.dropFullResolution(except: loupePhoto?.id)
+        service?.clearLoupeMaskCache()
         guard let photo = loupePhoto else { return }
-        guard let url = photo.url else {
+        guard photo.url != nil else {
             loupeMessage = "\(photo.originalName) is not where the library left it"
             return
         }
+        loupeUsesPipeline = photo.developmentFingerprint != nil
 
-        if photo.developmentFingerprint != nil {
-            loupeUsesPipeline = true
-            // The photo the develop view already has open: its decode and its
-            // render are done, so this costs nothing and the loupe is full
-            // resolution on this frame.
-            if currentPhotoID != photo.id || imageURL == nil {
-                // Walking the loupe opens photos, and opening one throws the
-                // previous edit's undo history away. The autosave is a
-                // one-second timer, so an arrow key pressed straight after a
-                // slider move would otherwise lose it.
-                if store.isDirty { persistEdit(announce: false) }
-                open(url: url, knownPhotoID: photo.id)
-            }
-            pushLoupeRender()
-        } else {
-            loupeImages.image(for: photo) { [weak self] image in
-                guard let self, self.loupeGeneration == generation else { return }
-                guard let image, let texture = self.makeLoupeTexture(image) else {
-                    if self.loupeTexture == nil {
-                        self.loupeMessage = "\(photo.originalName) could not be read"
-                    }
-                    return
+        // Nothing may ask for a picture until the frame and everything already
+        // in hand are settled: setting the frame refits the canvas, and a refit
+        // calls back in here.
+        isLoadingLoupe = true
+        // 1. The develop view's own frame, when it is this photo's: its decode
+        //    and its render are done, so this costs nothing.
+        pushLoupeRender()
+        if loupeImageSize == .zero,
+           let width = photo.width, let height = photo.height, width > 0, height > 0 {
+            setLoupeFrame(CGSize(width: width, height: height))
+        }
+        // 2. A picture of this photo the arrows walked past.
+        if !loupeIsOwnPicture,
+           let hit = loupeCache.best(photoID: photo.id,
+                                     fingerprint: photo.developmentFingerprint,
+                                     nativeLongEdge: loupeNativeLongEdge) {
+            loupeLoaded = hit.key
+            setLoupeTexture(hit.value, frame: loupeFrameSize(of: hit.value), ownPicture: true)
+        }
+        // 3. The grid's own 512 px preview, standing in.
+        if !loupeIsOwnPicture {
+            if let thumbnail = previews.cached(photo) {
+                showLoupeStandIn(thumbnail)
+            } else {
+                previews.image(for: photo) { [weak self] image in
+                    guard let self, self.loupeGeneration == generation,
+                          !self.loupeIsOwnPicture, let image else { return }
+                    self.showLoupeStandIn(image)
                 }
-                self.setLoupeTexture(texture, size: self.loupeFrameSize(of: texture),
-                                     fullResolution: true)
             }
         }
+        isLoadingLoupe = false
+        requestLoupeResolution()
+    }
 
-        // The stand-in, if the real thing is not already up.
-        guard !loupeIsFullResolution else { return }
-        if let thumbnail = previews.cached(photo) {
-            showLoupeStandIn(thumbnail)
+    /// Asks for the picture the loupe's canvas can actually show at the zoom it
+    /// is at, and does nothing at all when the one it is showing is already big
+    /// enough. Called on every transform change, so it has to be cheap.
+    ///
+    /// The full-resolution step waits for the zoom to settle: a double-click
+    /// that goes to 1:1 and back, or a pinch passing through it, must not put a
+    /// hundred-megapixel decode on the queue for a magnification nobody stopped
+    /// at.
+    private func requestLoupeResolution() {
+        guard !isLoadingLoupe, libraryViewMode == .loupe, mode == .library,
+              let photo = loupePhoto, let url = photo.url, service != nil
+        else { return }
+        let native = loupeNativeLongEdge
+        guard native > 0 else { return }
+        // A canvas that has not been laid out yet reports a 1×1 view, whose fit
+        // zoom would ask for a one-pixel picture.
+        let transform = loupeCanvas.map(\.transform)
+            .flatMap { t in min(t.viewSize.width, t.viewSize.height) >= 64 ? t : nil }
+        let wanted: LoupeResolution
+        if let loaded = loupeLoaded {
+            guard let zoom = transform?.zoom, let fit = transform?.fitZoom,
+                  let upgrade = LoupeSizing.upgrade(loaded: loaded.resolution,
+                                                    imageLongEdge: native,
+                                                    zoom: zoom, fitZoom: fit)
+            else {
+                loupeUpgradeTask?.cancel()
+                return
+            }
+            wanted = upgrade
         } else {
-            previews.image(for: photo) { [weak self] image in
-                guard let self, self.loupeGeneration == generation,
-                      !self.loupeIsFullResolution, let image else { return }
-                self.showLoupeStandIn(image)
+            // No canvas yet — the window is still being built. A Retina window's
+            // own pixel count is the honest guess, and the refit that follows
+            // corrects it.
+            let zoom = transform?.zoom
+                ?? min(1, Double(LoupeImageStore.defaultLongEdge) / Double(native))
+            wanted = LoupeSizing.initial(imageLongEdge: native, zoom: zoom)
+        }
+        let key = LoupeRenderKey(photoID: photo.id,
+                                 fingerprint: photo.developmentFingerprint,
+                                 resolution: wanted)
+        guard loupeInFlight != key else { return }
+        if let cached = loupeCache.value(for: key) {
+            showLoupeTexture(cached, for: key)
+            return
+        }
+        loupeUpgradeTask?.cancel()
+        guard wanted == .full, loupeLoaded != nil else {
+            startLoupeLoad(key, url: url, generation: loupeGeneration)
+            return
+        }
+        let generation = loupeGeneration
+        loupeUpgradeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self, self.loupeGeneration == generation else { return }
+            self.startLoupeLoad(key, url: url, generation: generation)
+        }
+    }
+
+    /// One loupe load: the pipeline for a developed photo, the camera's own
+    /// rendering for one that has never been developed, both off the main
+    /// thread. A full-resolution one is seconds of work, so it says so in the
+    /// activity centre.
+    private func startLoupeLoad(_ key: LoupeRenderKey, url: URL, generation: Int) {
+        guard let service else { return }
+        loupeInFlight = key
+        let maxDimension: Int? = key.isFullResolution
+            ? nil : key.resolution.longEdge(native: loupeNativeLongEdge)
+        // The row is owned by the model rather than by this call, so that
+        // stepping away takes it down with the photo.
+        if key.isFullResolution { loupeTaskID = tasks.begin(title: "Loading full resolution") }
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        let finish = { [weak self] (texture: MTLTexture?) in
+            guard let self else { return }
+            guard self.loupeGeneration == generation else { return }
+            self.finishLoupeTask()
+            self.loupeInFlight = nil
+            SelfTest.note(String(format: "loupe %@ %@: %.0f ms", url.lastPathComponent,
+                                 key.isFullResolution ? "1:1" : "fit",
+                                 (CFAbsoluteTimeGetCurrent() - startedAt) * 1000))
+            guard let texture else {
+                if self.loupeTexture == nil {
+                    self.loupeMessage = "\(url.lastPathComponent) could not be read"
+                }
+                return
+            }
+            self.loupeCache.store(texture, for: key)
+            self.showLoupeTexture(texture, for: key)
+        }
+
+        guard key.fingerprint != nil else {
+            if let maxDimension, let photo = loupePhoto {
+                loupeImages.image(for: photo, longEdge: maxDimension) { [weak self] image in
+                    finish(image.flatMap { self?.makeLoupeTexture($0) })
+                }
+            } else {
+                service.decodeCameraTexture(url: url, maxDimension: maxDimension) { result in
+                    finish(try? result.get())
+                }
+            }
+            return
+        }
+        loupeDevelopment(photoID: key.photoID, generation: generation) { [weak self] edit in
+            guard let self, let edit else {
+                // The catalog says there is a development and the library has
+                // none. Nothing here is this photo's picture, so the grid's
+                // preview stays up rather than a guess replacing it.
+                finish(nil)
+                return
+            }
+            service.renderLoupe(url: url, edit: self.hdrSuppression.displayEdit(edit),
+                                maxDimension: maxDimension) { result in
+                finish(try? result.get())
+            }
+        }
+    }
+
+    /// Development #1 of one photo, from the edit store when the develop view
+    /// already holds it and off the library queue otherwise.
+    private func loupeDevelopment(photoID: Int64, generation: Int,
+                                  then body: @escaping (EditState?) -> Void) {
+        if let cached = loupeEdit, cached.photoID == photoID {
+            body(cached.edit)
+            return
+        }
+        if currentPhotoID == photoID, developmentID != nil, !store.isDirty {
+            loupeEdit = (photoID, store.edit)
+            body(store.edit)
+            return
+        }
+        guard let library else {
+            body(nil)
+            return
+        }
+        libraryQueue.async {
+            let edit = (try? library.developments(for: photoID))?.first?.edit
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.loupeGeneration == generation else { return }
+                if let edit { self.loupeEdit = (photoID, edit) }
+                body(edit)
             }
         }
     }
@@ -630,26 +797,75 @@ final class AppModel {
     /// a frame of *this* photo, rendered from the edit the photo actually has.
     ///
     /// That second half is what keeps this app's black-and-white defaults off
-    /// the screen. `open(url:)` starts from an empty `EditState` and the stored
-    /// development arrives a moment later on the library queue, so between the
-    /// two the loop is rendering a picture that is not what this photo looks
-    /// like. `developmentID` is what says the lookup has landed, and comparing
-    /// the rendered edit against the one the app is holding is what says the
-    /// render is of *that* edit and not of the empty one still in flight. Until
-    /// both hold, the grid's 512 px preview stays up.
+    /// the screen: the develop view starts from an empty `EditState` and the
+    /// stored development arrives a moment later on the library queue, so
+    /// between the two the loop is rendering a picture that is not what this
+    /// photo looks like. `developmentID` is what says the lookup has landed, and
+    /// comparing the rendered edit against the one the app is holding is what
+    /// says the render is of *that* edit and not of the empty one still in
+    /// flight.
+    ///
+    /// This is the whole of "`e` from Develop costs nothing": the loop already
+    /// holds this photo's decode and its rendered frame, at the file's own
+    /// resolution, so the loupe has only to point its canvas at them.
     private func pushLoupeRender() {
         guard loupeUsesPipeline, let photo = loupePhoto, currentPhotoID == photo.id,
               developmentID != nil, let texture = currentTexture, previewSize != .zero,
               lastRenderedEdit?.fingerprint == store.edit.fingerprint
         else { return }
-        setLoupeTexture(texture, size: previewSize, fullResolution: true)
+        let resolution: LoupeResolution = lastRenderWasDraft
+            ? .sized(longEdge: max(texture.width, texture.height)) : .full
+        let key = LoupeRenderKey(photoID: photo.id,
+                                 fingerprint: photo.developmentFingerprint,
+                                 resolution: resolution)
+        guard isBetterLoupePicture(key) else { return }
+        loupeLoaded = key
+        setLoupeTexture(texture, frame: previewSize, ownPicture: true)
     }
 
     /// The grid's own 512 px preview, on the loupe's canvas, until the real
     /// picture lands.
     private func showLoupeStandIn(_ image: CGImage) {
         guard let texture = makeLoupeTexture(image) else { return }
-        setLoupeTexture(texture, size: loupeFrameSize(of: texture), fullResolution: false)
+        setLoupeTexture(texture, frame: loupeFrameSize(of: texture), ownPicture: false)
+    }
+
+    /// A finished load, on screen — unless the user has meanwhile zoomed past it
+    /// and a bigger one has already landed.
+    private func showLoupeTexture(_ texture: MTLTexture, for key: LoupeRenderKey) {
+        guard isBetterLoupePicture(key) else { return }
+        loupeLoaded = key
+        setLoupeTexture(texture, frame: loupeFrameSize(of: texture), ownPicture: true)
+        requestLoupeResolution()
+    }
+
+    /// Whether a picture at `key` is worth putting over what the loupe already
+    /// has. Loads finish out of order — a full-resolution decode started before
+    /// a view-sized one can land after it — and a picture must never get
+    /// smaller.
+    private func isBetterLoupePicture(_ key: LoupeRenderKey) -> Bool {
+        guard let loaded = loupeLoaded else { return true }
+        guard loaded.photoID == key.photoID, loaded.fingerprint == key.fingerprint else {
+            return true
+        }
+        let native = loupeNativeLongEdge
+        return key.resolution.longEdge(native: native)
+            >= loaded.resolution.longEdge(native: native)
+    }
+
+    private func finishLoupeTask() {
+        guard let taskID = loupeTaskID else { return }
+        loupeTaskID = nil
+        tasks.finish(taskID)
+    }
+
+    /// The photo's own long edge — the frame the canvas fits and zooms, and the
+    /// number every sizing decision is against.
+    private var loupeNativeLongEdge: Int {
+        let frame = Int(max(loupeImageSize.width, loupeImageSize.height).rounded())
+        if frame > 0 { return frame }
+        guard let photo = loupePhoto else { return 0 }
+        return max(photo.width ?? 0, photo.height ?? 0)
     }
 
     /// The frame the loupe fits and zooms, for a picture that is not the
@@ -681,25 +897,36 @@ final class AppModel {
         try? service?.metal.makeDisplayTexture(from: image)
     }
 
-    private func setLoupeTexture(_ texture: MTLTexture, size: CGSize, fullResolution: Bool) {
+    /// The frame the canvas fits and zooms. Set once per photo: every later
+    /// pass is a different resolution of the *same* frame, so a zoom the user
+    /// set survives a bigger picture arriving.
+    private func setLoupeFrame(_ size: CGSize) {
+        guard size != .zero, size != loupeImageSize else { return }
+        loupeImageSize = size
+        loupeCanvas?.setImageSize(size)
+    }
+
+    private func setLoupeTexture(_ texture: MTLTexture, frame: CGSize, ownPicture: Bool) {
+        if loupeImageSize == .zero { setLoupeFrame(frame) }
         loupeTexture = texture
-        loupeIsFullResolution = fullResolution
-        // A new frame size refits — which is what the stand-in giving way to
-        // the full-size picture is, and what stepping to the next photo is.
-        if size != loupeImageSize {
-            loupeImageSize = size
-            loupeCanvas?.setImageSize(size)
-        }
+        loupeIsOwnPicture = ownPicture
         loupeCanvas?.imageTexture = texture
     }
 
     private func clearLoupe() {
         loupeGeneration += 1
+        loupeUpgradeTask?.cancel()
+        finishLoupeTask()
         loupeTexture = nil
         loupeImageSize = .zero
-        loupeIsFullResolution = false
+        loupeIsOwnPicture = false
         loupeMessage = nil
         loupeUsesPipeline = false
+        loupeLoaded = nil
+        loupeInFlight = nil
+        loupeEdit = nil
+        loupeCache.dropFullResolution(except: nil)
+        service?.clearLoupeMaskCache()
         loupeCanvas?.imageTexture = nil
     }
 
@@ -1417,6 +1644,8 @@ final class AppModel {
 extension AppModel: CanvasInputHandler {
     func canvasTransformChanged(_ transform: CanvasTransform) {
         zoomPercent = transform.zoomPercent
+        // A zoom past what the loupe is holding is a request for more pixels.
+        if mode == .library, browser.ownsCanvas { requestLoupeResolution() }
     }
 
     func canvasBeginStroke(atNormalized p: CGPoint, pressure: Double, erase: Bool) {

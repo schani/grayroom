@@ -645,9 +645,13 @@ extension SelfTest {
     }
 
     static func storedDevelopmentFingerprint(_ id: Int64) -> Data? {
+        storedDevelopment(id)?.fingerprint
+    }
+
+    static func storedDevelopment(_ id: Int64) -> EditState? {
         guard let library = try? Library.openDefault() else { return nil }
         defer { try? library.close() }
-        return (((try? library.developments(for: id)) ?? []).first?.edit.fingerprint)
+        return ((try? library.developments(for: id)) ?? []).first?.edit
     }
 
     /// Rec.709 luminance of a `CGImage`, averaged — the one number that says

@@ -60,6 +60,22 @@ public final class MetalContext {
         }
     }
 
+    /// A second context on the same device and the same compiled library, with
+    /// a command queue of its own.
+    ///
+    /// Both halves matter. Same device: the textures it makes can be drawn by a
+    /// canvas set up against the first, which is what lets the loupe hand a
+    /// render straight to the screen. Own queue: command buffers on one queue
+    /// execute in the order they were *created*, so heavy work sharing the
+    /// interactive queue would sit in front of every frame the user is dragging
+    /// against — measured, as a multi-second stall on the grid's previews.
+    public init(sharing other: MetalContext) throws {
+        self.device = other.device
+        guard let queue = device.makeCommandQueue() else { throw MetalError.noCommandQueue }
+        self.commandQueue = queue
+        self.library = other.library
+    }
+
     static func combinedShaderSource() throws -> String {
         var parts: [String] = []
         for name in shaderFiles {

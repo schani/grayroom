@@ -571,6 +571,64 @@ public final class ImageDecoder {
         return filter.outputImage ?? image
     }
 
+    /// Lanczos down to `maxDimension` on the longer edge, or the image itself
+    /// when it is already at or below it.
+    static func reduced(_ image: CIImage, maxDimension: Int?) -> CIImage {
+        guard let maxDim = maxDimension else { return image }
+        let longest = max(image.extent.width, image.extent.height)
+        guard longest > CGFloat(maxDim) else { return image }
+        let lanczos = CIFilter(name: "CILanczosScaleTransform")!
+        lanczos.setValue(image, forKey: kCIInputImageKey)
+        lanczos.setValue(NSNumber(value: Double(CGFloat(maxDim) / longest)),
+                         forKey: kCIInputScaleKey)
+        lanczos.setValue(NSNumber(value: 1.0), forKey: kCIInputAspectRatioKey)
+        return lanczos.outputImage ?? image
+    }
+
+    /// The camera's own rendering of a file, as an sRGB `CGImage`.
+    ///
+    /// Apple's "pleasing rendering" left **on**, which is the whole point:
+    /// this is what a photo nobody has developed looks like — the same picture
+    /// the camera embedded a JPEG of, only with as many pixels as the sensor
+    /// has. `decode` neutralises all of it because the pipeline needs linear
+    /// scene-referred data; nothing here goes through the pipeline.
+    ///
+    /// The loupe magnifies to this once an embedded preview has run out of
+    /// pixels, which is the only reason it exists: at Fit the embedded JPEG is
+    /// the same picture for a thousandth of the cost.
+    public func cameraImage(url: URL, maxDimension: Int? = nil) throws -> CGImage {
+        var image: CIImage
+        if let f = try ImageDecoder.rawFilter(url: url) {
+            ImageDecoder.enableHighlightRecovery(f)
+            let longestNative = max(f.nativeSize.width, f.nativeSize.height)
+            if let maxDim = maxDimension, longestNative > 0, CGFloat(maxDim) < longestNative {
+                f.scaleFactor = Float(max(0.01, min(1.0, CGFloat(maxDim) / longestNative)))
+            }
+            guard let output = f.outputImage else { throw DecodeError.renderFailed }
+            image = output
+        } else {
+            guard let standard = CIImage(contentsOf: url,
+                                         options: [.applyOrientationProperty: true])
+            else { throw DecodeError.undecodable(url) }
+            image = standard
+        }
+        guard !image.extent.isEmpty, !image.extent.isInfinite else {
+            throw DecodeError.emptyExtent
+        }
+        image = ImageDecoder.reduced(image, maxDimension: maxDimension)
+        // `deferred: false` matters: the default hands back a `CGImage` that
+        // renders when its pixels are first read, which for the loupe would be
+        // on the main thread inside `makeDisplayTexture` — a hundred-megapixel
+        // demosaic in the middle of a frame. Pay it here, on the queue that
+        // asked for it.
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let cgImage = ciContext.createCGImage(image, from: image.extent,
+                                                    format: .RGBA8, colorSpace: space,
+                                                    deferred: false)
+        else { throw DecodeError.renderFailed }
+        return cgImage
+    }
+
     /// Optional reduction, then origin/flip normalisation, then the render into
     /// a working texture. Shared by both decode paths so preview and export
     /// cannot drift apart between formats.
@@ -579,17 +637,7 @@ public final class ImageDecoder {
         guard !image.extent.isEmpty, !image.extent.isInfinite else {
             throw DecodeError.emptyExtent
         }
-        if let maxDim = maxDimension {
-            let longest = max(image.extent.width, image.extent.height)
-            if longest > CGFloat(maxDim) {
-                let scale = CGFloat(maxDim) / longest
-                let lanczos = CIFilter(name: "CILanczosScaleTransform")!
-                lanczos.setValue(image, forKey: kCIInputImageKey)
-                lanczos.setValue(NSNumber(value: Double(scale)), forKey: kCIInputScaleKey)
-                lanczos.setValue(NSNumber(value: 1.0), forKey: kCIInputAspectRatioKey)
-                if let scaled = lanczos.outputImage { image = scaled }
-            }
-        }
+        image = ImageDecoder.reduced(image, maxDimension: maxDimension)
 
         // Move to the origin so texture coordinates line up.
         let extent = image.extent

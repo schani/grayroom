@@ -367,7 +367,14 @@ extension SelfTest {
                 try? FileManager.default.createDirectory(at: outputDirectory,
                                                          withIntermediateDirectories: true)
                 writeScreenshot(of: window, named: "selftest-library.png")
-                runWindowChecks(app: app, window: window, check: check, failures: failures)
+                // The window phase reads the activity centre, and a grid
+                // preview still being built is a task in it. Developing a photo
+                // invalidates its cell, and the rebuild waits for the develop
+                // loop to go quiet, so "the grid has caught up" is a wait, not
+                // an assumption.
+                waitForPreviews(app) {
+                    runWindowChecks(app: app, window: window, check: check, failures: failures)
+                }
                 return
             }
             first()

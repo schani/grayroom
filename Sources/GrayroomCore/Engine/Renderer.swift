@@ -10,11 +10,21 @@ public final class Renderer {
     public let pipeline: Pipeline
     public let downsampler: Downsampler
 
-    public init() throws {
-        metal = try MetalContext()
+    /// A renderer over an existing context.
+    ///
+    /// Paired with `MetalContext(sharing:)` this is how a second renderer gets
+    /// the *device* of the first — so its textures can be drawn by a canvas set
+    /// up against that one — without inheriting its command queue or its
+    /// resolution-keyed caches.
+    public init(metal: MetalContext) throws {
+        self.metal = metal
         decoder = ImageDecoder(metal: metal)
         pipeline = try Pipeline(context: metal)
         downsampler = try Downsampler(context: metal)
+    }
+
+    public convenience init() throws {
+        try self.init(metal: MetalContext())
     }
 
     public struct Output {
