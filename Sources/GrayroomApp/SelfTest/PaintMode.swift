@@ -125,11 +125,8 @@ extension SelfTest {
 
     static func writeWindowScreenshot(window: NSWindow) {
         let url = outputDirectory.appendingPathComponent("selftest-paint.png")
-        guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow,
-                                                  CGWindowID(window.windowNumber),
-                                                  [.boundsIgnoreFraming, .bestResolution]) else {
-            log("self-test: CGWindowListCreateImage returned nil "
-                + "(screen-recording permission?) — see selftest-canvas.png instead")
+        guard let image = windowImage(window) else {
+            log("self-test: could not draw the window — see selftest-canvas.png instead")
             return
         }
         write(image, to: url)

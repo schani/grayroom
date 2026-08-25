@@ -125,8 +125,7 @@ enum SelfTest {
     /// tile and no menu bar of its own), it never activates, and every window
     /// it opens — the editor, the Import window, any that come later — is put
     /// one level *below* the desktop icons, where it is still a real, laid-out,
-    /// drawn window that `CGWindowListCreateImage` can photograph off its own
-    /// backing store, and where nothing about it is on screen.
+    /// drawn window that `cacheDisplay` can draw off its own view tree, and where nothing about it is on screen.
     ///
     /// `hidesOnDeactivate` stays false so an inactive app keeps its windows
     /// (and therefore its layout, its rows and its click targets) alive.
@@ -288,15 +287,22 @@ enum SelfTest {
 
     static func writeScreenshot(of window: NSWindow, named name: String) {
         let url = outputDirectory.appendingPathComponent(name)
-        guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow,
-                                                  CGWindowID(window.windowNumber),
-                                                  [.boundsIgnoreFraming, .bestResolution]) else {
-            log("self-test: CGWindowListCreateImage returned nil "
-                + "(screen-recording permission?)")
+        guard let image = windowImage(window) else {
+            log("self-test: could not draw \(name)")
             return
         }
         write(image, to: url)
         log("self-test: wrote \(url.path) (\(image.width)x\(image.height))")
+    }
+
+    /// The window's view tree drawn into a bitmap. Needs no screen-recording
+    /// permission and works for a window below the desktop, but Metal layers
+    /// come out blank — `writeCanvasRender` covers those.
+    static func windowImage(_ window: NSWindow) -> CGImage? {
+        guard let frame = window.contentView?.superview,
+              let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) else { return nil }
+        frame.cacheDisplay(in: frame.bounds, to: rep)
+        return rep.cgImage
     }
 
     /// The whole of a window's view tree, not just its content.
