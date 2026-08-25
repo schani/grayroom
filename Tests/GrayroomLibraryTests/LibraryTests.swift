@@ -62,6 +62,21 @@ final class LibraryTests: XCTestCase {
         }
     }
 
+    func testV1LibraryGainsTheCullingColumns() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("grayroom-v1-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("library.sqlite").path
+        try Library.migrator.migrate(try DatabasePool(path: path), upTo: "v1")
+        let library = try Library(path: path)
+        try library.dbPool.read { db in
+            let columns = try db.columns(in: "photos").map(\.name)
+            XCTAssertTrue(columns.contains("aesthetic_score"))
+            XCTAssertTrue(columns.contains("feature_print"))
+        }
+    }
+
     func testInvalidEditJSONIsRejected() throws {
         let photoID = try makePhoto("a.raw")
         try library.dbPool.write { db in

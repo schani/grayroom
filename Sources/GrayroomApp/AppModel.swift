@@ -346,12 +346,15 @@ final class AppModel {
             var added = 0
             var existing = 0
             var failed = 0
+            var firstError: Error?
             importer.importFiles(urls, precomputedHashes: hashes, progress: { finished, _, outcome in
                 switch outcome {
                 case .success(let result):
                     if result.isNewPhoto { added += 1 } else { existing += 1 }
-                case .failure:
+                case .failure(let error):
                     failed += 1
+                    if firstError == nil { firstError = error }
+                    NSLog("import failed: %@: %@", urls[finished - 1].path, "\(error)")
                 }
                 DispatchQueue.main.async { [weak self] in
                     self?.tasks.update(taskID, completed: finished,
@@ -362,7 +365,8 @@ final class AppModel {
                 return self.tasks.isCancelled(taskID)
             })
             let cancelled = self?.tasks.isCancelled(taskID) ?? false
-            let summary = AppModel.importSummary(added: added, existing: existing, failed: failed)
+            let summary = AppModel.importSummary(added: added, existing: existing, failed: failed,
+                                                 error: firstError)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.tasks.finish(taskID)
@@ -374,11 +378,11 @@ final class AppModel {
         }
     }
 
-    static func importSummary(added: Int, existing: Int, failed: Int) -> String {
+    static func importSummary(added: Int, existing: Int, failed: Int, error: Error? = nil) -> String {
         var message = "Imported \(added)"
         var notes: [String] = []
         if existing > 0 { notes.append("\(existing) already in library") }
-        if failed > 0 { notes.append("\(failed) failed") }
+        if failed > 0 { notes.append("\(failed) failed" + (error.map { ": \($0)" } ?? "")) }
         if !notes.isEmpty { message += " (" + notes.joined(separator: ", ") + ")" }
         return message
     }
