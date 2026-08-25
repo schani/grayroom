@@ -375,6 +375,13 @@ enum SelfTest {
     /// its centre: that is how the import window's checkbox gets clicked, and
     /// therefore how this test knows the checkbox still takes its own clicks
     /// rather than the click catcher swallowing them.
+    ///
+    /// `clickCount` is how many clicks to send, not a number to stamp on one
+    /// event: a window routes a multi-click event to the view that took the
+    /// *previous* mouse-down rather than to the one under the point, so a lone
+    /// `clickCount: 2` lands on whatever was clicked last (measured on macOS 26
+    /// — a double-click aimed at the first cell opened the cell clicked two
+    /// steps earlier). Sending 1, then 2, is what the hardware sends.
     @discardableResult
     static func clickCell(_ identifier: String,
                                   modifiers: NSEvent.ModifierFlags = [],
@@ -388,15 +395,17 @@ enum SelfTest {
                                               y: view.bounds.maxY - $0.y) }
             ?? CGPoint(x: view.bounds.midX, y: view.bounds.midY)
         let point = view.convert(local, to: nil)
-        clickCounter += 1
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            guard let event = NSEvent.mouseEvent(
-                with: type, location: point, modifierFlags: modifiers,
-                timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: window.windowNumber, context: nil,
-                eventNumber: clickCounter, clickCount: clickCount, pressure: 1)
-            else { return false }
-            window.sendEvent(event)
+        for count in 1...max(clickCount, 1) {
+            clickCounter += 1
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                guard let event = NSEvent.mouseEvent(
+                    with: type, location: point, modifierFlags: modifiers,
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber, context: nil,
+                    eventNumber: clickCounter, clickCount: count, pressure: 1)
+                else { return false }
+                window.sendEvent(event)
+            }
         }
         return true
     }
