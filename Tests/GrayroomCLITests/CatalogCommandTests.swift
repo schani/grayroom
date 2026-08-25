@@ -408,9 +408,10 @@ final class CatalogCommandTests: XCTestCase {
 
     func testPreviewsStatsAndClear() throws {
         let id = try stubPhoto("a.dng")
+        let hash = try XCTUnwrap(try library.photo(id: id)).hash
         let store = try PreviewStore.open(for: library)
         let jpeg = Data(repeating: 0xAB, count: 2048)
-        try store.store(photoID: id, source: .embedded, fingerprint: nil,
+        try store.store(hash: hash, source: .embedded, fingerprint: nil,
                         width: 512, height: 341, jpeg: jpeg)
         try store.close()
 

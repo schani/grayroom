@@ -114,6 +114,9 @@ final class PreviewBuilder {
 
     private struct Request {
         let id: Int64
+        /// The photo's content hash — how `previews.sqlite` keys its rows, so
+        /// that a re-import under a new rowid still finds its picture.
+        let hash: Data
         let url: URL?
         let kind: PreviewKind
     }
@@ -172,7 +175,7 @@ final class PreviewBuilder {
             completion(nil)
             return
         }
-        let request = Request(id: id, url: photo.url,
+        let request = Request(id: id, hash: photo.hash, url: photo.url,
                               kind: PreviewKind(developmentFingerprint:
                                                   photo.developmentFingerprint))
 
@@ -252,7 +255,7 @@ final class PreviewBuilder {
                 return
             }
             // 1. The store, when it holds a picture of the right thing.
-            if let row = try? store?.preview(for: id),
+            if let row = try? store?.preview(for: request.hash),
                row.isCurrent(developmentFingerprint: request.kind.fingerprint),
                let image = PreviewBuilder.decodeJPEG(row.jpeg) {
                 SelfTest.note("preview \(id): \(row.source) from previews.sqlite")
@@ -287,7 +290,7 @@ final class PreviewBuilder {
         }
         // What was actually read, which is what the row must say it is: the
         // development may have moved since the catalog snapshot was taken.
-        let rendered = Request(id: request.id, url: request.url,
+        let rendered = Request(id: request.id, hash: request.hash, url: request.url,
                                kind: .rendered(edit.fingerprint))
         let store = previews
         SelfTest.note("preview \(request.id): rendering development #1")
@@ -385,7 +388,7 @@ final class PreviewBuilder {
                               in store: PreviewStore?) -> CGImage? {
         let sRGB = sRGBImage(image)
         guard let data = jpegData(from: sRGB) else { return sRGB }
-        try? store?.store(photoID: request.id,
+        try? store?.store(hash: request.hash,
                           source: request.kind.source,
                           fingerprint: request.kind.fingerprint,
                           width: sRGB.width,

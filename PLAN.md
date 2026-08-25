@@ -258,10 +258,13 @@ picked); tags are free-form many-to-many. No ratings for now.
      the same 32 bytes.
    - `previews.sqlite` (GRDB, WAL, its own `DatabasePool`) sits beside
      `library.sqlite`:
-     `previews(photo_id PK, source, edit_fingerprint, width, height, jpeg,
-     updated_at)`. It is a separate file because it is derived data — two orders
-     of magnitude larger than the catalogue, rewritten constantly, and worth
-     nothing if lost. Nothing in SQLite can cascade across files, so
+     `previews(photo_hash PK, source, edit_fingerprint, width, height, jpeg,
+     updated_at)`. It is keyed by the content hash, not the rowid: rowids are
+     the catalogue's own bookkeeping and a re-import hands out new ones. It is a
+     separate file because it is derived data — two orders of magnitude larger
+     than the catalogue, rewritten constantly, and worth nothing if lost, which
+     is also why an older layout is erased on open rather than migrated.
+     Nothing in SQLite can cascade across files, so
      `Library.previewStore` is the hook that takes a deleted photo's preview
      with it. `grayroom previews stats` / `previews clear` are the debugging
      handles.

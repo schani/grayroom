@@ -639,9 +639,10 @@ extension SelfTest {
     static func storedPreview(_ id: Int64) -> StoredPreview? {
         guard let library = try? Library.openDefault() else { return nil }
         defer { try? library.close() }
-        guard let store = try? PreviewStore.open(for: library) else { return nil }
+        guard let hash = (try? library.photo(id: id))??.hash,
+              let store = try? PreviewStore.open(for: library) else { return nil }
         defer { try? store.close() }
-        return (try? store.preview(for: id)) ?? nil
+        return (try? store.preview(for: hash)) ?? nil
     }
 
     static func storedDevelopmentFingerprint(_ id: Int64) -> Data? {

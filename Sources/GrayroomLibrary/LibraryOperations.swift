@@ -113,8 +113,9 @@ extension Library {
     /// different database file, so SQLite cannot do it for us.
     @discardableResult
     public func deletePhoto(id: Int64) throws -> Bool {
+        let hash = try photo(id: id)?.hash
         let deleted = try dbPool.write { db in try Photo.deleteOne(db, key: id) }
-        if deleted { try previewStore?.delete(photoID: id) }
+        if deleted, let hash { try previewStore?.delete(hash: hash) }
         return deleted
     }
 

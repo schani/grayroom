@@ -99,10 +99,15 @@ public final class PreviewStore {
 
     public static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
+        // Everything here is derived from the file and the development, so a
+        // file written by an older layout is not migrated: it is thrown away
+        // and built again. That is the cache invalidating itself, not a
+        // migration.
+        migrator.eraseDatabaseOnSchemaChange = true
         migrator.registerMigration("v1") { db in
             try db.execute(sql: """
                 CREATE TABLE previews (
-                    photo_id INTEGER PRIMARY KEY,
+                    photo_hash BLOB PRIMARY KEY,
                     source INTEGER NOT NULL,
                     edit_fingerprint BLOB,
                     width INTEGER NOT NULL,
@@ -117,15 +122,15 @@ public final class PreviewStore {
 
     // MARK: - Reading
 
-    public func preview(for photoID: Int64) throws -> StoredPreview? {
+    public func preview(for hash: Data) throws -> StoredPreview? {
         try dbPool.read { db in
             guard let row = try Row.fetchOne(
                 db,
                 sql: """
                     SELECT source, edit_fingerprint, width, height, jpeg, updated_at \
-                    FROM previews WHERE photo_id = ?
+                    FROM previews WHERE photo_hash = ?
                     """,
-                arguments: [photoID])
+                arguments: [hash])
             else { return nil }
             let raw: Int = row["source"]
             return StoredPreview(source: PreviewSource(rawValue: raw) ?? .embedded,
@@ -161,7 +166,7 @@ public final class PreviewStore {
     /// Insert or replace the photo's preview. A photo has exactly one, because a
     /// stale one has no use: the whole point of the source and the fingerprint
     /// is to tell whether *the* preview is the right one.
-    public func store(photoID: Int64,
+    public func store(hash: Data,
                       source: PreviewSource,
                       fingerprint: Data?,
                       width: Int,
@@ -175,9 +180,9 @@ public final class PreviewStore {
         try dbPool.write { db in
             try db.execute(sql: """
                 INSERT INTO previews \
-                (photo_id, source, edit_fingerprint, width, height, jpeg, updated_at) \
+                (photo_hash, source, edit_fingerprint, width, height, jpeg, updated_at) \
                 VALUES (?, ?, ?, ?, ?, ?, ?) \
-                ON CONFLICT(photo_id) DO UPDATE SET \
+                ON CONFLICT(photo_hash) DO UPDATE SET \
                 source = excluded.source, \
                 edit_fingerprint = excluded.edit_fingerprint, \
                 width = excluded.width, \
@@ -185,15 +190,15 @@ public final class PreviewStore {
                 jpeg = excluded.jpeg, \
                 updated_at = excluded.updated_at
                 """,
-                arguments: [photoID, source.rawValue, storedFingerprint,
+                arguments: [hash, source.rawValue, storedFingerprint,
                             width, height, jpeg, updatedAt])
         }
     }
 
     @discardableResult
-    public func delete(photoID: Int64) throws -> Bool {
+    public func delete(hash: Data) throws -> Bool {
         try dbPool.write { db in
-            try db.execute(sql: "DELETE FROM previews WHERE photo_id = ?", arguments: [photoID])
+            try db.execute(sql: "DELETE FROM previews WHERE photo_hash = ?", arguments: [hash])
             return db.changesCount > 0
         }
     }

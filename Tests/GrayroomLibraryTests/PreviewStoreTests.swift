@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import GrayroomCore
 import XCTest
 @testable import GrayroomLibrary
@@ -26,10 +27,19 @@ final class PreviewStoreTests: XCTestCase {
         Data((0..<count).map { UInt8(($0 &* 7 &+ Int(seed)) % 256) })
     }
 
+    /// A stand-in for SHA-256: 32 bytes, distinct per seed.
+    private func hash(_ seed: UInt8) -> Data {
+        Data([seed] + Array(repeating: UInt8(0), count: 31))
+    }
+
     @discardableResult
     private func makePhoto(_ name: String) throws -> Int64 {
         let url = try temp.writeFile(name, Data(name.utf8))
         return try Importer(library: library, probe: stubProbe()).importFile(at: url).photoID
+    }
+
+    private func photoHash(_ id: Int64) throws -> Data {
+        try XCTUnwrap(try library.photo(id: id)).hash
     }
 
     // MARK: - Location
@@ -45,10 +55,10 @@ final class PreviewStoreTests: XCTestCase {
 
     func testStoreAndReadBackAnEmbeddedPreview() throws {
         let bytes = jpeg(3, count: 128)
-        try store.store(photoID: 7, source: .embedded, fingerprint: nil,
+        try store.store(hash: hash(7), source: .embedded, fingerprint: nil,
                         width: 512, height: 341, jpeg: bytes)
 
-        let row = try XCTUnwrap(try store.preview(for: 7))
+        let row = try XCTUnwrap(try store.preview(for: hash(7)))
         XCTAssertEqual(row.source, .embedded)
         XCTAssertNil(row.fingerprint)
         XCTAssertEqual(row.width, 512)
@@ -62,10 +72,10 @@ final class PreviewStoreTests: XCTestCase {
         var edit = EditState()
         edit.tone.exposure = 1.5
         let bytes = jpeg(9)
-        try store.store(photoID: 11, source: .rendered, fingerprint: edit.fingerprint,
+        try store.store(hash: hash(11), source: .rendered, fingerprint: edit.fingerprint,
                         width: 341, height: 512, jpeg: bytes)
 
-        let row = try XCTUnwrap(try store.preview(for: 11))
+        let row = try XCTUnwrap(try store.preview(for: hash(11)))
         XCTAssertEqual(row.source, .rendered)
         XCTAssertEqual(row.fingerprint, edit.fingerprint)
         XCTAssertEqual(row.width, 341)
@@ -74,7 +84,7 @@ final class PreviewStoreTests: XCTestCase {
     }
 
     func testAnUnknownPhotoHasNoPreview() throws {
-        XCTAssertNil(try store.preview(for: 4711))
+        XCTAssertNil(try store.preview(for: hash(47)))
         XCTAssertEqual(try store.count, 0)
         XCTAssertEqual(try store.totalBytes, 0)
     }
@@ -84,13 +94,13 @@ final class PreviewStoreTests: XCTestCase {
     func testStoringAgainReplacesTheRow() throws {
         var edit = EditState()
         edit.clarity = 30
-        try store.store(photoID: 5, source: .embedded, fingerprint: nil,
+        try store.store(hash: hash(5), source: .embedded, fingerprint: nil,
                         width: 512, height: 512, jpeg: jpeg(1, count: 40))
-        try store.store(photoID: 5, source: .rendered, fingerprint: edit.fingerprint,
+        try store.store(hash: hash(5), source: .rendered, fingerprint: edit.fingerprint,
                         width: 256, height: 512, jpeg: jpeg(2, count: 90))
 
         XCTAssertEqual(try store.count, 1, "a photo has one preview, not a history of them")
-        let row = try XCTUnwrap(try store.preview(for: 5))
+        let row = try XCTUnwrap(try store.preview(for: hash(5)))
         XCTAssertEqual(row.source, .rendered)
         XCTAssertEqual(row.fingerprint, edit.fingerprint)
         XCTAssertEqual(row.width, 256)
@@ -104,30 +114,30 @@ final class PreviewStoreTests: XCTestCase {
     func testAnEmbeddedPreviewNeverKeepsAFingerprint() throws {
         var edit = EditState()
         edit.tone.exposure = -1
-        try store.store(photoID: 2, source: .embedded, fingerprint: edit.fingerprint,
+        try store.store(hash: hash(2), source: .embedded, fingerprint: edit.fingerprint,
                         width: 512, height: 288, jpeg: jpeg(4))
 
-        XCTAssertNil(try store.preview(for: 2)?.fingerprint)
+        XCTAssertNil(try store.preview(for: hash(2))?.fingerprint)
     }
 
     // MARK: - Deletion
 
     func testDelete() throws {
-        try store.store(photoID: 1, source: .embedded, fingerprint: nil,
+        try store.store(hash: hash(1), source: .embedded, fingerprint: nil,
                         width: 512, height: 512, jpeg: jpeg(1))
-        try store.store(photoID: 2, source: .embedded, fingerprint: nil,
+        try store.store(hash: hash(2), source: .embedded, fingerprint: nil,
                         width: 512, height: 512, jpeg: jpeg(2))
 
-        XCTAssertTrue(try store.delete(photoID: 1))
-        XCTAssertNil(try store.preview(for: 1))
-        XCTAssertNotNil(try store.preview(for: 2))
+        XCTAssertTrue(try store.delete(hash: hash(1)))
+        XCTAssertNil(try store.preview(for: hash(1)))
+        XCTAssertNotNil(try store.preview(for: hash(2)))
         XCTAssertEqual(try store.count, 1)
-        XCTAssertFalse(try store.delete(photoID: 1), "deleting it twice is not a deletion")
+        XCTAssertFalse(try store.delete(hash: hash(1)), "deleting it twice is not a deletion")
     }
 
     func testDeleteAll() throws {
         for id in 1...5 {
-            try store.store(photoID: Int64(id), source: .embedded, fingerprint: nil,
+            try store.store(hash: hash(UInt8(id)), source: .embedded, fingerprint: nil,
                             width: 512, height: 512, jpeg: jpeg(UInt8(id)))
         }
         XCTAssertEqual(try store.count, 5)
@@ -140,26 +150,44 @@ final class PreviewStoreTests: XCTestCase {
     /// `previewStore` hook is what does it instead.
     func testDeletingAPhotoDeletesItsPreview() throws {
         let photoID = try makePhoto("one.dng")
-        try store.store(photoID: photoID, source: .embedded, fingerprint: nil,
+        let photoHash = try photoHash(photoID)
+        try store.store(hash: photoHash, source: .embedded, fingerprint: nil,
                         width: 512, height: 512, jpeg: jpeg(6))
         library.previewStore = store
 
         XCTAssertTrue(try library.deletePhoto(id: photoID))
-        XCTAssertNil(try store.preview(for: photoID))
+        XCTAssertNil(try store.preview(for: photoHash))
     }
 
     func testDeletingAPhotoLeavesOtherPreviewsAlone() throws {
         let doomed = try makePhoto("doomed.dng")
-        let kept = try makePhoto("kept.dng")
-        try store.store(photoID: doomed, source: .embedded, fingerprint: nil,
+        let kept = try photoHash(try makePhoto("kept.dng"))
+        try store.store(hash: try photoHash(doomed), source: .embedded, fingerprint: nil,
                         width: 512, height: 512, jpeg: jpeg(7))
-        try store.store(photoID: kept, source: .embedded, fingerprint: nil,
+        try store.store(hash: kept, source: .embedded, fingerprint: nil,
                         width: 512, height: 512, jpeg: jpeg(8))
         library.previewStore = store
 
         XCTAssertTrue(try library.deletePhoto(id: doomed))
         XCTAssertEqual(try store.count, 1)
         XCTAssertNotNil(try store.preview(for: kept))
+    }
+
+    /// The hash is the photo's identity, so a file that leaves the library and
+    /// comes back — under a new rowid, because rowids are the library's own
+    /// bookkeeping — still finds the picture that was built for it.
+    func testAPreviewSurvivesAReimportUnderANewRowid() throws {
+        let first = try makePhoto("frame.dng")
+        try makePhoto("other.dng")
+        let photoHash = try photoHash(first)
+        try store.store(hash: photoHash, source: .embedded, fingerprint: nil,
+                        width: 512, height: 512, jpeg: jpeg(9))
+
+        XCTAssertTrue(try library.deletePhoto(id: first))
+        let second = try makePhoto("frame.dng")
+        XCTAssertNotEqual(second, first, "the re-import got a fresh rowid")
+        XCTAssertEqual(try self.photoHash(second), photoHash)
+        XCTAssertEqual(try store.preview(for: photoHash)?.jpeg, jpeg(9))
     }
 
     // MARK: - Currency
@@ -187,13 +215,44 @@ final class PreviewStoreTests: XCTestCase {
 
     // MARK: - Persistence
 
+    /// The file is derived data, so one written by an older layout is thrown
+    /// away rather than migrated: opening it costs the previews, not an error.
+    func testAFileFromAnOlderLayoutIsDiscarded() throws {
+        let url = temp.directory.appendingPathComponent("old-previews.sqlite")
+        let old = try DatabaseQueue(path: url.path)
+        try old.write { db in
+            try db.execute(sql: """
+                CREATE TABLE previews (
+                    photo_id INTEGER PRIMARY KEY,
+                    source INTEGER NOT NULL,
+                    edit_fingerprint BLOB,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    jpeg BLOB NOT NULL,
+                    updated_at DATETIME NOT NULL
+                );
+                CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY);
+                INSERT INTO grdb_migrations (identifier) VALUES ('v1');
+                INSERT INTO previews VALUES (1, 0, NULL, 512, 512, x'0102', '2025-01-01 00:00:00.000');
+                """)
+        }
+        try old.close()
+
+        let reopened = try PreviewStore(url: url)
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.count, 0, "the old rows went with the old layout")
+        try reopened.store(hash: hash(1), source: .embedded, fingerprint: nil,
+                           width: 512, height: 512, jpeg: jpeg(1))
+        XCTAssertNotNil(try reopened.preview(for: hash(1)), "…and the file still works")
+    }
+
     func testTheRowsSurviveReopening() throws {
-        try store.store(photoID: 3, source: .rendered, fingerprint: EditState().fingerprint,
+        try store.store(hash: hash(3), source: .rendered, fingerprint: EditState().fingerprint,
                         width: 512, height: 400, jpeg: jpeg(5, count: 33))
         try store.close()
 
         store = try PreviewStore(url: library.previewsURL)
-        let row = try XCTUnwrap(try store.preview(for: 3))
+        let row = try XCTUnwrap(try store.preview(for: hash(3)))
         XCTAssertEqual(row.source, .rendered)
         XCTAssertEqual(row.width, 512)
         XCTAssertEqual(row.jpeg.count, 33)
