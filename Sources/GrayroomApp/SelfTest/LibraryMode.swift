@@ -166,7 +166,7 @@ extension SelfTest {
                 // 4. Multi-select, driven by **real mouse events** carrying
                 //    real modifier flags. Not `NSEvent.modifierFlags` and not a
                 //    tap gesture: see `ThumbnailGrid`.
-                check(cellView(cellID(ids[0])) != nil,
+                check(waitForCells(ids[0...2].map(cellID)),
                       "the grid put a click target behind every cell")
                 check(clickCell(cellID(ids[0])), "clicked the first cell")
                 check(app.highlightedPhotoIDs == [ids[0]],

@@ -367,6 +367,44 @@ enum SelfTest {
         return nil
     }
 
+    /// The same view, waited for.
+    ///
+    /// `LazyVGrid` materialises a cell on a run-loop turn of SwiftUI's own,
+    /// some time after the model behind the grid changed — an import landing, a
+    /// folder filtering the grid, a trip through the loupe rebuilding it.
+    /// Reading the view straight after the change that asks for it is a race,
+    /// and under load the test loses it: measured at one run in three, the grid
+    /// had no click target at all when the first check ran. So every check that
+    /// needs a cell waits for it here, turning the run loop so the layout it is
+    /// waiting for can happen.
+    ///
+    /// Bounded on its own as well as by the run's deadline, so a cell that
+    /// genuinely never appears fails its check instead of eating the rest of
+    /// the run.
+    static func waitForCell(_ identifier: String, timeout: TimeInterval = 5) -> NSView? {
+        let started = Date()
+        let limit = min(started.addingTimeInterval(timeout), deadline)
+        var turns = 0
+        while true {
+            if let view = cellView(identifier), view.window != nil {
+                if turns > 0 {
+                    log(String(format: "self-test: %@ took %.3f s to appear (%d turns)",
+                               identifier, -started.timeIntervalSinceNow, turns))
+                }
+                return view
+            }
+            guard Date() < limit else { return nil }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            turns += 1
+        }
+    }
+
+    /// Whether the grid has a click target behind every one of these cells,
+    /// waiting for them the way `waitForCell` does.
+    static func waitForCells(_ identifiers: [String], timeout: TimeInterval = 5) -> Bool {
+        identifiers.allSatisfy { waitForCell($0, timeout: timeout) != nil }
+    }
+
     /// Whether this app can read the file at all — the same probe the importer
     /// uses, so a file that fails here is one the import was always going to
     /// reject.
@@ -396,7 +434,7 @@ enum SelfTest {
                                   modifiers: NSEvent.ModifierFlags = [],
                                   clickCount: Int = 1,
                                   fromTopLeft: CGPoint? = nil) -> Bool {
-        guard let view = cellView(identifier), let window = view.window else {
+        guard let view = waitForCell(identifier), let window = view.window else {
             log("self-test: no click target \(identifier)")
             return false
         }

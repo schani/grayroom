@@ -422,7 +422,7 @@ extension SelfTest {
 
     /// How wide the grid is drawing its cells right now.
     static func libraryCellWidth(_ app: AppModel) -> Double {
-        app.visiblePhotoIDs.first.flatMap { cellView(cellID($0)) }
+        app.visiblePhotoIDs.first.flatMap { waitForCell(cellID($0)) }
             .flatMap(screenFrame(of:)).map { Double($0.width) } ?? 0
     }
 
