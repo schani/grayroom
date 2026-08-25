@@ -528,7 +528,6 @@ extension SelfTest {
     }
 
     static func finishImport(_ failures: [String]) -> Never {
-        restoreLastOpenedFile()
         if failures.isEmpty {
             log("import self-test: PASS")
             exit(0)

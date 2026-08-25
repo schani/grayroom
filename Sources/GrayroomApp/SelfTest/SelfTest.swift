@@ -131,18 +131,6 @@ enum SelfTest {
     /// (and therefore its layout, its rows and its click targets) alive.
     static func stayOutOfTheWay() {
         guard isRequested else { return }
-        // Before anything opens a file, because opening one overwrites this.
-        //
-        // These tests open photos, and the app remembers the last file it
-        // opened in a preference `CFFIXED_USER_HOME` does *not* redirect —
-        // cfprefsd keys off the real user. Left alone it leaks into the next
-        // self-test's library (measured: it made the import test's "the JPEG is
-        // new to the library" fail on every second run), so every mode puts it
-        // back before it exits, and `openInitialDocument` does not act on it
-        // during a self-test at all.
-        if previousLastFile == nil {
-            previousLastFile = UserDefaults.standard.string(forKey: AppModel.lastFileDefaultsKey)
-        }
         guard windowObserver == nil else { return }
         windowObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didUpdateNotification, object: nil, queue: .main
@@ -832,17 +820,6 @@ enum SelfTest {
         return found
     }
 
-    static var previousLastFile: String?
-
-    /// Puts back what the app will reopen at the next launch — see
-    /// `startIfRequested`.
-    static func restoreLastOpenedFile() {
-        if let previousLastFile {
-            UserDefaults.standard.set(previousLastFile, forKey: AppModel.lastFileDefaultsKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: AppModel.lastFileDefaultsKey)
-        }
-    }
 
     // MARK: - Waiting
 

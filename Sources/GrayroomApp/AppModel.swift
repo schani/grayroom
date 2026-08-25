@@ -1210,7 +1210,11 @@ final class AppModel {
         // as long as the new file takes to open.
         cameraDescription = ""
         lensDescription = ""
-        UserDefaults.standard.set(url.path, forKey: AppModel.lastFileDefaultsKey)
+        // Not under a self-test: `CFFIXED_USER_HOME` does not redirect
+        // cfprefsd, so this would land in the real user's preferences.
+        if !SelfTest.isRequested {
+            UserDefaults.standard.set(url.path, forKey: AppModel.lastFileDefaultsKey)
+        }
 
         store.replace(EditState(), named: nil)
         store.selectedMaskID = nil

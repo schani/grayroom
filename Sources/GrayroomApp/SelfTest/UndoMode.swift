@@ -71,9 +71,6 @@ extension SelfTest {
         ]
 
         runSteps(steps, model: model) {
-            // As in `paint`: put back the file the next launch would reopen,
-            // which is not this test's business to leave behind.
-            restoreLastOpenedFile()
             if failures.isEmpty {
                 log("undo self-test: PASS (all \(steps.count) checkpoints)")
                 exit(0)

@@ -689,7 +689,6 @@ extension SelfTest {
     }
 
     static func finishLibrary(_ failures: [String]) -> Never {
-        restoreLastOpenedFile()
         if failures.isEmpty {
             log("library self-test: PASS")
             exit(0)
