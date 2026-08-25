@@ -11,38 +11,39 @@ import QuartzCore
 /// scroll position surviving a trip through Develop untouched, and the loupe.
 ///
 /// Both are driven through the real window with real keystrokes and the real
-/// `NSScrollView`, because both are things no unit test can see: SwiftUI will
-/// not say where a `ScrollView` is scrolled to, and "the loupe is filling the
-/// content area" is a fact about views.
+/// `NSScrollView`, because both are things no unit test can see: "the grid did
+/// not move" is a claim about a scroll view that laid itself out, and "the
+/// loupe is filling the content area" is a fact about views.
 extension SelfTest {
     // MARK: - The grid's scroll position
 
-    /// The scroll view the library grid is drawn in — found through the
-    /// `ScrollBridge` the grid puts in its own content.
-    static func gridScrollView() -> NSScrollView? {
-        gridScrollBridge()?.enclosingScrollView
+    /// The `NSScrollView` the library grid is drawn in, found through a cell of
+    /// it: a `ClickCatcher` is a real `NSView` inside the scrolled content, and
+    /// `enclosingScrollView` is the rest. `nil` when there is no grid in the
+    /// window at all — which is what a rebuilt scroll view looks like on the
+    /// pass it is missing.
+    static func gridScrollView(_ app: AppModel) -> NSScrollView? {
+        for id in app.visiblePhotoIDs {
+            if let scroll = cellView(cellID(id))?.enclosingScrollView { return scroll }
+        }
+        return nil
     }
 
-    static func gridScrollBridge() -> ScrollBridgeView? {
-        views(identified: ScrollBridge.gridIdentifier)
-            .compactMap { $0 as? ScrollBridgeView }
-            .first { $0.window != nil }
-    }
-
-    /// Where the grid is scrolled to right now, read off AppKit rather than out
-    /// of the model — the model's copy is what is under test.
-    static func gridScrollOffset() -> Double? {
-        gridScrollBridge()?.offset
+    /// Where the grid is scrolled to right now — the reading its own
+    /// `ScrollView` publishes, which is the only claim the app makes about its
+    /// position (see `AppModel.libraryGridScroll`).
+    static func gridScrollOffset(_ app: AppModel) -> Double? {
+        app.libraryGridScroll?.offset
     }
 
     /// Scrolls the grid the way a scroll wheel does: by moving the clip view.
     ///
     /// `y` is the distance into the content, the same number `gridScrollOffset`
     /// reports, so the clip view's own top inset is taken off on the way in —
-    /// see `ScrollBridgeView.offset`.
+    /// see `GridScrollMetrics`.
     @discardableResult
-    static func scrollGrid(to y: Double) -> Bool {
-        guard let scroll = gridScrollView() else {
+    static func scrollGrid(_ app: AppModel, to y: Double) -> Bool {
+        guard let scroll = gridScrollView(app) else {
             log("library self-test: the grid has no scroll view to scroll")
             return false
         }
@@ -53,9 +54,8 @@ extension SelfTest {
     }
 
     /// How far the grid *can* scroll: zero when everything fits.
-    static func gridScrollRange() -> Double {
-        guard let scroll = gridScrollView(), let document = scroll.documentView else { return 0 }
-        return max(0, Double(document.frame.height - scroll.contentView.bounds.height))
+    static func gridScrollRange(_ app: AppModel) -> Double {
+        app.libraryGridScroll?.range ?? 0
     }
 
     /// A cell of the grid whose middle is under the **develop** canvas, so a
@@ -75,7 +75,7 @@ extension SelfTest {
 
     /// Whether a cell is inside the part of the grid the user can see.
     static func cellIsInView(_ id: Int64) -> Bool {
-        guard let cell = cellView(cellID(id)), let scroll = gridScrollView(),
+        guard let cell = cellView(cellID(id)), let scroll = cell.enclosingScrollView,
               let document = scroll.documentView else { return false }
         return scroll.documentVisibleRect.intersects(cell.convert(cell.bounds, to: document))
     }
@@ -85,7 +85,7 @@ extension SelfTest {
     /// the clip view has its middle outside it, and the click aimed there is
     /// clipped away before it reaches anything.
     static func cellIsWhollyInView(_ id: Int64) -> Bool {
-        guard let cell = cellView(cellID(id)), let scroll = gridScrollView(),
+        guard let cell = cellView(cellID(id)), let scroll = cell.enclosingScrollView,
               let document = scroll.documentView else { return false }
         return scroll.documentVisibleRect.contains(cell.convert(cell.bounds, to: document))
     }
@@ -105,25 +105,24 @@ extension SelfTest {
     /// time, not what it had when it moved). One sample per pass is one sample
     /// per frame the user could have seen, which is exactly the claim.
     ///
-    /// The clip view is looked up **on every pass** rather than captured once.
-    /// A captured one goes on answering after the grid it belonged to has been
-    /// taken out of the window, so the very transition under test — a scroll
-    /// view rebuilt from scratch — would leave no trace in the log at all
-    /// (measured: it is what made the first version of this recorder pass over
-    /// the loupe's own flash).
+    /// What is sampled is the grid's own reading of itself — the model field
+    /// `onScrollGeometryChange` writes — and that reading goes `nil` when the
+    /// grid leaves the window, so the transition under test (a scroll view
+    /// rebuilt from scratch) shows up in the log as `noGrid` rather than
+    /// vanishing from it.
     static var gridOffsetLog: [Double] = []
     private static var gridOffsetSampler: CFRunLoopObserver?
 
     /// What the log holds for a pass with no grid in the window.
     static let noGrid = -1.0
 
-    static func startRecordingGridOffset() {
+    static func startRecordingGridOffset(_ app: AppModel) {
         stopRecordingGridOffset()
         gridOffsetLog = []
         let observer = CFRunLoopObserverCreateWithHandler(
             kCFAllocatorDefault, CFRunLoopActivity.beforeWaiting.rawValue, true, 0
         ) { _, _ in
-            let now = gridScrollOffset() ?? noGrid
+            let now = gridScrollOffset(app) ?? noGrid
             guard gridOffsetLog.last != now else { return }
             gridOffsetLog.append(now)
         }
@@ -169,22 +168,22 @@ extension SelfTest {
                 app.libraryThumbnailSize = ImportModel.maximumThumbnailSize
             },
             {
-                check(gridScrollView() != nil,
+                check(gridScrollView(app) != nil,
                       "the grid is drawn in a real NSScrollView, which is what its "
                           + "position can be read off")
-                let range = gridScrollRange()
+                let range = gridScrollRange(app)
                 check(range > 100,
                       "…with somewhere to scroll at \(Int(app.libraryThumbnailSize)) pt "
                           + "(\(Int(range)) pt of travel)")
-                check(scrollGrid(to: min(300, range)), "scrolled the grid down")
+                check(scrollGrid(app, to: min(300, range)), "scrolled the grid down")
             },
             {
-                noted = gridScrollOffset() ?? 0
-                scrollViewInGrid = gridScrollView().map(ObjectIdentifier.init)
+                noted = gridScrollOffset(app) ?? 0
+                scrollViewInGrid = gridScrollView(app).map(ObjectIdentifier.init)
                 check(noted > 10, "the grid is scrolled down (\(noted) pt)")
                 check(app.highlightedPhotoIDs == [subject],
                       "…with the same cell still selected")
-                startRecordingGridOffset()
+                startRecordingGridOffset(app)
                 sendKey("d", modifiers: [], window: window, virtualKey: 2)
             },
             {
@@ -194,15 +193,15 @@ extension SelfTest {
                 // The grid is still there, laid out, at the offset it was left
                 // at — which is the whole mechanism. A scroll view that had been
                 // torn down would answer nothing at all here.
-                check(gridScrollView().map(ObjectIdentifier.init) == scrollViewInGrid,
+                check(gridScrollView(app).map(ObjectIdentifier.init) == scrollViewInGrid,
                       "…while the grid's scroll view is the very same object, not a "
                           + "rebuilt one")
-                let held = gridScrollOffset() ?? -1
+                let held = gridScrollOffset(app) ?? -1
                 check(abs(held - noted) < 0.001,
                       "…still holding the offset itself (\(held) pt, was \(noted) pt)")
-                check(gridScrollRange() > 100,
+                check(gridScrollRange(app) > 100,
                       "…and still laid out at its full height, so SwiftUI did not "
-                          + "collapse it (\(Int(gridScrollRange())) pt of travel)")
+                          + "collapse it (\(Int(gridScrollRange(app))) pt of travel)")
                 // Nothing behind the canvas may take a click. A cell of the
                 // hidden grid is a `ClickCatcher`, a real `NSView` that takes
                 // mouse-downs, so `.allowsHitTesting(false)` on the Library has
@@ -231,11 +230,11 @@ extension SelfTest {
         ]
 
         runSteps(steps, model: app) {
-            let now = gridScrollOffset() ?? -1
+            let now = gridScrollOffset(app) ?? -1
             stopRecordingGridOffset()
             check(app.mode == .library, "g came back to the grid")
             check(findCanvas() == nil, "…and the develop canvas left the window")
-            check(gridScrollView().map(ObjectIdentifier.init) == scrollViewInGrid,
+            check(gridScrollView(app).map(ObjectIdentifier.init) == scrollViewInGrid,
                   "…in the same scroll view it went to Develop in")
             check(now == noted,
                   "…at bit-identical the offset it was left at (\(now) pt, was \(noted) pt)")
@@ -276,12 +275,12 @@ extension SelfTest {
 
         let steps: [() -> Void] = [
             {
-                let range = gridScrollRange()
-                check(scrollGrid(to: min(300, range)), "scrolled the grid well down again")
+                let range = gridScrollRange(app)
+                check(scrollGrid(app, to: min(300, range)), "scrolled the grid well down again")
             },
             {
-                noted = gridScrollOffset() ?? 0
-                scrollViewInGrid = gridScrollView().map(ObjectIdentifier.init)
+                noted = gridScrollOffset(app) ?? 0
+                scrollViewInGrid = gridScrollView(app).map(ObjectIdentifier.init)
                 check(noted > 10, "the grid is scrolled down (\(noted) pt)")
                 // The *last* cell on screen at this offset, not the first: a
                 // grid that comes back at zero would still have the first one
@@ -293,7 +292,7 @@ extension SelfTest {
                 }
                 subject = onScreen
                 check(clickCell(cellID(subject)), "clicked a cell that is in view")
-                startRecordingGridOffset()
+                startRecordingGridOffset(app)
                 sendKey("e", modifiers: [], window: window, virtualKey: 14)
             },
             {
@@ -304,10 +303,10 @@ extension SelfTest {
         ]
 
         runSteps(steps, model: app) {
-            let now = gridScrollOffset() ?? -1
+            let now = gridScrollOffset(app) ?? -1
             stopRecordingGridOffset()
             check(app.libraryViewMode == .grid, "g came back to the grid")
-            check(gridScrollView().map(ObjectIdentifier.init) == scrollViewInGrid,
+            check(gridScrollView(app).map(ObjectIdentifier.init) == scrollViewInGrid,
                   "…in the same scroll view it went to the loupe in, not a rebuilt one")
             check(cellIsInView(subject), "…with the loupe's photo in view")
             // The regression test for the flash. The loupe opened on a cell the
@@ -333,7 +332,7 @@ extension SelfTest {
             // Back to the size and the position the rest of the run expects
             // to find the grid at.
             app.libraryThumbnailSize = ImportModel.defaultThumbnailSize
-            scrollGrid(to: 0)
+            scrollGrid(app, to: 0)
             settle(app) {
                 runLoupeChecks(app: app, window: window, check: check, failures: failures)
             }

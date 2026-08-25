@@ -130,13 +130,12 @@ struct LibraryView: View {
             // the only way there from the grid).
             onOpen: { model.libraryClick($0.id, modifiers: []); model.showLoupe() },
             help: { $0.firstLocation ?? "\($0.originalName) — no file on disk" },
-            // The grid's scroll position is not state anybody keeps: this view
-            // is never taken out of the window, so the scroll view holds it
-            // itself (see `RootView`). The name is how the self-test reads it.
-            scrollIdentifier: ScrollBridge.gridIdentifier,
-            // Only while it is showing: the width a *hidden* grid reports is
-            // the pinned one, and recording that would make the pin its own
-            // input.
+            // Read, not kept: this view is never taken out of the window, so
+            // the scroll view holds its own position (see `RootView`) and
+            // nothing here ever puts one back. What the model carries is the
+            // reading, which is how the self-test can say the position never
+            // moved.
+            onScroll: { model.libraryGridScroll = $0 },
             cell: { photo in
                 LibraryCell(photo: photo,
                             size: model.libraryThumbnailSize,

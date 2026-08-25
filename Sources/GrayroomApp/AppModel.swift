@@ -78,6 +78,12 @@ final class AppModel {
     /// consumed by the view. This is what makes `g` from the develop view land
     /// on the photo you were just editing rather than at the top of the grid.
     var libraryScrollTarget: Int64?
+    /// Where the grid is scrolled to, as its `ScrollView` reports it, and `nil`
+    /// while there is no grid in the window at all. Nothing puts it back: the
+    /// Library view stays in the window while Develop and the loupe are in
+    /// front of it (see `RootView`, `LibraryView`), so the position is the
+    /// scroll view's own and this is only a reading of it.
+    var libraryGridScroll: GridScrollMetrics?
     /// The grid's pictures, development-aware — see `PreviewBuilder`.
     let previews = PreviewBuilder()
     /// The camera's own pictures, at loupe resolution, for photos that have

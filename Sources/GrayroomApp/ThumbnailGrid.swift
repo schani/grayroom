@@ -41,10 +41,10 @@ struct ThumbnailGrid<Item: Identifiable, Cell: View>: View where Item.ID: Sendab
     /// because the cell is not hit-testable (see below) and a tooltip needs a
     /// tracking area on something that is.
     var help: ((Item) -> String?)?
-    /// A name for the grid's `NSScrollView`, so the self-test can find it and
-    /// read the grid's real position — see `ScrollBridge`. `nil` for a grid
-    /// nobody addresses from outside (the import window's).
-    var scrollIdentifier: String?
+    /// Told where the grid is scrolled to whenever that changes, and `nil` when
+    /// the grid leaves the window — which is a different thing from being at
+    /// the top. `nil` itself for a grid nobody asks (the import window's).
+    var onScroll: ((GridScrollMetrics?) -> Void)?
     @ViewBuilder let cell: (Item) -> Cell
 
     /// The scroll view's position, which is how a cell is scrolled to.
@@ -79,17 +79,18 @@ struct ThumbnailGrid<Item: Identifiable, Cell: View>: View where Item.ID: Sendab
                 // What makes the cells' `.id`s addressable by `ScrollPosition`.
                 .scrollTargetLayout()
                 .padding(ThumbnailGrid.padding)
-                // Inside the scrolled content, because that is what has an
-                // `enclosingScrollView` — see `ScrollBridge`. Only a grid
-                // that was given a name gets one, so the self-test cannot
-                // find the import window's instead of the library's.
-                .background {
-                    if let scrollIdentifier {
-                        ScrollBridge(identifier: scrollIdentifier)
-                    }
-                }
             }
             .scrollPosition($position)
+            .onScrollGeometryChange(for: GridScrollMetrics.self) {
+                GridScrollMetrics(contentOffset: $0.contentOffset.y,
+                                  insetTop: $0.contentInsets.top,
+                                  insetBottom: $0.contentInsets.bottom,
+                                  contentHeight: $0.contentSize.height,
+                                  containerHeight: $0.containerSize.height)
+            } action: { _, metrics in
+                onScroll?(metrics)
+            }
+            .onDisappear { onScroll?(nil) }
             .onChange(of: scrollTarget, initial: true) { _, target in
                 guard let target else { return }
                 position.scrollTo(id: target, anchor: .center)
