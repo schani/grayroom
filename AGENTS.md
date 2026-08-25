@@ -33,3 +33,16 @@ top-left identity plate.
   harness.
 - `library.sqlite` is the only source of truth; there are no sidecars.
   `previews.sqlite` beside it holds derived, disposable 512 px previews.
+
+## Database evolution
+
+This is still heavily under development, so we'll be changing the database
+layout constantly. For the time being we will do that by deleting the existing
+database and just changing the original definition in the code, as opposed to
+using migration. Before that happens warn the user though and ask for
+confirmation.
+
+## New features
+
+We only need features when we actually need. The user will tell you when, so don't
+add or propose features yourself unless the user has explicitly asked for that.
