@@ -174,11 +174,6 @@ struct GrayroomApp: App {
                 }
                 Divider()
             }
-            // Lightroom keeps its selection commands in the Edit menu.
-            CommandGroup(after: .pasteboard) {
-                Divider()
-                Button("Select Similar Photos") { model.selectSimilarPhotos() }
-            }
             // Lightroom's colour labels, on Lightroom's keys: 6/7/8/9 for
             // red/yellow/green/blue, and purple with no key at all (Lightroom
             // does not give it one). 1-5 are deliberately left alone — they are

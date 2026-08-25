@@ -52,7 +52,6 @@ struct Show: ParsableCommand {
             out += "gps:           -\n"
         }
         out += "color:         \(record.color.name)\n"
-        out += "score:         \(Format.score(record.aestheticScore))\n"
 
         let tags = try library.tags(for: id).map(\.name)
         out += "tags:          \(Format.orDash(tags.joined(separator: ", ")))\n"

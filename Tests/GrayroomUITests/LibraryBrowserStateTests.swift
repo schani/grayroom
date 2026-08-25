@@ -220,33 +220,3 @@ final class LibraryBrowserStateTests: XCTestCase {
         XCTAssertEqual(state.visiblePhotoIDs, [1, 2, 4], "…or what the grid shows")
     }
 }
-
-// MARK: - Select Similar Photos
-
-extension LibraryBrowserStateTests {
-    func testExtendSelectionAddsToTheHighlight() {
-        let state = browser()
-        state.clickPhoto(1, modifiers: [])
-        let added = state.extendSelection(with: [1, 2, 4])
-        XCTAssertEqual(added, [1, 2, 4])
-        XCTAssertEqual(state.highlightedPhotoIDs, [1, 2, 4])
-        XCTAssertEqual(state.photoSelection.anchor, 1, "the photo the user picked")
-    }
-
-    /// A photo the selected folder does not show must not get a ring.
-    func testExtendSelectionSkipsPhotosTheFolderHides() {
-        let state = browser()
-        state.selection = .folder(path: "/pics/2024")
-        state.clickPhoto(1, modifiers: [])
-        let added = state.extendSelection(with: [1, 3])
-        XCTAssertEqual(added, [1], "photo 3 is filed under 2025")
-        XCTAssertEqual(state.highlightedPhotoIDs, [1])
-    }
-
-    func testExtendSelectionCountsInTheBottomBar() {
-        let state = browser()
-        state.clickPhoto(1, modifiers: [])
-        state.extendSelection(with: [2, 4])
-        XCTAssertTrue(state.countLabel.hasSuffix("· 3 selected"), state.countLabel)
-    }
-}

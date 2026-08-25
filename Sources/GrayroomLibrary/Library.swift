@@ -193,13 +193,6 @@ public final class Library {
                 CREATE INDEX index_photo_tags_on_tag_id ON photo_tags(tag_id);
                 """)
         }
-        migrator.registerMigration("v2") { db in
-            try db.execute(sql: """
-                ALTER TABLE photos ADD COLUMN aesthetic_score REAL;
-                ALTER TABLE photos ADD COLUMN feature_print BLOB;
-                CREATE INDEX index_photos_on_aesthetic_score ON photos(aesthetic_score);
-                """)
-        }
         return migrator
     }
 }

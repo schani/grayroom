@@ -589,7 +589,7 @@ extension SelfTest {
                       "…with no error on the bar (\(app.errorMessage ?? "none"))")
                 check(!app.tasks.tasks.contains { $0.title.hasPrefix("Exporting ") },
                       "…and the export's task went away")
-                runCullingChecks(app: app, window: window, check: check, failures: failures)
+                runSortChecks(app: app, check: check, failures: failures)
             }
         }
     }

@@ -24,9 +24,6 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
     public var altitude: Double?
     public var byteSize: Int64
     public var color: ColorLabel
-    /// Vision's aesthetics score, −1…1, `nil` until the photo is analysed —
-    /// one of the three keys the grid can be sorted by.
-    public var aestheticScore: Double?
     /// Every path the library has for this photo, sorted. Empty when it has
     /// none at all — the "missing" case the Folders panel gathers.
     public var locations: [String]
@@ -53,7 +50,6 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
                 altitude: Double? = nil,
                 byteSize: Int64 = 0,
                 color: ColorLabel = .unlabeled,
-                aestheticScore: Double? = nil,
                 locations: [String] = [],
                 developmentCount: Int = 0,
                 tags: [String] = [],
@@ -72,7 +68,6 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
         self.altitude = altitude
         self.byteSize = byteSize
         self.color = color
-        self.aestheticScore = aestheticScore
         self.locations = locations
         self.developmentCount = developmentCount
         self.tags = tags
@@ -97,7 +92,6 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
                   altitude: photo.altitude,
                   byteSize: photo.byteSize,
                   color: photo.color,
-                  aestheticScore: photo.aestheticScore,
                   locations: summary.locations,
                   developmentCount: summary.developmentCount,
                   tags: summary.tags,
@@ -136,12 +130,11 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
 ///
 /// # Order
 ///
-/// Lightroom's Sort control: one of three keys, ascending or descending. The
+/// Lightroom's Sort control: one of two keys, ascending or descending. The
 /// default is capture date ascending, ties broken by row id — the same rule the
 /// import grid sorts by, so a card looks the same before and after it is
-/// imported. A photo with no value for the key (an undated frame, an unscored
-/// one) goes last whichever way round the sort runs, rather than pretending to
-/// have been shot at the epoch or scored zero.
+/// imported. An undated frame goes last whichever way round the sort runs,
+/// rather than pretending to have been shot at the epoch.
 @Observable
 public final class PhotoCatalog {
     public private(set) var photos: [CatalogPhoto] = []
@@ -245,8 +238,6 @@ public final class PhotoCatalog {
             return ordered(a, b, ascending: ascending) { $0.capturedAt }
         case .fileName:
             return ordered(a, b, ascending: ascending) { $0.originalName.lowercased() }
-        case .aestheticScore:
-            return ordered(a, b, ascending: ascending) { $0.aestheticScore }
         }
     }
 
@@ -295,7 +286,6 @@ public final class PhotoCatalog {
         switch sortKey {
         case .captureTime: return existing.capturedAt != photo.capturedAt
         case .fileName: return existing.originalName != photo.originalName
-        case .aestheticScore: return existing.aestheticScore != photo.aestheticScore
         }
     }
 
