@@ -6,8 +6,8 @@ import GrayroomUI
 
 /// `GRAYROOM_SELFTEST=library` — see `SelfTest.Mode.library`. The grid, the
 /// module keys, the colour-label keys and the development-aware previews;
-/// the Folders panel is in `FolderPanelChecks.swift` and the toolbar, the
-/// menus and the export sheet in `WindowChecks.swift`.
+/// the Folders panel is in `FolderPanelChecks.swift` and the window's chrome,
+/// the menus and the export sheet in `WindowChecks.swift`.
 extension SelfTest {
     // MARK: - The library test
 
@@ -54,7 +54,9 @@ extension SelfTest {
         // 2. Lightroom's keys, as AppKit sees them. A disabled item would
         //    swallow its key equivalent silently (see UndoMenu.swift).
         for (title, key) in [("Library", "g"), ("Loupe", "e"), ("Develop", "d"), ("Red", "6"),
-                             ("Yellow", "7"), ("Green", "8"), ("Blue", "9")] {
+                             ("Yellow", "7"), ("Green", "8"), ("Blue", "9"),
+                             ("Before / After", "\\"), ("Brush Tool", "b"),
+                             ("Targeted Adjustment Tool", "t")] {
             let item = findMenuItemDeep(titled: title)
             check(item?.keyEquivalent == key,
                   "'\(title)' carries the bare key '\(key)' (got '\(item?.keyEquivalent ?? "missing")')")

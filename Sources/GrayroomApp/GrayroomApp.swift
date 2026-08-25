@@ -92,11 +92,10 @@ struct GrayroomApp: App {
         Window("Grayroom", id: "main") {
             RootView(model: model)
         }
-        // The controls live *in* the title bar (see `RootView.toolbar`), so the
-        // title text is off: one bar across the top rather than a line of text
-        // with a row of buttons under it. The window keeps its `title` string —
-        // that is what `applicationDidFinishLaunching` and `KeyRouter` find it
-        // by, and what accessibility reads out — only the drawn text goes.
+        // A plain title bar: traffic lights and nothing else. The window keeps
+        // its `title` string — that is what `applicationDidFinishLaunching` and
+        // `KeyRouter` find it by, and what accessibility reads out — only the
+        // drawn text goes.
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {
@@ -150,6 +149,13 @@ struct GrayroomApp: App {
                     .keyboardShortcut("e", modifiers: [])
                 Button("Develop") { model.showDevelop() }
                     .keyboardShortcut("d", modifiers: [])
+                Divider()
+                // Lightroom's before/after key. `KeyRouter` claims `\` and
+                // holds it, so this item is what makes the key discoverable and
+                // what gives the comparison a latch of its own.
+                Toggle("Before / After", isOn: Binding(get: { model.showBeforeAfter },
+                                                       set: { model.showBeforeAfter = $0 }))
+                    .keyboardShortcut("\\", modifiers: [])
                 Divider()
                 // macOS's own shortcut for a sidebar. In *this* group and not
                 // `CommandGroup(replacing: .sidebar)`: replacing that group
@@ -207,15 +213,17 @@ struct GrayroomApp: App {
                 Button("Zoom to 100%") { model.zoomToActualSize() }
                     .keyboardShortcut("1", modifiers: .command)
                 Divider()
-                Toggle("Before / After", isOn: Binding(get: { model.showBeforeAfter },
-                                                       set: { model.showBeforeAfter = $0 }))
                 Toggle("Mask Overlay", isOn: Binding(get: { model.showMaskOverlay },
                                                      set: { model.showMaskOverlay = $0 }))
                 Divider()
+                // Lightroom's tool keys, and Lightroom's way back out of a
+                // tool: the same key again returns to the hand.
                 Button("Brush Tool") { model.tool = model.tool == .brush ? .pan : .brush }
+                    .keyboardShortcut("b", modifiers: [])
                 Button("Targeted Adjustment Tool") {
                     model.tool = model.tool == .targeted ? .pan : .targeted
                 }
+                .keyboardShortcut("t", modifiers: [])
                 Button("New Mask") { model.store.addMask(); model.tool = .brush }
             }
         }

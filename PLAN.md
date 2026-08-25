@@ -231,7 +231,7 @@ picked); tags are free-form many-to-many. No ratings for now.
      real `NSEvent` (a tap gesture cannot see them).
    - The keyboard is **not** view focus. One local `NSEvent` monitor
      (`KeyRouter`) dispatches every bare key by key window and mode, so the
-     arrows keep working after a click on the toolbar or the size slider, and
+     arrows keep working after a click on the size slider or a folder row, and
      stands aside for text fields, sheets and panels.
    - Colour labels, Lightroom's keys: `6`/`7`/`8`/`9` = red/yellow/green/blue,
      purple menu-only (Lightroom gives it no key), the same key again clears the
@@ -309,7 +309,7 @@ picked); tags are free-form many-to-many. No ratings for now.
      the real canvas, a scroll pans it, and the percentage in the status bar
      follows; and an edit made in Develop is in the loupe on the keystroke, at
      the decode's own resolution, on the very texture the develop view had
-     rendered) — and then the Folders panel, the toolbar, the menus, the
+     rendered) — and then the Folders panel, the window's chrome, the menus, the
      export sheet, and last View › Sort: both keys and both directions
      reordering the grid through the real menu items.
 

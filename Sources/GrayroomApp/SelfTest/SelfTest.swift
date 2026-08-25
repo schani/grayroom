@@ -17,7 +17,7 @@ import UniformTypeIdentifiers
 /// grid and its selection commands), `library` (the grid, the g/d module keys
 /// and the colour-label keys, all as real keystrokes) and `library2` (the
 /// Library module's two views — the grid's scroll position and the loupe — and
-/// the Folders panel, the toolbar and the export sheet). All print PASS/FAIL
+/// the Folders panel, the menus and the export sheet). All print PASS/FAIL
 /// lines and exit non-zero on failure.
 ///
 /// Repro (c): the whole app, in its own process, painting a stroke with real
@@ -26,7 +26,7 @@ import UniformTypeIdentifiers
 ///
 /// It exists because the unit tests can only prove that the canvas's *own* math
 /// is self-consistent. This is the only check that runs the real SwiftUI window,
-/// the real toolbar/sidebar layout, the real decode and the real presented
+/// the real sidebar layout, the real decode and the real presented
 /// drawable, i.e. the thing the user actually reported on.
 ///
 /// Nothing here is reachable without the environment variable, and it writes a
@@ -70,7 +70,7 @@ enum SelfTest {
         case library
         /// The other half of the Library run, in a process of its own: the
         /// grid's scroll position across a trip through Develop, the loupe,
-        /// the Folders panel, the toolbar, the menus and the export sheet.
+        /// the Folders panel, the window's chrome, the menus and the export sheet.
         ///
         /// Two processes rather than one because the Library test covers two
         /// unrelated halves — the grid and its previews here, the module's
@@ -431,7 +431,7 @@ enum SelfTest {
     /// Every view in this app's windows with a given `identifier`, popovers,
     /// sheets and title bars included — the first two are windows of their own
     /// (the activity centre's list lives in one), and the third is where the
-    /// toolbar's controls are (see `searchRoot(of:)`).
+    /// window's own chrome is (see `searchRoot(of:)`).
     static func views(identified identifier: String) -> [NSView] {
         var found: [NSView] = []
         func search(_ view: NSView) {
@@ -684,58 +684,6 @@ enum SelfTest {
         return true
     }
 
-    /// Clicks one segment of a named `NSSegmentedControl`.
-    ///
-    /// With a **real mouse event**, on the segment's own item view. Not
-    /// target/action: SwiftUI's `Picker` coordinator answers `selectionChanged:`
-    /// by reading the segment the *user* pressed, and a selection written from
-    /// outside plus a synthesized action leaves the binding alone (measured —
-    /// the control moved to Develop and the app stayed in the library). The
-    /// event goes through the application's queue because `NSSegmentedControl`
-    /// tracks the mouse in a loop of its own and has to be able to dequeue the
-    /// mouse-up.
-    @discardableResult
-    static func selectSegment(named name: String, at index: Int) -> Bool {
-        guard let segmented = control(named: name) as? NSSegmentedControl else {
-            log("self-test: no segmented control named '\(name)'")
-            return false
-        }
-        guard index < segmented.segmentCount else {
-            log("self-test: '\(name)' has only \(segmented.segmentCount) segments")
-            return false
-        }
-        guard let window = segmented.window else { return false }
-        // The item views, left to right — the only thing that knows where one
-        // segment stops and the next begins when the widths are automatic.
-        let items = segmented.subviews
-            .filter { String(describing: type(of: $0)).contains("SegmentItemView") }
-            .sorted { $0.frame.minX < $1.frame.minX }
-        let point: CGPoint
-        if items.count == segmented.segmentCount {
-            let item = items[index]
-            point = item.convert(CGPoint(x: item.bounds.midX, y: item.bounds.midY), to: nil)
-        } else {
-            // No item views to aim at: split the control evenly, which is what
-            // `.pickerStyle(.segmented)` lays out anyway.
-            let bounds = segmented.bounds
-            let width = bounds.width / Double(segmented.segmentCount)
-            point = segmented.convert(
-                CGPoint(x: bounds.minX + width * (Double(index) + 0.5), y: bounds.midY), to: nil)
-        }
-        clickCounter += 1
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            guard let event = NSEvent.mouseEvent(
-                with: type, location: point, modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: window.windowNumber, context: nil,
-                eventNumber: clickCounter, clickCount: 1, pressure: 1)
-            else { return false }
-            NSApp.postEvent(event, atStart: false)
-        }
-        log("self-test: clicked segment \(index) of '\(name)' at \(point)")
-        return true
-    }
-
     /// Where a named control is on screen, or `nil` when it is not drawn at
     /// all — which is the assertion for anything that appears and disappears.
     static func controlFrame(named name: String) -> NSRect? {
@@ -760,10 +708,9 @@ enum SelfTest {
     /// find it: its class, its accessibility and its frame. The counterpart of
     /// `dumpMenus` for the parts of the UI that are views.
     ///
-    /// The toolbar is listed separately as well. Its controls are in the title
-    /// bar rather than the content view, and an item SwiftUI built without a
-    /// hosting view has no `NSView` to carry a `ControlProbe` at all — which is
-    /// the first thing to look at when a toolbar control cannot be found.
+    /// The window's toolbar — the one `NavigationSplitView` installs for its
+    /// sidebar button — is listed separately as well: its items are in the
+    /// title bar rather than the content view.
     static func dumpViews(in window: NSWindow) {
         guard let root = searchRoot(of: window) else { return }
         func walk(_ view: NSView, indent: String) {
@@ -969,6 +916,18 @@ enum SelfTest {
                 NSApp.sendEvent(event)
             }
         }
+    }
+
+    /// One half of a keystroke, for a key that means something while it is
+    /// *held* — `\`, whose press and release `KeyRouter` sees separately.
+    /// Through the queue, like every other key that router claims.
+    static func sendKeyHalf(virtualKey: CGKeyCode, down: Bool) {
+        log("self-test: sending key \(down ? "down" : "up") \(virtualKey)")
+        guard let source = CGEventSource(stateID: .privateState),
+              let cg = CGEvent(keyboardEventSource: source, virtualKey: virtualKey,
+                               keyDown: down),
+              let event = NSEvent(cgEvent: cg) else { fail("could not make a CGEvent") }
+        NSApp.postEvent(event, atStart: false)
     }
 
     static func describe(_ modifiers: NSEvent.ModifierFlags) -> String {

@@ -1,4 +1,3 @@
-import GrayroomCanvas
 import GrayroomCore
 import GrayroomLibrary
 import SwiftUI
@@ -9,9 +8,8 @@ import SwiftUI
 /// develop sidebar because none of it applies to a selection of photos — or, on
 /// `e`, the loupe with the whole window to itself, panel collapsed.
 /// **Develop** (`d`) is the canvas left/centre with a fixed 320 pt scrollable
-/// sidebar right. Both hang their controls in the window's own title bar and
-/// keep the one-line status bar at the bottom, so the activity indicator and
-/// the error line never move.
+/// sidebar right. Both keep the one-line status bar at the bottom, so the
+/// activity indicator and the error line never move.
 ///
 /// # Why the Library is never taken out of the window
 ///
@@ -28,9 +26,6 @@ import SwiftUI
 /// go with it.
 struct RootView: View {
     @Bindable var model: AppModel
-    /// Held here rather than in the toolbar builder: `ToolbarContent` is not a
-    /// `View` and has no environment to read `openWindow` out of.
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,7 +46,6 @@ struct RootView: View {
         }
         .frame(minWidth: 1000, minHeight: 640)
         .navigationTitle(model.windowTitle)
-        .toolbar { toolbar }
         .sheet(isPresented: $model.isExportSheetPresented) {
             ExportSheet(model: model)
         }
@@ -79,98 +73,6 @@ struct RootView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             Sidebar(model: model)
-        }
-    }
-
-    /// The window's own toolbar — a real `NSToolbar` in the title bar, which is
-    /// why the title text itself is off (`.unified(showsTitle: false)`, see
-    /// `GrayroomApp`): the window has one bar across the top, not a title
-    /// followed by a row of buttons.
-    ///
-    /// Leading placement for everything that is always there, so a develop-only
-    /// control appearing at the end of the group never moves Import or the
-    /// module picker.
-    @ToolbarContentBuilder
-    private var toolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .navigation) {
-            Button {
-                guard let url = ImportModel.presentSourcePanel() else { return }
-                model.importModel.setSource(url)
-                openWindow(id: "import")
-            } label: {
-                Label("Import", systemImage: "square.and.arrow.down")
-            }
-            .labelStyle(.titleAndIcon)
-            .help("Add a folder of photos to the library (⇧⌘I)")
-            .controlProbe("toolbar-import")
-
-            Picker("", selection: Binding(get: { model.mode }, set: {
-                SelfTest.note("mode picker -> \($0.rawValue)")
-                $0 == .library ? model.showLibrary() : model.showDevelop()
-            })) {
-                Text("Library").tag(AppModel.Mode.library)
-                Text("Develop").tag(AppModel.Mode.develop)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 150)
-            .help("Library (G) · Develop (D)")
-            .controlProbe("mode-picker")
-
-            // Everything past here edits one image, so it is only up in the
-            // develop view. Hidden rather than disabled: a greyed-out brush
-            // next to a grid of photos is noise, not information.
-            if model.mode == .develop {
-                developTools
-            }
-
-            // A flexible space, so Export sits at the far end of the bar the
-            // way it sat at the far end of the row it replaces. Without it
-            // AppKit packs every item against the leading edge — there is no
-            // title left in the middle to push them apart.
-            Spacer()
-        }
-        ToolbarItemGroup(placement: .primaryAction) {
-            if model.isRendering || model.isDecoding {
-                ProgressView().controlSize(.small)
-            }
-            Button {
-                model.presentExportSheet()
-            } label: {
-                Label("Export", systemImage: "square.and.arrow.up")
-            }
-            .labelStyle(.titleAndIcon)
-            .disabled(model.imageURL == nil || model.mode == .library)
-            .help("Export at full resolution (⌘E)")
-            .controlProbe("toolbar-export")
-        }
-    }
-
-    @ViewBuilder
-    private var developTools: some View {
-        Group {
-            Picker("", selection: Binding(get: { model.tool }, set: { model.tool = $0 })) {
-                Image(systemName: "hand.raised").tag(CanvasTool.pan)
-                Image(systemName: "paintbrush").tag(CanvasTool.brush)
-                Image(systemName: "target").tag(CanvasTool.targeted)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 130)
-            .help("Pan · Brush (B) · Targeted B&W adjustment (T)")
-
-            Toggle(isOn: Binding(get: { model.showBeforeAfter },
-                                 set: { model.showBeforeAfter = $0 })) {
-                Label("Before", systemImage: "rectangle.righthalf.inset.filled")
-            }
-            .toggleStyle(.button)
-            .labelStyle(.titleAndIcon)
-            .help("Show the unedited decode (or hold \\)")
-
-            Button("Fit") { model.zoomToFit() }.help("Zoom to fit (0)")
-            Button("1:1") { model.zoomToActualSize() }.help("Zoom to 100 % (1)")
-            Text(String(format: "%.0f%%", model.zoomPercent))
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .leading)
         }
     }
 }
@@ -271,6 +173,18 @@ private struct StatusBar: View {
                 .foregroundStyle(.secondary)
                 .controlProbe("develop-lens")
         }
+        // What the canvas is zoomed to, where the loupe says the same thing.
+        // ⌘0 and ⌘1 (Image › Zoom to Fit / 100 %) are the whole interface, so
+        // this number is the only sign of what they did.
+        if model.previewSize != .zero {
+            Text(String(format: "%.0f%%", model.zoomPercent))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .fixedSize()
+                .help("Zoom to fit (0) · 100 % (1)")
+                .controlProbe("develop-zoom")
+        }
         // The colour label of the photo on the canvas. The grid shows this by
         // tinting the whole cell, so this dot is develop's only sign of one —
         // and without it, 6/7/8/9 in the develop view would be a keystroke with
@@ -322,10 +236,8 @@ private struct StatusBar: View {
                 .help("Colour label: \(photo.color.name)")
                 .controlProbe("loupe-color")
         }
-        // The loupe zooms, so it says what it is zoomed to. The develop view
-        // puts this in the title bar next to its Fit and 1:1 buttons; the loupe
-        // has no buttons of its own — 0 and 1 are the whole interface — so the
-        // number goes where the rest of the loupe's identity is.
+        // The loupe zooms, so it says what it is zoomed to, in the same place
+        // and the same shape the develop view says it.
         Text(String(format: "%.0f%%", model.zoomPercent))
             .font(.system(size: 11, design: .monospaced))
             .foregroundStyle(.secondary)

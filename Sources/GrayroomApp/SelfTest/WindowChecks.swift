@@ -4,34 +4,20 @@ import GrayroomUI
 import ImageIO
 
 /// The rest of the window, in the `library` self-test: the activity centre,
-/// the toolbar's own controls, the Photo menu, and File › Open… / Export….
+/// the window's own chrome, the Photo menu, and File › Open… / Export….
 extension SelfTest {
     // MARK: - The window itself
 
     /// Everything in the window that is neither the grid nor the Folders panel:
-    /// the activity centre, the toolbar's own controls, the colour-label menu,
-    /// the Open panel's aftermath, the export sheet — and, running through all
-    /// of it, the rule that a background task must not move anything.
+    /// the activity centre, the window's chrome, the colour-label menu, the
+    /// Open panel's aftermath, the export sheet — and, running through all of
+    /// it, the rule that a background task must not move anything.
     static func runWindowChecks(app: AppModel, window: NSWindow,
                                 check: @escaping (Bool, String) -> Void,
                                 failures: @escaping () -> [String]) {
         phase("window")
-        /// The rectangles the user notices: the title bar's own leading
-        /// controls and the status bar's activity slot.
-        func toolbarFrames() -> [String: NSRect] {
-            var frames: [String: NSRect] = [:]
-            for name in ["toolbar-import", "mode-picker", "activity-slot"] {
-                if let frame = controlFrame(named: name) { frames[name] = frame }
-            }
-            return frames
-        }
-        func describe(_ frames: [String: NSRect]) -> String {
-            frames.keys.sorted().map { "\($0)=\(frames[$0]!)" }.joined(separator: " ")
-        }
-
-        var idleFrames: [String: NSRect] = [:]
+        var idleSlot: NSRect?
         var idleWindowFrame = window.frame
-        var busyFrames: [String: NSRect] = [:]
         var taskID: TaskCenter.BackgroundTask.ID?
 
         let steps: [() -> Void] = [
@@ -71,37 +57,25 @@ extension SelfTest {
                           "…and the app is not left on the generic icon")
                 }
 
-                // 27. The controls are *in* the window's title bar, and the
-                //     title text is gone. Both halves matter: the window keeps
-                //     its `title` string — `applicationDidFinishLaunching` and
-                //     `KeyRouter` find the window by it, and accessibility
-                //     reads it out — and only the drawn text is off.
-                check(window.toolbar != nil, "the window has a real NSToolbar")
+                // 27. The title bar is a plain one: traffic lights, no title
+                //     text, and nothing of the app's own in it. The window
+                //     keeps its `title` string all the same —
+                //     `applicationDidFinishLaunching` and `KeyRouter` find the
+                //     window by it, and accessibility reads it out.
                 check(window.titleVisibility == .hidden,
-                      "…with the title text hidden "
+                      "the window's title text is hidden "
                           + "(\(window.titleVisibility == .hidden ? "hidden" : "visible"))")
                 check(window.title.hasPrefix("Grayroom"),
                       "…while the window keeps its title string, which is what "
                           + "the delegate and accessibility find it by "
                           + "(got '\(window.title)')")
-                for name in ["toolbar-import", "mode-picker", "toolbar-export"] {
-                    check(isInTitleBar(probeView(name)),
-                          "'\(name)' is in the title bar, not in a row under it")
-                }
-                // Open is a menu command and nothing else: ⌘O and File › Open…
-                // are the only ways to it, and there is no button in the bar
-                // duplicating them.
-                check(probeView("toolbar-open") == nil,
-                      "there is no Open button in the toolbar")
-                // The traffic lights share that bar. A leading item that
-                // started under them would be unclickable and invisible.
-                if let zoom = window.standardWindowButton(.zoomButton),
-                   let lights = screenFrame(of: zoom),
-                   let leading = controlFrame(named: "toolbar-import") {
-                    check(leading.minX >= lights.maxX,
-                          "…and the leading item clears the traffic lights "
-                              + "(Import at \(leading.minX), the last widget ends at "
-                              + "\(lights.maxX))")
+                check(window.standardWindowButton(.closeButton)?.isHidden == false,
+                      "…and the traffic lights are on the bar")
+                // Import, the modules, the tools, Before, the zoom buttons and
+                // Export are menu commands and keys now; nothing of the app's
+                // sits in the title bar duplicating them.
+                for name in ["toolbar-import", "toolbar-open", "toolbar-export", "mode-picker"] {
+                    check(probeView(name) == nil, "there is no '\(name)' in the title bar")
                 }
 
                 // 28. Nothing is running, so the activity centre draws nothing —
@@ -111,11 +85,11 @@ extension SelfTest {
                           + "(\(app.tasks.tasks.map(\.title)))")
                 check(probeView(ActivityIndicator.probeName) == nil,
                       "…so there is no indicator in the status bar")
-                idleFrames = toolbarFrames()
+                idleSlot = controlFrame(named: "activity-slot")
                 idleWindowFrame = window.frame
-                check(idleFrames.count == 3,
-                      "the three measurable slots are on screen "
-                          + "(\(describe(idleFrames)))")
+                check(idleSlot != nil,
+                      "the status bar's activity slot is on screen "
+                          + "(\(idleSlot.map { "\($0)" } ?? "gone"))")
                 // 29. Start something. The indicator must appear *into* the
                 //     slot without moving anything around it.
                 taskID = app.tasks.begin(title: "Self-test task", total: 10, cancellable: true)
@@ -124,10 +98,9 @@ extension SelfTest {
             {
                 check(probeView(ActivityIndicator.probeName) != nil,
                       "a running task put the indicator in the status bar")
-                busyFrames = toolbarFrames()
-                check(busyFrames == idleFrames,
-                      "…without moving anything: idle \(describe(idleFrames)) "
-                          + "vs busy \(describe(busyFrames))")
+                check(controlFrame(named: "activity-slot") == idleSlot,
+                      "…without moving its slot: idle \(idleSlot.map { "\($0)" } ?? "gone") "
+                          + "vs busy \(controlFrame(named: "activity-slot").map { "\($0)" } ?? "gone")")
                 check(window.frame == idleWindowFrame,
                       "…and without resizing the window "
                           + "(\(window.frame) vs \(idleWindowFrame))")
@@ -140,7 +113,7 @@ extension SelfTest {
 
         runSteps(steps, model: app) {
             runActivityPopoverChecks(app: app, window: window, taskID: taskID,
-                                     idleFrames: idleFrames,
+                                     idleSlot: idleSlot,
                                      idleWindowFrame: idleWindowFrame,
                                      check: check, failures: failures)
         }
@@ -150,7 +123,7 @@ extension SelfTest {
     /// is cancelled and finished.
     static func runActivityPopoverChecks(app: AppModel, window: NSWindow,
                                          taskID: TaskCenter.BackgroundTask.ID?,
-                                         idleFrames: [String: NSRect],
+                                         idleSlot: NSRect?,
                                          idleWindowFrame: NSRect,
                                          check: @escaping (Bool, String) -> Void,
                                          failures: @escaping () -> [String]) {
@@ -195,11 +168,7 @@ extension SelfTest {
                       "…and the indicator is gone from the status bar")
                 check(probeView(ActivityIndicator.slotProbeName) != nil,
                       "…while its slot stayed")
-                var frames: [String: NSRect] = [:]
-                for name in ["toolbar-import", "mode-picker", "activity-slot"] {
-                    if let frame = controlFrame(named: name) { frames[name] = frame }
-                }
-                check(frames == idleFrames,
+                check(controlFrame(named: "activity-slot") == idleSlot,
                       "…and nothing moved back, because nothing had moved")
                 check(window.frame == idleWindowFrame,
                       "…and the window is the size it was (\(window.frame))")
@@ -207,39 +176,25 @@ extension SelfTest {
             },
         ]
         runSteps(steps, model: app) {
-            runToolbarAndMenuChecks(app: app, window: window, check: check, failures: failures)
+            runModuleAndMenuChecks(app: app, window: window, check: check, failures: failures)
         }
     }
 
-    // MARK: - The toolbar, the menus and the sheet
+    // MARK: - The modules, the menus and the sheet
 
-    /// The Library/Develop picker, the Photo menu's own items, the Open
-    /// panel's aftermath and the export sheet — the parts of the app that have
-    /// no keyboard shortcut and are therefore reachable only this way.
-    static func runToolbarAndMenuChecks(app: AppModel, window: NSWindow,
-                                        check: @escaping (Bool, String) -> Void,
-                                        failures: @escaping () -> [String]) {
-        phase("toolbar and menus")
+    /// The status bar across a `d`/`g` round trip, the develop view's own
+    /// readouts, the Photo menu's items, the Open panel's aftermath and the
+    /// export sheet.
+    static func runModuleAndMenuChecks(app: AppModel, window: NSWindow,
+                                       check: @escaping (Bool, String) -> Void,
+                                       failures: @escaping () -> [String]) {
+        phase("modules and menus")
         let ids = app.catalog.ids
         guard ids.count >= 2 else {
             check(false, "two photos to label from the menu")
             finishLibrary(failures())
         }
 
-        // What the leading half of the title bar looks like before the module
-        // is switched, so the round trip can be measured against it.
-        func leadingFrames() -> [String: NSRect] {
-            var frames: [String: NSRect] = [:]
-            for name in ["toolbar-import", "mode-picker"] {
-                if let frame = controlFrame(named: name) { frames[name] = frame }
-            }
-            return frames
-        }
-        func describeFrames(_ frames: [String: NSRect]) -> String {
-            frames.keys.sorted().map { "\($0)=\(frames[$0]!)" }.joined(separator: " ")
-        }
-        var leadingInLibrary: [String: NSRect] = [:]
-        var itemsInLibrary = 0
         // The status bar's own rectangle, taken from the one thing that is in
         // it in both modules. The two modules fill the bar differently — the
         // grid's count and size slider, develop's filename and camera — and if
@@ -249,12 +204,9 @@ extension SelfTest {
 
         let steps: [() -> Void] = [
             {
-                // 32. The toolbar's module picker. `g` and `d` are already
-                //     covered as keys; this is the segmented control, driven as
-                //     a control, which is the only thing that says it is wired
-                //     to the model at all.
-                leadingInLibrary = leadingFrames()
-                itemsInLibrary = window.toolbar?.items.count ?? 0
+                // 32. The status bar across a module switch: each module fills
+                //     its own end of the one bar, and the bar itself must not
+                //     move a point.
                 activitySlotInLibrary = controlFrame(named: "activity-slot") ?? .zero
                 // The grid's own furniture is in the window's one status bar,
                 // not in a second strip above it.
@@ -279,34 +231,17 @@ extension SelfTest {
                     check(sizeSlider.minX > activitySlotInLibrary.minX,
                           "…at the trailing end")
                 }
-                let picker = control(named: "mode-picker") as? NSSegmentedControl
-                check(picker != nil, "the toolbar has a Library/Develop picker")
-                check(picker?.segmentCount == 2,
-                      "…with two segments (\(picker?.segmentCount ?? 0))")
-                check(picker?.selectedSegment == 0,
-                      "…showing Library, which is the module we are in "
-                          + "(\(picker?.selectedSegment ?? -1))")
                 // A photo whose file is still there: `showDevelop` refuses a
                 // frame the library has lost, and one of these has had its
                 // location taken away on purpose a few steps back.
                 let openable = app.visiblePhotos.first { $0.firstLocation != nil }
                 check(openable != nil, "a photo with a file to develop")
                 if let openable { _ = clickCell(cellID(openable.id)) }
-                check(selectSegment(named: "mode-picker", at: 1), "clicked its Develop segment")
+                sendKey("d", modifiers: [], window: window, virtualKey: 2)
             },
             {
-                check(app.mode == .develop,
-                      "the picker switched to Develop (got \(app.mode.rawValue))")
+                check(app.mode == .develop, "d switched to Develop (got \(app.mode.rawValue))")
                 check(findCanvas() != nil, "…and the canvas is in the window")
-                check((control(named: "mode-picker") as? NSSegmentedControl)?.selectedSegment == 1,
-                      "…and the picker itself is on Develop")
-                // The develop-only tools — the tool picker, Before, Fit, 1:1 —
-                // join the same leading group, at its end, so they can only add
-                // items and never take Open, Import or the picker with them.
-                check((window.toolbar?.items.count ?? 0) > itemsInLibrary,
-                      "…and develop's own tools joined the title bar "
-                          + "(\(window.toolbar?.items.count ?? 0) items, was "
-                          + "\(itemsInLibrary))")
                 // The status bar swaps its ends over — and does not move.
                 check(controlFrame(named: "library-count") == nil,
                       "the grid's photo count left the status bar with the grid")
@@ -318,22 +253,70 @@ extension SelfTest {
                           + "module switch moves nothing vertically "
                           + "(\(slotInDevelop.map { "\($0)" } ?? "gone") vs "
                           + "\(activitySlotInLibrary))")
+                // 32a. The zoom readout the title bar used to carry, now at the
+                //      develop end of the same bar the loupe puts it in.
+                let zoom = controlFrame(named: "develop-zoom")
+                check(zoom != nil, "the develop view's zoom % is in the status bar")
+                check(!isInTitleBar(probeView("develop-zoom")),
+                      "…in the window's content, not up in the title bar")
+                if let zoom, let lens = controlFrame(named: "develop-camera") {
+                    check(abs(zoom.midY - activitySlotInLibrary.midY) < 6,
+                          "…on the bar's own line (\(zoom.midY) vs "
+                              + "\(activitySlotInLibrary.midY))")
+                    check(zoom.minX > lens.minX,
+                          "…after the camera and lens (\(zoom.minX) vs \(lens.minX))")
+                }
+                zoomBefore = app.zoomPercent
                 // The other half of the pair the library screenshots show: the
                 // same window, the same status bar, the other module.
                 writeScreenshot(of: window, named: "selftest-develop.png")
-                check(selectSegment(named: "mode-picker", at: 0), "clicked its Library segment")
+                check(sendMenuItem(titled: "Zoom to 100%"), "sent Image › Zoom to 100%")
             },
             {
-                check(app.mode == .library,
-                      "the picker came back to Library (got \(app.mode.rawValue))")
+                check(app.zoomPercent != zoomBefore,
+                      "Image › Zoom to 100% zoomed (\(app.zoomPercent) %, was "
+                          + "\(zoomBefore) %)")
+                check(controlFrame(named: "develop-zoom") != nil,
+                      "…and the readout is still in the bar")
+                check(sendMenuItem(titled: "Zoom to Fit"), "sent Image › Zoom to Fit")
+            },
+            {
+                // 32b. Before/After: the View menu's item latches it, and `\`
+                //      — Lightroom's key — holds it. `KeyRouter` takes both
+                //      halves of that key, so the press and the release are
+                //      posted separately.
+                check(abs(app.zoomPercent - zoomBefore) < 0.5,
+                      "Image › Zoom to Fit put it back (\(app.zoomPercent) %)")
+                let item = findMenuItemDeep(titled: "Before / After")
+                check(item?.keyEquivalent == "\\",
+                      "View › Before / After carries \\ "
+                          + "(got '\(item?.keyEquivalent ?? "missing")')")
+                check(item?.keyEquivalentModifierMask.isEmpty == true,
+                      "…bare, as in Lightroom")
+                check(!app.showBeforeAfter, "…and we are looking at the edit")
+                check(sendMenuItem(titled: "Before / After"), "sent View › Before / After")
+            },
+            {
+                check(app.showBeforeAfter, "…which showed the unedited decode")
+                check(sendMenuItem(titled: "Before / After"), "sent it again")
+            },
+            {
+                check(!app.showBeforeAfter, "…and it toggled back to the edit")
+                sendKeyHalf(virtualKey: 42, down: true)
+            },
+            {
+                check(app.showBeforeAfter, "holding \\ shows the unedited decode")
+                sendKeyHalf(virtualKey: 42, down: false)
+            },
+            {
+                check(!app.showBeforeAfter, "…and letting go comes back to the edit")
+                sendKey("g", modifiers: [], window: window, virtualKey: 5)
+            },
+            {
+                check(app.mode == .library, "g came back to Library (got \(app.mode.rawValue))")
                 check(findCanvas() == nil, "…and the canvas is gone")
-                check((window.toolbar?.items.count ?? 0) == itemsInLibrary,
-                      "…taking develop's tools out of the title bar with it "
-                          + "(\(window.toolbar?.items.count ?? 0) items)")
-                check(leadingFrames() == leadingInLibrary,
-                      "…and Import and the picker are exactly where they were "
-                          + "(\(describeFrames(leadingFrames())) vs "
-                          + "\(describeFrames(leadingInLibrary)))")
+                check(controlFrame(named: "develop-zoom") == nil,
+                      "…and the zoom readout left the status bar with it")
                 check(controlFrame(named: "activity-slot")
                           .map { sameLine($0, activitySlotInLibrary) } == true,
                       "…and so is the status bar, after the round trip "
@@ -425,6 +408,7 @@ extension SelfTest {
 
     static var sizeBefore = 0.0
     static var cellWidthBefore = 0.0
+    static var zoomBefore = 0.0
 
     /// Whether two rectangles sit on the same line of the window.
     ///
@@ -513,8 +497,11 @@ extension SelfTest {
             {
                 check(app.previewSize != .zero,
                       "…and it decoded (\(app.previewSize))")
-                check(isEnabled(named: "toolbar-export") == true,
-                      "the toolbar's Export button is live with an image open")
+                let export = findMenuItemDeep(titled: "Export…")
+                check(export?.isEnabled == true, "File › Export… is live with an image open")
+                check(export?.keyEquivalent == "e"
+                          && export?.keyEquivalentModifierMask == [.command],
+                      "…carrying ⌘E (got '\(export?.keyEquivalent ?? "missing")')")
                 // 37. ⌘E, as a real keystroke through the menu's key
                 //     equivalent, opens the export sheet.
                 sendKey("e", modifiers: .command, window: window, virtualKey: 14)

@@ -8,13 +8,13 @@ import GrayroomUI
 ///
 /// The obvious way to give a grid keyboard commands is `.focusable()` +
 /// `.onKeyPress`, and it is wrong here: the moment the user touches the
-/// thumbnail slider, the mode picker or any toolbar button, focus leaves the
-/// grid and the arrow keys stop working until they click a cell again. A photo
+/// thumbnail slider or a row of the Folders panel, focus leaves the grid and
+/// the arrow keys stop working until they click a cell again. A photo
 /// grid whose arrows die because you dragged the size slider is broken, and no
 /// amount of `@FocusState` shuffling fixes it — the keys do not belong to a
 /// *view*, they belong to the window and the module it is showing.
 ///
-/// So a single local `NSEvent` monitor sees every `keyDown` before the app
+/// So a single local `NSEvent` monitor sees every key event before the app
 /// dispatches it, and this decides who it is for:
 ///
 /// - a text field or field editor has the keyboard → nobody, always (the day
@@ -42,7 +42,8 @@ final class KeyRouter {
     /// events and needs no accessibility permission.
     func install() {
         guard monitor == nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) {
+            [weak self] event in
             guard let self else { return event }
             return self.handle(event) ? nil : event
         }
@@ -62,6 +63,25 @@ final class KeyRouter {
         else { return false }
         guard let characters = event.charactersIgnoringModifiers?.lowercased() else { return false }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Lightroom's before/after key, and the only key this router takes a
+        // `keyUp` for: `\` is *held*, and the canvas that tracks the hold is
+        // not always the first responder — with the sidebar focused the key did
+        // nothing at all. View › Before / After keeps `\` for discoverability,
+        // exactly as `g` and `d` do, and latches the comparison when picked.
+        //
+        // Named modifiers rather than `modifiers.isEmpty`: an event carries
+        // bits of its own inside the device-independent mask (a `CGEvent` sets
+        // the non-coalesced one), and an emptiness test throws the key away.
+        if characters == "\\", modifiers.isDisjoint(with: [.command, .control, .option, .shift]),
+           window == KeyRouter.mainWindow(), model.mode == .develop {
+            if event.type == .keyUp {
+                model.canvasBeforeAfterHeld(false)
+            } else if !event.isARepeat {
+                model.canvasBeforeAfterHeld(true)
+            }
+            return true
+        }
+        guard event.type == .keyDown else { return false }
         // ⌥⌘S — macOS's shortcut for a sidebar, and the one Option key this
         // router claims. It has to be claimed here: AppKit answers ⌥⌘S itself,
         // out of the window's own toolbar, and its answer for a SwiftUI
@@ -181,9 +201,8 @@ final class KeyRouter {
         case "8": model.toggleColorLabel(.green)
         case "9": model.toggleColorLabel(.blue)
         // The canvas's own commands, routed here so they keep working when the
-        // sidebar — not the canvas — has the keyboard. `\` is deliberately not
-        // here: it is a *held* key, and holding needs the key-up the canvas
-        // already tracks.
+        // sidebar — not the canvas — has the keyboard. `\` is above, with the
+        // key-up it needs.
         case "b": model.canvasKeyCommand(.toggleBrush)
         case "t": model.canvasKeyCommand(.toggleTargeted)
         // Lightroom's `e`: back to the Library, in the loupe, on this photo.

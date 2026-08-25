@@ -471,27 +471,6 @@ extension SelfTest {
         return total / Double(image.width * image.height)
     }
 
-    // MARK: - The title bar's leading items
-
-    /// Import and the module picker, on screen.
-    ///
-    /// A `NavigationSplitView` puts a tracking separator in the toolbar that
-    /// lines the bar's content up with the sidebar's divider, and a column that
-    /// collapses out from under it is exactly the case that can leave the
-    /// leading buttons stranded — shoved along the bar, or under the traffic
-    /// lights. So the loupe measures them and compares.
-    static func leadingFrames() -> [String: NSRect] {
-        var frames: [String: NSRect] = [:]
-        for name in ["toolbar-import", "mode-picker"] {
-            if let frame = controlFrame(named: name) { frames[name] = frame }
-        }
-        return frames
-    }
-
-    static func describeFrames(_ frames: [String: NSRect]) -> String {
-        frames.keys.sorted().map { "\($0)=\(frames[$0]!)" }.joined(separator: " ")
-    }
-
     // MARK: - The loupe
 
     /// Feature 2: Lightroom's Library loupe, driven by its own keys.
@@ -517,13 +496,11 @@ extension SelfTest {
             finishLibrary(failures())
         }
         let total = order.count
-        var framesInGrid: [String: NSRect] = [:]
 
         let steps: [() -> Void] = [
             {
                 check(clickCell(cellID(subject)), "clicked a cell to open in the loupe")
                 check(app.highlightedPhotoIDs == [subject], "…and it is the highlight")
-                framesInGrid = leadingFrames()
                 // 1. `e` is Lightroom's loupe key — and the picture is there in
                 //    the same turn of the run loop it is pressed in, because it
                 //    is the one the grid already had.
@@ -538,8 +515,6 @@ extension SelfTest {
                 check(app.mode == .library,
                       "…which is a Library view, so the module did not change "
                           + "(\(app.mode.rawValue))")
-                check((control(named: "mode-picker") as? NSSegmentedControl)?.selectedSegment == 0,
-                      "…and the toolbar's picker is still on Library")
                 check(probeView("loupe") != nil, "…the loupe is in the window")
                 check(app.loupePhotoID == subject, "…on the highlighted photo")
                 check(findLoupeCanvas() != nil,
@@ -554,42 +529,10 @@ extension SelfTest {
                       "…while the panel's own setting is untouched, so g can put it back")
                 check(sidebarWidth(in: window) == 0,
                       "…and it is off the window (\(sidebarWidth(in: window)) pt wide)")
-                // The leading toolbar items must not be dragged along by the
-                // split view's tracking separator when the column collapses.
-                check(isInTitleBar(probeView("toolbar-import"))
-                          && isInTitleBar(probeView("mode-picker")),
-                      "…without taking Import or the module picker out of the title bar")
-                // They *do* slide leftwards, and should: the tracking separator
-                // lines the bar up with the column divider, and with no column
-                // there is nothing to clear. What must not happen is either of
-                // them ending up under the traffic lights, off the bar's line,
-                // or out of order.
-                let inLoupe = leadingFrames()
-                check(inLoupe.count == framesInGrid.count,
-                      "…and both of them are still on screen "
-                          + "(\(describeFrames(inLoupe)))")
-                if let import0 = framesInGrid["toolbar-import"],
-                   let import1 = inLoupe["toolbar-import"],
-                   let picker1 = inLoupe["mode-picker"] {
-                    check(import1.minX <= import0.minX,
-                          "…having moved into the space the column left, not out of it "
-                              + "(\(import1.minX), was \(import0.minX))")
-                    check(sameLine(import1, import0),
-                          "…on the bar's own line still (\(import1) vs \(import0))")
-                    check(picker1.minX >= import1.maxX,
-                          "…and in the same order (Import ends \(import1.maxX), "
-                              + "the picker starts \(picker1.minX))")
-                    check(import1.size == import0.size && inLoupe["mode-picker"]?.size
-                              == framesInGrid["mode-picker"]?.size,
-                          "…at their own sizes, not squeezed")
-                }
-                if let zoom = window.standardWindowButton(.zoomButton),
-                   let lights = screenFrame(of: zoom),
-                   let leading = inLoupe["toolbar-import"] {
-                    check(leading.minX >= lights.maxX,
-                          "…and Import still clears the traffic lights "
-                              + "(\(leading.minX) vs \(lights.maxX))")
-                }
+                // A column that collapses out from under the split view's
+                // tracking separator must not take the traffic lights with it.
+                check(window.standardWindowButton(.closeButton)?.isHidden == false,
+                      "…while the traffic lights are still on the title bar")
                 // 2. The status bar swaps the grid's count for Lightroom's
                 //    position in the filtered list.
                 check(app.loupePositionLabel == "\(index + 1) / \(total)",
@@ -675,10 +618,6 @@ extension SelfTest {
         let next = order[index + 1]
         let total = order.count
         let first = order[0]
-        // Where the title bar's leading items are *while the loupe has the
-        // window*, so that bringing the Folders panel back can be shown not to
-        // move them either.
-        let framesInLoupe = leadingFrames()
 
         let steps: [() -> Void] = [
             {
@@ -733,16 +672,6 @@ extension SelfTest {
                 check(!sidebarRows(in: window).isEmpty,
                       "…with its rows drawn again "
                           + "(\(sidebarRows(in: window).count) rows)")
-                let backInGrid = leadingFrames()
-                check(backInGrid.count == framesInLoupe.count,
-                      "…and the title bar's leading items are all still there "
-                          + "(\(describeFrames(backInGrid)))")
-                if let wide = backInGrid["toolbar-import"],
-                   let narrow = framesInLoupe["toolbar-import"] {
-                    check(wide.minX >= narrow.minX && sameLine(wide, narrow),
-                          "…back out along the bar to make room for the column, on the "
-                              + "same line (\(wide.minX), was \(narrow.minX))")
-                }
                 // 6b. The other direction: a panel the user had *hidden* must
                 //     still be hidden after a trip through the loupe.
                 sendKey("s", modifiers: [.command, .option], window: window,
