@@ -29,9 +29,19 @@ text at startup, concatenated (`Common.metal` first) and compiled with
 
 **RAW** goes through `CIRAWFilter` with Apple's "pleasing rendering" zeroed
 (`neutralize()`: baseline exposure, shadow bias, boost, local tone map, gamut
-mapping and capture sharpening all off). Temp/tint set `neutralTemperature` /
-`neutralTint`, i.e. they choose which illuminant the sensor data is interpreted
-against.
+mapping and capture sharpening all off) and **highlight recovery on** wherever
+the decoder supports it. Recovery is not part of that look: reconstructing a
+channel that clipped while the other two did not is demosaic work, and the
+sensor data it needs is gone by the time the pipeline sees a texture. There is
+no user option, as there is none in Lightroom. Temp/tint set
+`neutralTemperature` / `neutralTint`, i.e. they choose which illuminant the
+sensor data is interpreted against.
+
+A decoder option like that changes what an unchanged edit renders to, which
+would leave every stored preview a picture of the old rendition.
+`Pipeline.rendererVersion` is the answer: it is mixed into
+`EditState.fingerprint`, so bumping it makes every row in `previews.sqlite`
+stale and nothing else — the developments themselves are untouched.
 
 **Standard images** (JPEG, TIFF, PNG, HEIC) go through
 `CIImage(contentsOf:options: [.applyOrientationProperty: true])`, which honours
@@ -1131,7 +1141,8 @@ quantisation step to dither at.
 ### Canvas display
 
 The drawable is `rgba16Float`, its layer is tagged **extended linear sRGB**, and
-`wantsExtendedDynamicRangeContent` is on. All three are load-bearing:
+its `preferredDynamicRange` is `.high` with `contentsHeadroom` at `W`. All three
+are load-bearing:
 
 * **Half-float**, because the values are linear light and the display output
   clamps at `W`, not at SDR white — an 8-bit unorm surface can hold neither the
@@ -1145,6 +1156,19 @@ The drawable is `rgba16Float`, its layer is tagged **extended linear sRGB**, and
   is why it went unnoticed).
 * **The EDR opt-in**, because without it the layer is an ordinary SDR surface
   that happens to be float and everything above 1.0 is clamped away.
+  `.high` rather than `.automatic`: this is the editing canvas the user is
+  looking at, which is the case Apple names for it. The headroom tag is what
+  says how much of the range the drawable actually uses — a layer asking for
+  high dynamic range with untagged contents gets none.
+
+The system can also ask every app to stop showing HDR content
+(`NSApplicationShouldBeginSuppressingHighDynamicRangeContentNotification`, and
+its `...End...` partner). `HDRSuppression` carries that state, and it takes both
+halves: the layer drops to `.standard` *and* the render loop switches to the
+edit's SDR rendition — `hdr` off, so the tone shoulder aims at 1.0, exactly what
+an export writes. Dropping the layer alone would clip the highlights instead of
+rolling them off. The edit itself never moves, so the picture comes back when
+the system says it may.
 
 The fragment shader therefore encodes nothing: it samples the display texture
 and returns it. Every constant it composites — the letterbox backdrop, the
@@ -1153,7 +1177,8 @@ mask-overlay tint — is authored in sRGB and **decoded to linear** in
 exactly as they did on the old encoded drawable. (The brush cursor's ring is
 pure black and white, the same numbers in either space; only the alpha blends
 now happen in linear light.) `CanvasDisplayInputTests` pins the pixel format,
-the colourspace, the EDR flag, the straight-through pass and the backdrop decode.
+the colourspace, the dynamic range and its suppressed state, the
+straight-through pass and the backdrop decode.
 
 On the machine this was developed on (M2 Max, XDR panel) `NSScreen`'s
 `maximumExtendedDynamicRangeColorComponentValue` is 1.0 while nothing on screen

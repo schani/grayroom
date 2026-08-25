@@ -40,6 +40,18 @@ public struct ImageInfo {
     public var hasEmbeddedThumbnail: Bool
     public var hasPreviewImage: Bool
     public var lensCorrectionSupported: Bool
+    /// Whether the decoder can reconstruct a clipped highlight channel for this
+    /// file, and whether the decode this app runs has it on — it always does
+    /// where it is supported, so the two only differ on a system or a file
+    /// without it.
+    public var highlightRecoverySupported: Bool
+    public var highlightRecoveryEnabled: Bool
+    /// How much linear headroom above SDR white the file's encoding carries
+    /// (1.0 for an SDR file), and the frame's average light level relative to
+    /// reference white. `0` means "not known": a RAW is scene-referred and has
+    /// neither, and an SDR file has no light level to state.
+    public var contentHeadroom: Double
+    public var contentAverageLightLevel: Double
     public var cameraMake: String?
     public var cameraModel: String?
     /// EXIF `LensMake` / `LensModel`. Plenty of files carry a model with no
@@ -151,6 +163,53 @@ public final class ImageDecoder {
         f.sharpnessAmount = 0
         // Lens correction stays on; NR keeps its per-camera defaults (measured
         // scale-invariant, so it does not break preview/export agreement).
+        enableHighlightRecovery(f)
+    }
+
+    /// Highlight recovery ON wherever the decoder offers it.
+    ///
+    /// It reconstructs a channel that clipped while the other two did not, which
+    /// is a *demosaic* job — the sensor data needed for it is gone by the time
+    /// the pipeline sees a texture. Lightroom has no switch for it either. Not
+    /// part of Apple's "pleasing rendering": it recovers detail rather than
+    /// imposing a look, so `neutralize` turns it on instead of off.
+    static func enableHighlightRecovery(_ f: CIRAWFilter) {
+        guard f.isHighlightRecoverySupported else { return }
+        f.isHighlightRecoveryEnabled = true
+    }
+
+    /// What `decode` will do with this file's clipped highlights, read back off
+    /// a filter the same call was made on rather than assumed.
+    static func highlightRecovery(_ f: CIRAWFilter) -> (supported: Bool, enabled: Bool) {
+        enableHighlightRecovery(f)
+        return (f.isHighlightRecoverySupported, f.isHighlightRecoveryEnabled)
+    }
+
+    /// The file's HDR statistics: linear headroom above SDR white, and average
+    /// light level relative to reference white. `(0, 0)` means neither is known.
+    ///
+    /// The headroom comes from metadata (`CIImage` reads it off the encoding
+    /// without decoding a pixel), and it is also the gate on the light level:
+    /// that one needs an HDR decode with `kCGComputeHDRStats`, and probing is on
+    /// the import path, where a full-resolution decode of every file would be
+    /// the slowest thing the importer does. So an SDR file pays nothing, and an
+    /// HDR one pays a 512 px decode — the same number the full frame gives, to
+    /// eight digits, because it is a mean.
+    static func hdrStats(url: URL) -> (headroom: Double, averageLightLevel: Double) {
+        guard let headroom = CIImage(contentsOf: url).map({ Double($0.contentHeadroom) })
+        else { return (0, 0) }
+        guard headroom > 1, let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            return (headroom, 0)
+        }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 512,
+            kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR,
+            kCGImageSourceDecodeRequestOptions: [kCGComputeHDRStats: true] as CFDictionary,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        else { return (headroom, 0) }
+        return (headroom, Double(image.contentAverageLightLevel))
     }
 
     // MARK: - Probe
@@ -199,6 +258,7 @@ public final class ImageDecoder {
         let capturedAt = ImageDecoder.captureDate(exif: exif)
         let (lat, lon, alt) = ImageDecoder.gpsPosition(gps: gps)
         let lens = ImageDecoder.lens(exif: exif)
+        let recovery = ImageDecoder.highlightRecovery(f)
 
         return ImageInfo(
             url: url,
@@ -213,6 +273,12 @@ public final class ImageDecoder {
             hasEmbeddedThumbnail: hasThumb,
             hasPreviewImage: f.previewImage != nil,
             lensCorrectionSupported: f.isLensCorrectionSupported,
+            highlightRecoverySupported: recovery.supported,
+            highlightRecoveryEnabled: recovery.enabled,
+            // Scene-referred sensor data: the headroom metadata describes an
+            // encoding, and a RAW has not been encoded against a white yet.
+            contentHeadroom: 0,
+            contentAverageLightLevel: 0,
             cameraMake: make,
             cameraModel: model,
             lensMake: lens.make,
@@ -261,6 +327,7 @@ public final class ImageDecoder {
         ]
         let hasThumb = CGImageSourceCreateThumbnailAtIndex(
             source, 0, thumbnailOptions as CFDictionary) != nil
+        let hdr = ImageDecoder.hdrStats(url: url)
 
         return ImageInfo(
             url: url,
@@ -280,6 +347,11 @@ public final class ImageDecoder {
             // the way a RAW carries one.
             hasPreviewImage: false,
             lensCorrectionSupported: false,
+            // Both RAW-only: there is no demosaic left to recover a channel in.
+            highlightRecoverySupported: false,
+            highlightRecoveryEnabled: false,
+            contentHeadroom: hdr.headroom,
+            contentAverageLightLevel: hdr.averageLightLevel,
             cameraMake: tiff?[kCGImagePropertyTIFFMake as String] as? String,
             cameraModel: tiff?[kCGImagePropertyTIFFModel as String] as? String,
             lensMake: lens.make,

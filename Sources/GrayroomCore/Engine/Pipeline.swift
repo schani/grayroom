@@ -17,6 +17,15 @@ import Metal
 /// `hasLocal` flag is 0 and the clarity stage gets its 1x1 global amount
 /// texture, so the result is bit-for-bit the pre-M3 one.
 public final class Pipeline {
+    /// What the pipeline renders, as a number. Bump it whenever the same edit
+    /// starts producing different pixels — a stage's arithmetic, or a decoder
+    /// option like highlight recovery. It is mixed into
+    /// `EditState.fingerprint`, so bumping it is what makes every stored
+    /// preview stale (see `EditStateIO`).
+    ///
+    /// 2: highlight recovery on wherever `CIRAWFilter` supports it.
+    public static let rendererVersion = 2
+
     public let context: MetalContext
 
     private let tonePipeline: MTLComputePipelineState

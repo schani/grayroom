@@ -65,8 +65,20 @@ extension EditState {
     /// The same hash, taken over the stored `edit_json` bytes — for the catalog
     /// load, which reads a hundred thousand developments and has no reason to
     /// decode any of them.
-    public static func fingerprint(ofEditJSON json: Data) -> Data {
-        Data(SHA256.hash(data: json))
+    ///
+    /// `rendererVersion` is mixed in because the question the fingerprint
+    /// answers is "is the stored picture still what this photo looks like",
+    /// and the renderer is half of that answer: an unchanged edit through a
+    /// changed renderer is a different picture. Bumping it re-renders every
+    /// stored preview and nothing else — the developments themselves are
+    /// untouched. The parameter exists so a test can compare two versions of
+    /// the same edit; nothing else passes it.
+    public static func fingerprint(ofEditJSON json: Data,
+                                   rendererVersion: Int = Pipeline.rendererVersion) -> Data {
+        var hash = SHA256()
+        hash.update(data: Data("renderer \(rendererVersion)\n".utf8))
+        hash.update(data: json)
+        return Data(hash.finalize())
     }
 }
 

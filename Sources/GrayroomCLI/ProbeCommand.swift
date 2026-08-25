@@ -34,6 +34,14 @@ struct Probe: ParsableCommand {
         out += "embeddedThumbnail:    \(info.hasEmbeddedThumbnail ? "yes" : "no")\n"
         out += "previewImage:         \(info.hasPreviewImage ? "yes" : "no")\n"
         out += "lensCorrection:       \(info.lensCorrectionSupported ? "supported" : "unsupported")\n"
+        out += "highlightRecovery:    "
+            + (info.highlightRecoverySupported
+                ? (info.highlightRecoveryEnabled ? "enabled" : "supported, off")
+                : "unsupported") + "\n"
+        out += "contentHeadroom:      " + (info.contentHeadroom > 0
+            ? String(format: "%.3f", info.contentHeadroom) : "unknown") + "\n"
+        out += "averageLightLevel:    " + (info.contentAverageLightLevel > 0
+            ? String(format: "%.4f", info.contentAverageLightLevel) : "unknown") + "\n"
         print(out, terminator: "")
     }
 

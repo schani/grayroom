@@ -77,6 +77,19 @@ final class EditStateFingerprintTests: XCTestCase {
         XCTAssertEqual(EditState.fingerprint(ofEditJSON: Data(text.utf8)), edit.fingerprint)
     }
 
+    /// The renderer is the other half of "is the stored picture still right":
+    /// the same edit through a changed pipeline is a different picture, so
+    /// bumping the version has to move every key in `previews.sqlite`.
+    func testTheRendererVersionIsInTheHash() throws {
+        let json = try sampleEdit().jsonData()
+        XCTAssertNotEqual(EditState.fingerprint(ofEditJSON: json, rendererVersion: 1),
+                          EditState.fingerprint(ofEditJSON: json, rendererVersion: 2))
+        XCTAssertEqual(
+            EditState.fingerprint(ofEditJSON: json,
+                                  rendererVersion: Pipeline.rendererVersion),
+            EditState.fingerprint(ofEditJSON: json))
+    }
+
     /// Decoding and re-encoding an edit must not move its fingerprint, or every
     /// preview would go stale the first time the app read one back.
     func testARoundTripThroughJSONKeepsTheFingerprint() throws {

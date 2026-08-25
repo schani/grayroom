@@ -404,7 +404,7 @@ extension SelfTest {
                 // photo: the loupe put it through the very same render loop.
                 check(app.currentPhotoID == subject,
                       "…and the render loop is on that photo, so d is free")
-                checkLoupeIsEDR(check: check)
+                checkLoupeIsEDR(app: app, check: check)
                 writeScreenshot(of: window, named: "selftest-loupe-developed.png")
                 sendKey("g", modifiers: [], window: window, virtualKey: 5)
                 settle(app, then: done)
@@ -413,10 +413,14 @@ extension SelfTest {
     }
 
     /// The loupe's drawable is configured exactly as the develop canvas's is:
-    /// half-float, extended **linear** sRGB, extended-range content declared.
+    /// half-float, extended **linear** sRGB, high dynamic range asked for.
     /// Without all three the loupe would be an SDR surface that happens to be
     /// float, and an HDR development would be clamped to SDR white on it.
-    static func checkLoupeIsEDR(check: (Bool, String) -> Void) {
+    ///
+    /// And it follows the system's HDR suppression, both ways: the layer drops
+    /// to standard dynamic range and the loop switches to the SDR rendition,
+    /// which is the pair that makes the picture tone-map rather than clip.
+    static func checkLoupeIsEDR(app: AppModel, check: (Bool, String) -> Void) {
         guard let canvas = findLoupeCanvas(), let layer = canvas.layer as? CAMetalLayer else {
             check(false, "the loupe's canvas has a CAMetalLayer to check for EDR")
             return
@@ -427,9 +431,26 @@ extension SelfTest {
         check(layer.colorspace?.name == CGColorSpace.extendedLinearSRGB,
               "…tagged extended linear sRGB, so the window server owns the transfer "
                   + "function (\(layer.colorspace?.name.map { $0 as String } ?? "untagged"))")
-        check(layer.wantsExtendedDynamicRangeContent,
-              "…with extended dynamic range asked for, which is what reaches the "
-                  + "panel's headroom")
+        // Whatever the system is asking for right now, the layer says the same
+        // thing — a self-test run is an accessory app with its windows below
+        // the desktop, which is exactly the case macOS may suppress HDR for.
+        let wasSuppressed = app.hdrSuppression.isSuppressed
+        check(layer.preferredDynamicRange == (wasSuppressed ? .standard : .high),
+              "the loupe's layer follows the system's HDR suppression "
+                  + "(suppressed = \(wasSuppressed))")
+
+        var hdr = app.store.edit
+        hdr.hdr = true
+        app.hdrSuppression.set(true)
+        check(layer.preferredDynamicRange == .standard,
+              "suppressing HDR drops the loupe's layer to standard dynamic range")
+        check(app.hdrSuppression.displayEdit(hdr).displayWhite == 1,
+              "…and the render loop tone-maps into SDR while it is suppressed")
+        app.hdrSuppression.set(false)
+        check(layer.preferredDynamicRange == .high,
+              "…and both come back when the system says HDR is allowed again, "
+                  + "which is what reaches the panel's headroom")
+        app.hdrSuppression.set(wasSuppressed)
     }
 
     /// Rec.709 luminance of a display-linear `rgba16Float` texture, **sRGB
@@ -623,7 +644,7 @@ extension SelfTest {
                       "…which is the photo's own long edge, whatever resolution the "
                           + "picture of it is (\(frameEdge) of \(longEdge))")
                 check(canvas?.transform.isFit == true, "…fitted to the window")
-                checkLoupeIsEDR(check: check)
+                checkLoupeIsEDR(app: app, check: check)
                 runLoupeNavigationChecks(app: app, window: window, subject: subject,
                                          index: index, order: order,
                                          check: check, failures: failures)
@@ -1057,7 +1078,7 @@ extension SelfTest {
                 settle(app) {
                     check(findLoupeCanvas()?.imageTexture === app.loupeTexture,
                           "the loupe's canvas has that texture on it")
-                    checkLoupeIsEDR(check: check)
+                    checkLoupeIsEDR(app: app, check: check)
                     writeScreenshot(of: window, named: "selftest-loupe-edited.png")
                     sendKey("g", modifiers: [], window: window, virtualKey: 5)
                     settle(app) {

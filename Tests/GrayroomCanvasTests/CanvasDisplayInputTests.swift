@@ -189,8 +189,8 @@ final class CanvasDisplayInputTests: XCTestCase {
         try assertDisplayAgreesWithInput("fit")
     }
 
-    /// The EDR drawable: half-float, extended **linear** sRGB, extended-range
-    /// content declared.
+    /// The EDR drawable: half-float, extended **linear** sRGB, high dynamic
+    /// range asked for.
     ///
     /// All three have to hold together. Half-float carries linear values above
     /// 1.0 that an 8-bit unorm cannot; the extended-linear colourspace is what
@@ -205,7 +205,22 @@ final class CanvasDisplayInputTests: XCTestCase {
         let space = try XCTUnwrap(layer.colorspace)
         XCTAssertEqual(space.name, CGColorSpace.extendedLinearSRGB)
         XCTAssertEqual(h.canvas.colorPixelFormat, .rgba16Float)
-        XCTAssertTrue(layer.wantsExtendedDynamicRangeContent)
+        XCTAssertEqual(layer.preferredDynamicRange, .high)
+        // `preferredDynamicRange` only reaches the panel's headroom for
+        // contents tagged as needing it.
+        XCTAssertGreaterThan(layer.contentsHeadroom, 1)
+    }
+
+    /// The system can ask every app to stop showing HDR content. The canvas's
+    /// half of that is the layer: standard dynamic range until it is told
+    /// otherwise. (The other half is the render loop, which puts the SDR
+    /// rendition on it — `HDRSuppression`.)
+    func testSuppressionDropsTheLayerToStandardDynamicRange() throws {
+        let layer = try XCTUnwrap(h.canvas.layer as? CAMetalLayer)
+        h.canvas.isHDREnabled = false
+        XCTAssertEqual(layer.preferredDynamicRange, .standard)
+        h.canvas.isHDREnabled = true
+        XCTAssertEqual(layer.preferredDynamicRange, .high)
     }
 
     /// The canvas encodes nothing: whatever display-linear value the pipeline

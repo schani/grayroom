@@ -131,8 +131,13 @@ final class AppModel {
     /// Where SDR white falls on the histogram's axis while the HDR ceiling is in
     /// use, `nil` in SDR.
     var sdrWhiteMarker: Double? {
-        HistogramModel.sdrWhiteMarkerPosition(displayWhite: store.edit.displayWhite)
+        HistogramModel.sdrWhiteMarkerPosition(
+            displayWhite: hdrSuppression.displayEdit(store.edit).displayWhite)
     }
+    /// Whether the system has asked for HDR content to be suppressed — the
+    /// canvas drops to standard dynamic range and the loop renders the SDR
+    /// rendition while it has.
+    let hdrSuppression = HDRSuppression()
     var statusMessage: String?
     var errorMessage: String?
 
@@ -293,6 +298,28 @@ final class AppModel {
             }
         }
         importModel.onImport = { [weak self] entries in self?.runImport(entries) }
+        observeHDRSuppression()
+    }
+
+    /// Follow the system's HDR suppression: the canvases stop asking for
+    /// headroom and the loop re-renders the SDR rendition, both ways round.
+    private func observeHDRSuppression() {
+        hdrSuppression.onChange = { [weak self] suppressed in
+            guard let self else { return }
+            self.canvas?.isHDREnabled = !suppressed
+            self.loupeCanvas?.isHDREnabled = !suppressed
+            self.requestRender(force: true)
+        }
+        let center = NotificationCenter.default
+        for (name, suppressed) in [
+            (NSNotification.Name.NSApplicationShouldBeginSuppressingHighDynamicRangeContent, true),
+            (NSNotification.Name.NSApplicationShouldEndSuppressingHighDynamicRangeContent, false),
+        ] {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.hdrSuppression.set(suppressed)
+            }
+        }
+        hdrSuppression.set(NSApp?.applicationShouldSuppressHighDynamicRangeContent ?? false)
     }
 
     // MARK: - Import
@@ -903,6 +930,7 @@ final class AppModel {
         let view = CanvasNSView(device: service.metal.device,
                                 commandQueue: service.metal.commandQueue)
         view.handler = self
+        view.isHDREnabled = !hdrSuppression.isSuppressed
         return view
     }
 
@@ -1137,7 +1165,7 @@ final class AppModel {
         let isDraft = input !== decoded.texture
         isRendering = true
         let coverageIndex = showMaskOverlay ? store.selectedMaskIndex : nil
-        service.renderPreview(input: input, edit: edit,
+        service.renderPreview(input: input, edit: hdrSuppression.displayEdit(edit),
                               coverageMaskIndex: coverageIndex,
                               computeHistogram: !isDraft) { [weak self] result in
             guard let self else { return }

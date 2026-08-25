@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import GrayroomCore
 import GrayroomUI
 import Metal
 import MetalKit
@@ -82,6 +83,12 @@ public final class CanvasNSView: MTKView {
     public var brushSize: Double = 0.05 { didSet { needsDisplay = true } }
     public var brushFeather: Double = 50 { didSet { needsDisplay = true } }
 
+    /// Whether the layer may reach into the panel's headroom. Off is what the
+    /// system's HDR suppression asks for, and it is a display state rather than
+    /// an edit: whoever turns it off also has to render an SDR rendition, or
+    /// the frame is clamped instead of tone-mapped.
+    public var isHDREnabled = true { didSet { applyDynamicRange() } }
+
     public var imageTexture: MTLTexture? { didSet { needsDisplay = true } }
     public var coverageTexture: MTLTexture? { didSet { needsDisplay = true } }
     public var showOverlay = false { didSet { needsDisplay = true } }
@@ -104,8 +111,8 @@ public final class CanvasNSView: MTKView {
     public init(device: MTLDevice, commandQueue: MTLCommandQueue) {
         self.commandQueue = commandQueue
         super.init(frame: .zero, device: device)
-        // An EDR drawable: half-float, tagged **extended linear sRGB**, with
-        // extended-range content declared.
+        // An EDR drawable: half-float, tagged **extended linear sRGB**, and
+        // asking for the panel's high dynamic range.
         //
         // Half-float because the values it carries are linear light and can
         // exceed 1.0 — the pipeline's display output clamps at `W`, not at SDR
@@ -115,15 +122,17 @@ public final class CanvasNSView: MTKView {
         // to the display profile on a P3 or wider panel (wave 3, audit
         // `decode-output` #9: untagged, sRGB-encoded values were interpreted in
         // the display's space and every toned image was drawn more saturated
-        // than the exported file). `wantsExtendedDynamicRangeContent` is the
-        // opt-in that lets anything above 1.0 reach the panel's headroom rather
-        // than being clamped; without it the layer is an ordinary SDR surface
-        // that happens to be float.
+        // than the exported file). `preferredDynamicRange` is the opt-in that
+        // lets anything above 1.0 reach the panel's headroom rather than being
+        // clamped, and `contentsHeadroom` is how much of it the drawable will
+        // use — `.high` rather than `.automatic` because this *is* the editing
+        // canvas the user is looking at.
         colorPixelFormat = .rgba16Float
         if let metalLayer = layer as? CAMetalLayer {
             metalLayer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
-            metalLayer.wantsExtendedDynamicRangeContent = true
+            metalLayer.contentsHeadroom = CGFloat(ToneCurve.hdrDisplayWhite)
         }
+        applyDynamicRange()
         framebufferOnly = true
         isPaused = true
         enableSetNeedsDisplay = true
@@ -138,6 +147,11 @@ public final class CanvasNSView: MTKView {
 
     @available(*, unavailable)
     public required init(coder: NSCoder) { fatalError("not supported") }
+
+    private func applyDynamicRange() {
+        guard let metalLayer = layer as? CAMetalLayer else { return }
+        metalLayer.preferredDynamicRange = isHDREnabled ? .high : .standard
+    }
 
     public override var isFlipped: Bool { true }
     public override var acceptsFirstResponder: Bool { true }
