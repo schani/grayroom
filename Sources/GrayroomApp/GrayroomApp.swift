@@ -38,6 +38,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             NSApp.activate(ignoringOtherApps: true)
         }
+        // A file on the command line reaches AppKit as a launch-time open-file
+        // request, and an app launched to open a file is not given the untitled
+        // window SwiftUI builds its first scene from — `GrayroomApp photo.DNG`
+        // came up with no window at all. Asking for that window is what the
+        // scene needs; SwiftUI's own delegate answers.
+        if NSApp.windows.isEmpty {
+            _ = NSApp.delegate?.applicationOpenUntitledFile?(NSApp)
+        }
         // By title, not `.first`: there is a second `Window` scene now, and
         // whichever one AppKit happens to have created first is not necessarily
         // the editor.
