@@ -164,9 +164,9 @@ public final class Importer {
         }
 
         let metadata = try probe(standardized)
-        // Outside the transaction: it is a small decode plus two Vision passes
-        // (measured at 12 ms a frame once the models are warm), and a write
-        // transaction is not the place to spend them.
+        // Outside the transaction: a 512 px decode plus two Vision passes,
+        // measured at about 65 ms a frame, and a write transaction is not the
+        // place to spend that.
         let analysis = analyzer(standardized)
         let attributes = try FileManager.default.attributesOfItem(atPath: path)
         let byteSize = (attributes[.size] as? NSNumber)?.int64Value ?? 0
