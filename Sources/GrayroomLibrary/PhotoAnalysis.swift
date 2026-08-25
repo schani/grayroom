@@ -37,7 +37,9 @@ public enum PhotoAnalysisError: Error, CustomStringConvertible {
 ///
 /// `analyze` is synchronous and blocks its caller, like every other operation
 /// in this target — the importer runs on a background queue of its own and the
-/// CLI has no run loop to yield to. Never call it on the main thread.
+/// CLI has no run loop to yield to. So it belongs on a `DispatchQueue`, never
+/// on the main thread and never inside an `async` function, where blocking
+/// would take a cooperative thread out with it.
 public enum PhotoAnalyzer {
     /// The size the analysis sees. The same 512 px the grid's previews use, so
     /// a photo that has a preview has already paid for this decode.
