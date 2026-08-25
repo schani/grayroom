@@ -136,6 +136,10 @@ struct LibraryView: View {
             // reading, which is how the self-test can say the position never
             // moved.
             onScroll: { model.libraryGridScroll = $0 },
+            // Lightroom's drag: the selected photos' originals, as files, into
+            // Finder or whatever else takes them.
+            dragFiles: { model.draggedFiles(for: $0) },
+            dragSelection: model.highlightedPhotoIDs,
             cell: { photo in
                 LibraryCell(photo: photo,
                             size: model.libraryThumbnailSize,

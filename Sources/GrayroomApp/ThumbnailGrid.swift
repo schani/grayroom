@@ -26,6 +26,14 @@ import SwiftUI
 /// on and the catcher never hears about it (measured — every click was
 /// swallowed until the cells stood aside). What a cell leaves hit-testable — the
 /// import window's checkbox — keeps taking its own clicks.
+///
+/// # Dragging photos out
+///
+/// A grid that is given `dragFiles` is a drag source: the cells are the drag
+/// container's items, so SwiftUI itself applies Lightroom's rule — a drag that
+/// starts on a selected cell carries the whole selection, one that starts
+/// anywhere else carries only that cell, and neither changes the selection.
+/// What this asks of the grid is only which files those photos are.
 struct ThumbnailGrid<Item: Identifiable, Cell: View>: View where Item.ID: Sendable {
     let items: [Item]
     /// The cell's edge, in points; the grid is adaptive to it.
@@ -45,10 +53,19 @@ struct ThumbnailGrid<Item: Identifiable, Cell: View>: View where Item.ID: Sendab
     /// the grid leaves the window — which is a different thing from being at
     /// the top. `nil` itself for a grid nobody asks (the import window's).
     var onScroll: ((GridScrollMetrics?) -> Void)?
+    /// The files a drag out of this grid hands over, for the photos it names.
+    /// `nil` for a grid that is not a drag source (the import window's); a grid
+    /// that gives one is keyed by photo id, because that is what it is asked in.
+    var dragFiles: (([Int64]) -> [DraggedPhotoFile])?
+    /// What is selected right now, read when a drag starts: that is how the
+    /// container knows whether the cell being dragged is one of many.
+    var dragSelection: [Int64] = []
     @ViewBuilder let cell: (Item) -> Cell
 
     /// The scroll view's position, which is how a cell is scrolled to.
     @State private var position = ScrollPosition(idType: Item.ID.self)
+    /// Ties the cells to the drag container they belong to.
+    @Namespace private var dragContainer
 
     static var spacing: Double { 12 }
     static var padding: Double { 12 }
@@ -62,7 +79,7 @@ struct ThumbnailGrid<Item: Identifiable, Cell: View>: View where Item.ID: Sendab
                     spacing: ThumbnailGrid.spacing
                 ) {
                     ForEach(items) { item in
-                        cell(item)
+                        draggable(cell(item)
                             .background(ClickCatcher(
                                 identifier: ThumbnailGrid.cellIdentifier(item.id),
                                 help: help?(item)
@@ -72,12 +89,16 @@ struct ThumbnailGrid<Item: Identifiable, Cell: View>: View where Item.ID: Sendab
                                 } else {
                                     onClick(item, modifiers)
                                 }
-                            })
+                            }), item)
                             .id(item.id)
                     }
                 }
                 // What makes the cells' `.id`s addressable by `ScrollPosition`.
                 .scrollTargetLayout()
+                .dragContainer(for: DraggedPhotoFile.self, in: dragContainer) { ids in
+                    dragFiles?(ids) ?? []
+                }
+                .dragContainerSelection(dragSelection, containerNamespace: dragContainer)
                 .padding(ThumbnailGrid.padding)
             }
             .scrollPosition($position)
@@ -109,6 +130,18 @@ struct ThumbnailGrid<Item: Identifiable, Cell: View>: View where Item.ID: Sendab
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// A cell of a grid that drags is one of the container's items; a cell of
+    /// one that does not is left alone, so nothing but the click catcher is
+    /// watching the mouse there.
+    @ViewBuilder
+    private func draggable(_ view: some View, _ item: Item) -> some View {
+        if dragFiles != nil {
+            view.draggable(containerItemID: item.id, containerNamespace: dragContainer)
+        } else {
+            view
+        }
+    }
+
     /// The same count `LazyVGrid(.adaptive(minimum:))` arrives at: as many
     /// columns of `itemWidth` as fit, separated by `spacing`, inside the padded
     /// width.
@@ -122,6 +155,21 @@ struct ThumbnailGrid<Item: Identifiable, Cell: View>: View where Item.ID: Sendab
     /// which clicks these views with real (synthesized) mouse events.
     static func cellIdentifier(_ id: Item.ID) -> String {
         "grid-cell-\(id)"
+    }
+}
+
+/// One photo's original, on its way out of the grid.
+///
+/// It carries the photo's id as well as its file because that is what the drag
+/// container names its items by — the same id the cells and the selection use.
+/// What crosses to Finder, or to any other app, is the file: a `URL`, exported
+/// as itself, which is what Lightroom's drag hands over.
+struct DraggedPhotoFile: Transferable, Identifiable {
+    let id: Int64
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        ProxyRepresentation(exporting: \.url)
     }
 }
 

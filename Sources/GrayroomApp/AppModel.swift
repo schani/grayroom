@@ -710,6 +710,14 @@ final class AppModel {
         browser.clickPhoto(id, modifiers: modifiers)
     }
 
+    /// What a drag out of the grid carries for these photos: their originals,
+    /// in grid order, skipping the ones whose files are not there — see
+    /// `GridDragFiles`.
+    func draggedFiles(for ids: [Int64]) -> [DraggedPhotoFile] {
+        GridDragFiles.files(for: ids, from: catalog.photos)
+            .map { DraggedPhotoFile(id: $0.id, url: $0.url) }
+    }
+
     func moveLibraryHighlight(dx: Int, dy: Int) {
         libraryScrollTarget = browser.movePhotoHighlight(dx: dx, dy: dy, columns: libraryColumns)
     }

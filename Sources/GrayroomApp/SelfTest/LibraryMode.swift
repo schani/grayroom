@@ -186,6 +186,25 @@ extension SelfTest {
                 check(app.libraryCountLabel.hasSuffix("· 2 selected"),
                       "the status bar says two (\(app.libraryCountLabel))")
 
+                // 4a. What a drag out of this selection would hand over: the
+                //     two photos' own files, in grid order. The drag session
+                //     itself cannot be driven from here — which cells travel is
+                //     the drag container's rule — so what is checked is the
+                //     payload the container asks the grid for.
+                let dragged = app.draggedFiles(for: app.highlightedPhotoIDs)
+                let wanted = app.highlightedPhotoIDs
+                    .compactMap { app.catalog.photo(id: $0)?.firstLocation }
+                check(dragged.map(\.url.path) == wanted,
+                      "a drag of the selection carries both photos' originals "
+                          + "(\(dragged.map { $0.url.lastPathComponent }))")
+                check(dragged.map(\.id) == app.highlightedPhotoIDs,
+                      "…each still named by its own photo, which is what the drag "
+                          + "container matches the cells by")
+                let alone = app.draggedFiles(for: [ids[1]])
+                check(alone.map(\.id) == [ids[1]],
+                      "…and a drag of one photo carries only that one "
+                          + "(\(alone.map { $0.url.lastPathComponent }))")
+
                 // ⌘A is a key, and it is *not* a menu item — the router owns it.
                 sendKey("a", modifiers: .command, window: window, virtualKey: 0)
             },
@@ -674,3 +693,4 @@ extension SelfTest {
         exit(6)
     }
 }
+
