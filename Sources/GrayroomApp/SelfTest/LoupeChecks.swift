@@ -329,12 +329,24 @@ extension SelfTest {
                       + "walked off the cell it opened on "
                       + "(\(app.libraryScrollTarget.map { "\($0)" } ?? "none"))")
             writeScreenshot(of: window, named: "selftest-library-loupe-scrolled.png")
-            // Back to the size and the position the rest of the run expects
-            // to find the grid at.
-            app.libraryThumbnailSize = ImportModel.defaultThumbnailSize
-            scrollGrid(app, to: 0)
+            // `-` on a grid that is scrolled down must not throw its place
+            // away: smaller thumbnails are shorter content, and a grid that
+            // kept its *offset* through that would be showing photos from
+            // further down the library than the ones the user was looking at.
+            let wereOnScreen = app.visiblePhotoIDs.filter { cellIsWhollyInView($0) }
+            app.stepLibraryThumbnailSize(-2)
             settle(app) {
-                runLoupeChecks(app: app, window: window, check: check, failures: failures)
+                check(wereOnScreen.contains { cellIsInView($0) },
+                      "shrinking the thumbnails left the photos that were on screen on "
+                          + "screen (had \(wereOnScreen), now at "
+                          + "\(gridScrollOffset(app) ?? -1) pt)")
+                // Back to the size and the position the rest of the run expects
+                // to find the grid at.
+                app.libraryThumbnailSize = ImportModel.defaultThumbnailSize
+                scrollGrid(app, to: 0)
+                settle(app) {
+                    runLoupeChecks(app: app, window: window, check: check, failures: failures)
+                }
             }
         }
     }
