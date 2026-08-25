@@ -938,6 +938,15 @@ extension SelfTest {
 
     /// A real double-click on the loupe's canvas, `inset` of the way in from its
     /// top-left corner.
+    ///
+    /// The **whole** double-click — click one and then click two, four events —
+    /// because that is what the hardware sends and, since macOS 26, what
+    /// `NSWindow.sendEvent` insists on. A lone `clickCount: 2` mouse-down is
+    /// dropped on the floor there: AppKit tracks the click run itself now and
+    /// will not deliver the second click of a run whose first click it never
+    /// saw (measured — `hitTest` answers the canvas, `mouseDown` is never
+    /// called). macOS 14 delivered it verbatim, which is why this used to be
+    /// one pair.
     @discardableResult
     static func doubleClickLoupe(inset: Double) -> Bool {
         guard let canvas = findLoupeCanvas(), let window = canvas.window else {
@@ -948,14 +957,16 @@ extension SelfTest {
                             y: canvas.bounds.minY + canvas.bounds.height * inset)
         let point = canvas.convert(local, to: nil)
         clickCounter += 1
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            guard let event = NSEvent.mouseEvent(
-                with: type, location: point, modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: window.windowNumber, context: nil,
-                eventNumber: clickCounter, clickCount: 2, pressure: 1)
-            else { return false }
-            window.sendEvent(event)
+        for clickCount in [1, 2] {
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                guard let event = NSEvent.mouseEvent(
+                    with: type, location: point, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber, context: nil,
+                    eventNumber: clickCounter, clickCount: clickCount, pressure: 1)
+                else { return false }
+                window.sendEvent(event)
+            }
         }
         return true
     }

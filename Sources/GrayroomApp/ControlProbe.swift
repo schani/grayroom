@@ -5,15 +5,13 @@ import SwiftUI
 ///
 /// # Why this is not `.accessibilityIdentifier`
 ///
-/// SwiftUI has one, and in this app it is not enough: SwiftUI builds a
-/// control's accessibility node only for a window the user can see, and the
-/// self-tests run with their windows one level below the desktop icons so they
-/// never take the screen away from whoever is using the machine. Measured: an
+/// SwiftUI has one, and in this app it is not enough: nothing SwiftUI writes on
+/// a control reaches an `NSView` a test could find. Measured: an
 /// `.accessibilityIdentifier("import-check-all")` on the Import window's button
-/// reaches **no** `NSView` in that window at all — the backing
-/// `SwiftUIAppKitButton` answers an empty identifier, an empty title and an
-/// empty accessibility label, and its visible text is drawn by a private
-/// `CGDrawingView` that answers nothing either.
+/// reaches **no** `NSView` in that window at all — the backing view answers an
+/// empty identifier, an empty title and an empty accessibility label, and its
+/// visible text is drawn by a private view that answers nothing either. Since
+/// macOS 26 there is no backing view for a `Button` to ask.
 ///
 /// So the same trick the Folders panel's rows and the photo grid's cells
 /// already use: a plain `NSView` behind the control, carrying the name. It is
@@ -22,10 +20,13 @@ import SwiftUI
 /// (`hitTest` returns `nil`, so the control on top keeps every event) and is
 /// hidden from accessibility clients, which read the control itself.
 ///
-/// The probe gives its control's rectangle; `SelfTest.control(named:)` turns
-/// that into the real `NSButton`/`NSSlider`/`NSPopUpButton` sitting in it, and
-/// drives *that* — so a button whose action is unwired, or gone, fails the
-/// test.
+/// The probe gives its control's rectangle, and the self-test turns that into
+/// the thing sitting in it and drives *that* — so a control whose action is
+/// unwired, or gone, fails the test. Which thing depends on the control:
+/// `SelfTest.control(named:)` for a `Slider`, a `Picker` or a `Toggle`, which
+/// are still an `NSSlider`, an `NSPopUpButton` and an `NSButton`, and
+/// `SelfTest.axElement(named:)` for a `Button`, which since macOS 26 is no
+/// `NSControl` at all (see `AXElement`).
 struct ControlProbe: NSViewRepresentable {
     let name: String
 

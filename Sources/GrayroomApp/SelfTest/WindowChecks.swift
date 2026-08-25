@@ -513,7 +513,7 @@ extension SelfTest {
             {
                 check(app.previewSize != .zero,
                       "…and it decoded (\(app.previewSize))")
-                check(control(named: "toolbar-export")?.isEnabled == true,
+                check(isEnabled(named: "toolbar-export") == true,
                       "the toolbar's Export button is live with an image open")
                 // 37. ⌘E, as a real keystroke through the menu's key
                 //     equivalent, opens the export sheet.
@@ -527,13 +527,9 @@ extension SelfTest {
                       "…and the bare-key router stands aside while it is up")
                 check(control(named: "export-format") is NSPopUpButton,
                       "the sheet has a format pop-up")
-                check(control(named: "export-choose")?.isEnabled == true,
+                check(isEnabled(named: "export-choose") == true,
                       "…and a live Choose File… button")
-                check((control(named: "export-cancel") as? NSButton)?.keyEquivalent == "\u{1b}",
-                      "…and a Cancel button on Esc, which is the only way out of "
-                          + "this sheet that is not a save panel")
-                check((control(named: "export-choose") as? NSButton)?.keyEquivalent == "\r",
-                      "…which is the sheet's default button")
+                check(role(named: "export-cancel") == .button, "…and a Cancel button")
                 check(selectPopUpItem(named: "export-format", titled: "PNG (8-bit)"),
                       "picked PNG (8-bit) out of the format pop-up")
             },
@@ -546,7 +542,8 @@ extension SelfTest {
                 sendKey("escape", modifiers: [], window: window, virtualKey: 53)
             },
             {
-                check(!app.isExportSheetPresented, "Esc dismissed the export sheet")
+                check(!app.isExportSheetPresented,
+                      "Esc dismissed the export sheet, so Cancel is its .cancelAction")
                 check(window.attachedSheet == nil, "…and the sheet is off the window")
                 check(KeyRouter.acceptsKeys(window), "…and the keys are the router's again")
                 // 39. And now the export itself. `runExport` runs an
@@ -556,7 +553,13 @@ extension SelfTest {
             },
             {
                 check(app.isExportSheetPresented, "the Export button's sheet came up")
-                app.isExportSheetPresented = false
+                // 40. Return runs Choose File…, which is `.defaultAction`. The
+                //     assertion is the save panel it opens, because the binding
+                //     itself is not readable any more (see `AXElement`).
+                check(returnOpensTheSavePanel(in: window),
+                      "Return opened the save panel, so Choose File… is the "
+                          + "sheet's default button")
+                check(!app.isExportSheetPresented, "…and running it took the sheet down")
                 app.export(to: exported)
                 check(app.tasks.tasks.contains { $0.title.hasPrefix("Exporting ") },
                       "the export registered a task in the activity centre "
@@ -589,6 +592,33 @@ extension SelfTest {
                 runCullingChecks(app: app, window: window, check: check, failures: failures)
             }
         }
+    }
+
+    /// Presses Return on the export sheet and answers whether that opened the
+    /// save panel — the observable half of `.keyboardShortcut(.defaultAction)`.
+    ///
+    /// There is no readable half left. A SwiftUI `Button` has no `NSButton` and
+    /// so no `keyEquivalent`, and the sheet's window answers `nil` for
+    /// `defaultButtonCell`, `accessibilityDefaultButton()` and
+    /// `accessibilityCancelButton()` (measured; see `AXElement`). So the check
+    /// is the behaviour instead, which asserts more than the binding did: the
+    /// key really does run Choose File…, whose `NSSavePanel` comes up.
+    ///
+    /// The panel is aborted from a run-loop timer in `.modalPanel` mode.
+    /// `runModal` blocks inside `sendKey` and starves the main queue, so a
+    /// dispatched block never runs — measured, the run hung until its deadline.
+    static func returnOpensTheSavePanel(in window: NSWindow) -> Bool {
+        var opened = false
+        let timer = Timer(timeInterval: 0.2, repeats: true) { timer in
+            guard NSApp.modalWindow is NSSavePanel else { return }
+            opened = true
+            NSApp.abortModal()
+            timer.invalidate()
+        }
+        RunLoop.main.add(timer, forMode: .modalPanel)
+        sendKey("\r", modifiers: [], window: window, virtualKey: 36)
+        timer.invalidate()
+        return opened
     }
 
     static func waitForExport(_ app: AppModel, then body: @escaping () -> Void) {

@@ -170,8 +170,22 @@ enum SelfTest {
         if window.hidesOnDeactivate { window.hidesOnDeactivate = false }
     }
 
+    /// Makes SwiftUI publish its accessibility tree.
+    ///
+    /// It builds one only for a process it believes an assistive client is
+    /// attached to, and nothing is attached to a self-test: without this a
+    /// hosting view answers no accessibility children at all (measured), and a
+    /// SwiftUI `Button` — which has no `NSControl` behind it since macOS 26 —
+    /// is not addressable by anything. `AXEnhancedUserInterface` is the flag
+    /// AppKit itself sets on the application when VoiceOver arrives.
+    static func enableAccessibility() {
+        (NSApp as AnyObject).accessibilitySetValue?(
+            true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+    }
+
     static func startIfRequested() {
         guard isRequested else { return }
+        enableAccessibility()
         startedAt = Date()
         deadline = startedAt.addingTimeInterval(300)
         // The import window does not need a document, so it does not wait for
@@ -418,18 +432,23 @@ enum SelfTest {
         views(identified: ControlProbe.identifier(name)).first { $0.window != nil }
     }
 
-    /// The real `NSControl` a `.controlProbe(name)` names.
+    /// The real `NSControl` a `.controlProbe(name)` names, when there is one.
     ///
-    /// SwiftUI's controls *are* AppKit controls — an `NSButton`, an
-    /// `NSPopUpButton`, an `NSSlider`, an `NSSegmentedControl` — but they carry
-    /// no title, no identifier and no accessibility label a test could match
-    /// on (measured; see `ControlProbe`). What they do have is a frame, and the
-    /// probe sits at exactly that frame. So the control is the innermost
-    /// `NSControl` in the same window that the probe's rectangle contains.
+    /// A `Toggle`, a `Picker` and a `Slider` are AppKit controls — an
+    /// `NSButton`, an `NSPopUpButton`, an `NSSlider`, an `NSSegmentedControl` —
+    /// but they carry no title, no identifier and no accessibility label a test
+    /// could match on (measured; see `ControlProbe`). What they do have is a
+    /// frame, and the probe sits at exactly that frame. So the control is the
+    /// innermost `NSControl` in the same window that the probe's rectangle
+    /// contains.
     ///
-    /// Driving *that* — `performClick`, a new value plus its action — is what
-    /// makes these checks real: a button whose action is not wired to the model
-    /// fails them, and so does a button that is no longer there.
+    /// Driving *that* — a new value plus its action — is what makes those
+    /// checks real: a control whose action is not wired to the model fails them,
+    /// and so does one that is no longer there.
+    ///
+    /// A `Button` answers `nil` here: since macOS 26 SwiftUI draws one itself
+    /// and puts no `NSControl` behind it (see `AXElement`). Read one through
+    /// `axElement(named:)` and press it with `clickProbe(named:)`.
     static func control(named name: String) -> NSControl? {
         guard let probe = probeView(name), let window = probe.window,
               let root = searchRoot(of: window) else {
@@ -437,81 +456,125 @@ enum SelfTest {
             return nil
         }
         let rect = probe.convert(probe.bounds, to: nil)
-        let probeArea = Double(rect.width * rect.height)
-        // Two ways for a rectangle to be a control's, because SwiftUI lays its
-        // controls out three different ways. An `NSButton` is *bigger* than the
-        // SwiftUI box it was given (bezel and focus ring bleed past it) and a
-        // `Picker`'s `NSPopUpButton` is slightly smaller, so for both of those
-        // the two rectangles are nearly the same rectangle. A `Toggle`'s
-        // checkbox is a 16 pt square inside a 150 pt probe that also covers its
-        // label, and nothing about *that* is "nearly the same" — but it is the
-        // smallest control wholly inside the probe, and there is only one.
-        //
-        // So: the nearest rectangle if there is one, otherwise the smallest
-        // control the probe contains. Never simply "the biggest overlap" — the
-        // window is full of large controls that contain any given probe.
-        var nearest: (control: NSControl, score: Double)?
-        var contained: (control: NSControl, area: Double)?
-        var candidates: [(String, Double, Double)] = []
+        var controls: [NSControl] = []
         func search(_ view: NSView) {
-            if let control = view as? NSControl {
-                let frame = control.convert(control.bounds, to: nil)
-                let overlap = frame.intersection(rect)
-                let intersection = overlap.isNull ? 0
-                    : Double(overlap.width * overlap.height)
-                let own = Double(frame.width * frame.height)
-                let union = own + probeArea - intersection
-                let similarity = union > 0 ? intersection / union : 0
-                let inside = own > 0 ? intersection / own : 0
-                // A few points of slack for the containment test: a checkbox's
-                // `NSButton` is 18 pt where SwiftUI laid out 14, so it hangs
-                // 2 pt past the probe on every side and is not, strictly,
-                // inside it.
-                let grown = frame.intersection(rect.insetBy(dx: -4, dy: -4))
-                let insideGrown = own > 0 && !grown.isNull
-                    ? Double(grown.width * grown.height) / own : 0
-                if intersection > 0 { candidates.append((String(describing: type(of: control)),
-                                                         similarity, inside)) }
-                if similarity > 0.4, nearest == nil || similarity > nearest!.score {
-                    nearest = (control, similarity)
-                }
-                if insideGrown > 0.9, contained == nil || own < contained!.area {
-                    contained = (control, own)
-                }
-            }
+            if let control = view as? NSControl { controls.append(control) }
             view.subviews.forEach(search)
         }
         search(root)
-        let best = nearest.map { ($0.control, $0.score) }
-            ?? contained.map { ($0.control, $0.area) }
-        if best == nil {
-            let described = candidates.map {
-                String(format: "%@ near=%.2f inside=%.2f", $0.0, $0.1, $0.2)
-            }
-            log("self-test: '\(name)' has a probe at \(rect) but no control on it "
-                + "(candidates: \(described))")
+        guard let index = match(rect, among: controls.map { $0.convert($0.bounds, to: nil) })
+        else {
+            log("self-test: '\(name)' has a probe at \(rect) but no NSControl on it")
+            return nil
         }
-        return best?.0
+        return controls[index]
+    }
+
+    /// Which of `frames` is the rectangle at `rect` — the geometry both
+    /// `control(named:)` and `axElement(named:)` match a probe by.
+    ///
+    /// Two ways for a rectangle to be a control's, because SwiftUI lays its
+    /// controls out three different ways. An `NSButton` is *bigger* than the
+    /// SwiftUI box it was given (bezel and focus ring bleed past it) and a
+    /// `Picker`'s `NSPopUpButton` is slightly smaller, so for both of those the
+    /// two rectangles are nearly the same rectangle. A `Toggle`'s checkbox is a
+    /// 16 pt square inside a 150 pt probe that also covers its label, and
+    /// nothing about *that* is "nearly the same" — but it is the smallest
+    /// control wholly inside the probe, and there is only one.
+    ///
+    /// So: the nearest rectangle if there is one, otherwise the smallest one the
+    /// probe contains. Never simply "the biggest overlap" — the window is full
+    /// of large controls that contain any given probe.
+    static func match(_ rect: NSRect, among frames: [NSRect]) -> Int? {
+        let probeArea = Double(rect.width * rect.height)
+        var nearest: (index: Int, score: Double)?
+        var contained: (index: Int, area: Double)?
+        for (index, frame) in frames.enumerated() {
+            let overlap = frame.intersection(rect)
+            let intersection = overlap.isNull ? 0 : Double(overlap.width * overlap.height)
+            let own = Double(frame.width * frame.height)
+            let union = own + probeArea - intersection
+            let similarity = union > 0 ? intersection / union : 0
+            // A few points of slack for the containment test: a checkbox's
+            // `NSButton` is 18 pt where SwiftUI laid out 14, so it hangs 2 pt
+            // past the probe on every side and is not, strictly, inside it.
+            let grown = frame.intersection(rect.insetBy(dx: -4, dy: -4))
+            let insideGrown = own > 0 && !grown.isNull
+                ? Double(grown.width * grown.height) / own : 0
+            if similarity > 0.4, nearest == nil || similarity > nearest!.score {
+                nearest = (index, similarity)
+            }
+            if insideGrown > 0.9, contained == nil || own < contained!.area {
+                contained = (index, own)
+            }
+        }
+        return nearest?.index ?? contained?.index
+    }
+
+    /// The accessibility element a `.controlProbe(name)` names — the same
+    /// rectangle, read out of the window's accessibility tree instead of its
+    /// view tree. See `AXElement` for why the tests need one.
+    static func axElement(named name: String) -> AXElement? {
+        guard let probe = probeView(name), let window = probe.window else {
+            log("self-test: no control probe named '\(name)'")
+            return nil
+        }
+        // Accessibility frames are in screen coordinates, which is what the
+        // probe's rectangle has to be turned into to be compared with them.
+        let rect = window.convertToScreen(probe.convert(probe.bounds, to: nil))
+        var elements: [AXElement] = []
+        func search(_ element: AXElement) {
+            elements.append(element)
+            element.children.forEach(search)
+        }
+        AXElement(window).children.forEach(search)
+        guard let index = match(rect, among: elements.map(\.frame)) else {
+            log("self-test: '\(name)' has a probe at \(rect) but no accessibility element "
+                + "on it (\(elements.count) in the window)")
+            return nil
+        }
+        return elements[index]
+    }
+
+    /// What a named control is, to an accessibility client — `.button`,
+    /// `.checkBox`, `.popUpButton`, `.slider`. The assertion that a control is
+    /// drawn there at all, and is the kind of control it should be.
+    static func role(named name: String) -> NSAccessibility.Role? {
+        axElement(named: name)?.role
+    }
+
+    /// Whether a named control is live.
+    ///
+    /// Read off its accessibility node, not an `NSControl`: since macOS 26 a
+    /// SwiftUI `Button` has no `NSControl` at all, and its node is the only
+    /// thing left that answers for `.disabled(_:)`. Nodes report enablement for
+    /// the controls that *are* still `NSControl`s too, so every named control
+    /// is read the same way.
+    static func isEnabled(named name: String) -> Bool? {
+        axElement(named: name)?.isEnabled
     }
 
     /// Presses a named control.
     ///
-    /// Two ways, because SwiftUI builds buttons two ways. A bordered `Button`
-    /// is a real `NSButton`, and the honest press for one of those is
-    /// target/action: it does not depend on which window happens to be key,
-    /// which this process cannot reliably arrange (AppKit hands the click that
-    /// activates a window to the window, not to the control under it —
-    /// measured, one run in three). A `.buttonStyle(.plain)` button is not an
-    /// `NSControl` at all; it is SwiftUI's own drawing and its own gesture, and
-    /// the only thing that presses it is a mouse event. So: the control if
-    /// there is one, a real click at the probe's rectangle if there is not.
+    /// Two ways, because a named control is an `NSControl` or it is not. When
+    /// it is — a `Toggle`'s checkbox — the honest press is target/action: it
+    /// does not depend on which window happens to be key, which this process
+    /// cannot reliably arrange (AppKit hands the click that activates a window
+    /// to the window, not to the control under it — measured, one run in
+    /// three). A SwiftUI `Button` is not an `NSControl`; it is SwiftUI's own
+    /// drawing and its own gesture, and the only thing that presses it is a
+    /// mouse event. So: the control if there is one, a real click at the
+    /// probe's rectangle if there is not.
+    ///
+    /// Either way a dead control refuses the press, so "pressed X" never passes
+    /// on a button the model has disabled.
     @discardableResult
     static func clickControl(named name: String) -> Bool {
+        guard isEnabled(named: name) != false else {
+            log("self-test: the button named '\(name)' is disabled")
+            return false
+        }
         if let control = control(named: name) as? NSButton {
-            guard control.isEnabled else {
-                log("self-test: the button named '\(name)' is disabled")
-                return false
-            }
             let before = control.state
             control.performClick(nil)
             log("self-test: pressed '\(name)' (\(type(of: control)), "
@@ -659,6 +722,20 @@ enum SelfTest {
     /// all — which is the assertion for anything that appears and disappears.
     static func controlFrame(named name: String) -> NSRect? {
         probeView(name).flatMap(screenFrame(of:))
+    }
+
+    /// Every accessibility element in a window, with the facts a check reads
+    /// off one: role, label, enablement and frame. The counterpart of
+    /// `dumpViews` for the controls that are no longer views.
+    static func dumpAX(in window: NSWindow) {
+        func walk(_ element: AXElement, indent: String) {
+            log("self-test: ax \(indent)\(type(of: element.object)) "
+                + "role=\(element.role?.rawValue ?? "-") label='\(element.label ?? "")' "
+                + "enabled=\(element.isEnabled) frame=\(element.frame)")
+            element.children.forEach { walk($0, indent: indent + "  ") }
+        }
+        log("self-test: ax tree of '\(window.title)'")
+        walk(AXElement(window), indent: "")
     }
 
     /// Every view in a window, with the facts that decide whether a test can
@@ -922,5 +999,42 @@ enum SelfTest {
     static func fail(_ message: String) -> Never {
         log("self-test FAILED: \(message)")
         exit(2)
+    }
+}
+
+/// One accessibility element, as the self-test reads it.
+///
+/// # Why the tests read controls this way
+///
+/// Since macOS 26 a SwiftUI `Button` is not backed by an `NSButton`. Under the
+/// probe's rectangle there is a `_FocusRingView`, a `KeyViewProxy` and nothing
+/// else — no `NSControl`, so no `isEnabled`, no `keyEquivalent` and nothing to
+/// `performClick` (measured; a `Toggle`, a `Picker` and a `Slider` still get
+/// their `NSButton`, `NSPopUpButton` and `NSSlider`).
+///
+/// What SwiftUI does still publish for a button is an accessibility node,
+/// carrying its role, its label and its live enablement — so that is what the
+/// checks read. It publishes them only once `SelfTest.enableAccessibility()`
+/// has run.
+///
+/// Key equivalents are *not* in there, and are no longer observable at all:
+/// `.keyboardShortcut(.defaultAction)` and `.cancelAction` leave the sheet's
+/// window answering `nil` for `defaultButtonCell`, for
+/// `accessibilityDefaultButton()` and for `accessibilityCancelButton()`, and
+/// the node has no key attribute (measured). Those checks press the key
+/// instead, which is the stronger assertion anyway.
+struct AXElement {
+    let object: AnyObject
+
+    init(_ object: AnyObject) { self.object = object }
+
+    var role: NSAccessibility.Role? { (object.accessibilityRole?()) ?? nil }
+    var label: String? { (object.accessibilityLabel?()) ?? nil }
+    var isEnabled: Bool { object.isAccessibilityEnabled?() ?? false }
+    /// In screen coordinates, which is what `SelfTest.axElement(named:)` turns
+    /// a probe's rectangle into to match it.
+    var frame: NSRect { object.accessibilityFrame?() ?? .zero }
+    var children: [AXElement] {
+        (((object.accessibilityChildren?()) ?? nil) ?? []).map { AXElement($0 as AnyObject) }
     }
 }

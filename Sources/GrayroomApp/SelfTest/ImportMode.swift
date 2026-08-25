@@ -102,7 +102,10 @@ extension SelfTest {
                 check(false, "the JPEG is in the grid")
             }
             if ProcessInfo.processInfo.environment["GRAYROOM_SELFTEST_DUMP_VIEWS"] != nil,
-               let window { dumpViews(in: window) }
+               let window {
+                dumpViews(in: window)
+                dumpAX(in: window)
+            }
             check(model.totalCount > 0, "the scan found importable images (\(model.totalCount))")
             check(model.checkedCount > 0, "new files arrived checked (\(model.checkedCount))")
             let withThumbnails = model.items.filter { $0.thumbnail != nil }.count
@@ -318,7 +321,7 @@ extension SelfTest {
                 check(model.visibleItems.count == model.totalCount,
                       "…so the grid now draws the whole scan "
                           + "(\(model.visibleItems.count) of \(model.totalCount))")
-                check(control(named: "import-check-all") != nil,
+                check(role(named: "import-check-all") == .button,
                       "the Import window has a Check All button")
                 check(clickControl(named: "import-uncheck-all"), "pressed Uncheck All")
             },
@@ -328,7 +331,7 @@ extension SelfTest {
                 // The one `.disabled` in this app that is allowed to be live,
                 // because a view's body re-evaluates and a menu command's
                 // builder does not (see GrayroomApp.swift).
-                check(control(named: "import-run")?.isEnabled == false,
+                check(isEnabled(named: "import-run") == false,
                       "…and the Import button went dead with nothing to import")
                 check(clickControl(named: "import-check-all"), "pressed Check All")
             },
@@ -337,7 +340,7 @@ extension SelfTest {
                       "Check All ticked all \(model.totalCount) "
                           + "(\(model.checkedCount); unticked: "
                           + "\(model.items.filter { !$0.checked }.map(\.filename)))")
-                check(control(named: "import-run")?.isEnabled == true,
+                check(isEnabled(named: "import-run") == true,
                       "…and the Import button came back to life")
                 orderBefore = cellsOnScreen()
                 check(orderBefore == model.visibleItems.map(\.url),
