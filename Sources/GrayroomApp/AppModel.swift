@@ -1291,37 +1291,72 @@ final class AppModel {
 
     // MARK: - Export
 
+    /// What File › Export… would write: the grid's highlight in the Library
+    /// (which in the loupe is the one photo on screen), the open photo in
+    /// Develop — the same rule the colour labels follow.
+    ///
+    /// A library photo is exported through the development the grid draws it
+    /// by; the open photo through the edit on screen, saved or not.
+    func exportJobs() -> [ExportJob] {
+        if mode == .develop {
+            guard let url = imageURL else { return [] }
+            return [ExportJob(source: url, edit: store.edit)]
+        }
+        guard let library, !highlightedPhotoIDs.isEmpty else { return [] }
+        return (try? BatchExport.jobs(forPhotoIDs: highlightedPhotoIDs, in: library)) ?? []
+    }
+
+    /// Whether File › Export… does anything — what `ExportMenuController` greys
+    /// the item out by.
+    var canExport: Bool {
+        mode == .library ? !highlightedPhotoIDs.isEmpty : imageURL != nil
+    }
+
     func presentExportSheet() {
-        guard imageURL != nil else { return }
+        guard canExport else { return }
         isExportSheetPresented = true
     }
 
+    /// The sheet's Choose… button: one photo goes to a file, several to a
+    /// folder.
     func runExport() {
-        guard let service, let url = imageURL else { return }
         isExportSheetPresented = false
-        let panel = NSSavePanel()
-        panel.message = "Export the full-resolution render"
-        panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent
-            + "." + exportFormat.fileExtension
-        if let type = UTType(filenameExtension: exportFormat.fileExtension) {
-            panel.allowedContentTypes = [type]
+        let jobs = exportJobs()
+        guard let first = jobs.first else { return }
+        if jobs.count == 1 {
+            let panel = NSSavePanel()
+            panel.message = "Export the full-resolution render"
+            panel.nameFieldStringValue = first.stem + "." + exportFormat.fileExtension
+            if let type = UTType(filenameExtension: exportFormat.fileExtension) {
+                panel.allowedContentTypes = [type]
+            }
+            guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+            export(to: outputURL)
+            return
         }
-        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
-        export(to: outputURL)
+        let panel = NSOpenPanel()
+        panel.message = "Export \(jobs.count) photos into a folder"
+        panel.prompt = "Export"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+        exportBatch(to: directory)
     }
 
     /// Everything Export does once the save panel has answered — see
     /// `openChosenFile` for why the panel and the work it starts are two
     /// methods.
     func export(to outputURL: URL) {
-        guard let service, let url = imageURL else { return }
+        guard let service, let job = exportJobs().first, let url = job.source else { return }
         isExporting = true
         statusMessage = nil
         // Indeterminate: a full-resolution render reports nothing until it is
         // done, and inventing a fake percentage would be worse than a bar that
         // says only "still going".
         let taskID = tasks.begin(title: "Exporting \(outputURL.lastPathComponent)")
-        service.export(url: url, edit: store.edit, to: outputURL,
+        service.export(url: url, edit: job.edit, to: outputURL,
                        format: exportFormat, quality: exportQuality) { [weak self] result in
             guard let self else { return }
             self.isExporting = false
@@ -1334,6 +1369,46 @@ final class AppModel {
                 self.errorMessage = "Export failed: \(error)"
             }
         }
+    }
+
+    /// The same, once the folder panel has answered: every selected photo, one
+    /// file each, cancellable from the activity centre.
+    func exportBatch(to directory: URL) {
+        guard let service else { return }
+        let jobs = exportJobs()
+        guard jobs.count > 1 else { return }
+        isExporting = true
+        statusMessage = nil
+        let taskID = tasks.begin(title: "Exporting \(jobs.count) photos",
+                                 total: jobs.count, cancellable: true)
+        service.exportBatch(jobs, to: directory, format: exportFormat, quality: exportQuality,
+                            isCancelled: { [weak self] in
+                                guard let self else { return true }
+                                return self.tasks.isCancelled(taskID)
+                            },
+                            progress: { [weak self] done, name in
+                                self?.tasks.update(taskID, completed: done, detail: name)
+                            }) { [weak self] result in
+            guard let self else { return }
+            self.isExporting = false
+            self.tasks.finish(taskID)
+            switch result {
+            case .success(let batch):
+                self.statusMessage = AppModel.exportSummary(batch)
+            case .failure(let error):
+                self.errorMessage = "Export failed: \(error)"
+            }
+        }
+    }
+
+    /// "Exported 3", "Exported 2 (1 failed: …)" — the import's summary line,
+    /// for the other batch job the app runs.
+    static func exportSummary(_ result: BatchExportResult) -> String {
+        var message = "Exported \(result.written.count)"
+        if let first = result.failures.first {
+            message += " (\(result.failures.count) failed: \(first.message))"
+        }
+        return result.isCancelled ? "Export cancelled — " + message : message
     }
 }
 

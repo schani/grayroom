@@ -7,7 +7,7 @@ public struct Grayroom: ParsableCommand {
         commandName: "grayroom",
         abstract: "Headless B&W RAW developer.",
         version: "0.4.0 (M6)",
-        subcommands: [Probe.self, Render.self, MaskPreview.self,
+        subcommands: [Probe.self, Render.self, Export.self, MaskPreview.self,
                       Import.self, List.self, Show.self,
                       Tag.self, Color.self, Developments.self, Previews.self],
         defaultSubcommand: nil)

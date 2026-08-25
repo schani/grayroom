@@ -65,8 +65,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppModel.shared.openInitialDocument()
         keyRouter = KeyRouter(model: AppModel.shared)
         keyRouter?.install()
-        // The menu bar exists by now; take over Undo/Redo (see UndoMenu.swift).
+        // The menu bar exists by now; take over Undo/Redo (see UndoMenu.swift)
+        // and Export, which needs live enablement for the same reason.
         UndoMenuController.shared.adoptMenuItems(store: AppModel.shared.store)
+        ExportMenuController.shared.adoptMenuItem(model: AppModel.shared)
         SelfTest.startIfRequested()
     }
 
@@ -108,10 +110,9 @@ struct GrayroomApp: App {
             CommandGroup(replacing: .saveItem) {
                 Button("Save") { model.saveNow() }
                     .keyboardShortcut("s", modifiers: .command)
-                // No `.disabled(model.imageURL == nil)`: see the note below.
-                // `presentExportSheet()` already ignores the request when there
-                // is no image, and a disabled-at-launch item would kill Cmd-E
-                // for the whole session.
+                // No `.disabled(…)`: see the note below. `ExportMenuController`
+                // adopts this item after launch and supplies live enablement
+                // through `validateMenuItem`.
                 Button("Export…") { model.presentExportSheet() }
                     .keyboardShortcut("e", modifiers: .command)
             }

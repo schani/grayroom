@@ -237,11 +237,19 @@ enum SelfTest {
             try? FileManager.default.createDirectory(at: directory,
                                                      withIntermediateDirectories: true)
         }
-        let jpeg = directory.appendingPathComponent("standard.jpg")
+        _ = writeSyntheticJPEG(to: directory.appendingPathComponent("standard.jpg"))
+        return staged
+    }
+
+    /// A 64×48 JPEG with a gradient in it and a capture date on it. `seed`
+    /// shifts the pixels so two of these are two different files, and therefore
+    /// two photos.
+    static func writeSyntheticJPEG(to url: URL, seed: Int = 0,
+                                   captured: String = "2021:03:09 08:15:00") -> Bool {
         let width = 64, height = 48
         var bytes = [UInt8](repeating: 255, count: width * height * 4)
         for i in 0..<(width * height) {
-            let value = UInt8((i * 7) % 256)
+            let value = UInt8((i * 7 + seed) % 256)
             bytes[i * 4] = value
             bytes[i * 4 + 1] = value
             bytes[i * 4 + 2] = UInt8(255 - Int(value))
@@ -255,22 +263,23 @@ enum SelfTest {
                                   provider: provider, decode: nil, shouldInterpolate: false,
                                   intent: .defaultIntent),
               let destination = CGImageDestinationCreateWithURL(
-                  jpeg as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
+                  url as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
         else {
-            log("import self-test: could not build the synthetic JPEG")
-            return staged
+            log("self-test: could not build the synthetic JPEG")
+            return false
         }
         let properties: [CFString: Any] = [
             kCGImagePropertyExifDictionary: [
-                kCGImagePropertyExifDateTimeOriginal as String: "2021:03:09 08:15:00",
+                kCGImagePropertyExifDateTimeOriginal as String: captured,
                 kCGImagePropertyExifOffsetTimeOriginal as String: "+00:00",
             ],
         ]
         CGImageDestinationAddImage(destination, image, properties as CFDictionary)
-        if !CGImageDestinationFinalize(destination) {
-            log("import self-test: could not write the synthetic JPEG")
+        guard CGImageDestinationFinalize(destination) else {
+            log("self-test: could not write the synthetic JPEG")
+            return false
         }
-        return staged
+        return true
     }
 
     /// Polls until the import task leaves the activity centre, reporting the

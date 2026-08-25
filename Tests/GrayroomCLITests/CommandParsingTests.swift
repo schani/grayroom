@@ -17,7 +17,7 @@ final class CommandParsingTests: XCTestCase {
     func testSubcommandNames() {
         let names = Grayroom.configuration.subcommands.map { $0.configuration.commandName ?? "" }
         XCTAssertEqual(Set(names),
-                       ["probe", "render", "mask-preview", "import", "ls", "show",
+                       ["probe", "render", "export", "mask-preview", "import", "ls", "show",
                         "tag", "color", "developments", "previews"])
     }
 

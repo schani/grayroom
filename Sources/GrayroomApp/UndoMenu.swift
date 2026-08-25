@@ -52,8 +52,8 @@ final class UndoMenuController: NSObject, NSMenuItemValidation {
 
     private func adopt() {
         guard store != nil,
-              let undo = UndoMenuController.item(key: "z", modifiers: [.command]),
-              let redo = UndoMenuController.item(key: "z", modifiers: [.command, .shift]) else {
+              let undo = MenuBar.item(key: "z", modifiers: [.command]),
+              let redo = MenuBar.item(key: "z", modifiers: [.command, .shift]) else {
             return
         }
         guard undo.target !== self || redo.target !== self else { return }
@@ -62,22 +62,6 @@ final class UndoMenuController: NSObject, NSMenuItemValidation {
         redo.target = self
         redo.action = #selector(redoAction(_:))
         SelfTest.note("UndoMenuController: adopted '\(undo.title)' and '\(redo.title)'")
-    }
-
-    /// The item carrying a given key equivalent, anywhere in the menu bar.
-    /// Matched on the shortcut rather than the title so it survives a renamed or
-    /// localized menu item.
-    private static func item(key: String, modifiers: NSEvent.ModifierFlags) -> NSMenuItem? {
-        guard let main = NSApp.mainMenu else { return nil }
-        for top in main.items {
-            guard let submenu = top.submenu else { continue }
-            if let found = submenu.items.first(where: {
-                $0.keyEquivalent == key && $0.keyEquivalentModifierMask == modifiers
-            }) {
-                return found
-            }
-        }
-        return nil
     }
 
     @objc private func undoAction(_ sender: Any?) {

@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import GrayroomCore
+import GrayroomLibrary
 import Metal
 
 /// All GPU work, off the main thread.
@@ -158,17 +159,36 @@ final class RenderService {
                 format: ExportFormat, quality: Double,
                 completion: @escaping (Result<Renderer.Output, Error>) -> Void) {
         run(exportQueue) { () -> Renderer.Output in
-            let r: Renderer
-            if let existing = self.exportRenderer {
-                r = existing
-            } else {
-                r = try Renderer()
-                self.exportRenderer = r
-            }
-            return try r.render(rawURL: url, edit: edit, to: outputURL,
-                                format: format, quality: quality,
-                                maxDimension: nil, computeHistogram: false)
+            try self.rendererForExport().render(rawURL: url, edit: edit, to: outputURL,
+                                                format: format, quality: quality,
+                                                maxDimension: nil, computeHistogram: false)
         } completion: { completion($0) }
+    }
+
+    /// Several photos into one folder, on the same queue and the same renderer
+    /// as a single export. `isCancelled` is polled on the worker — `TaskCenter`
+    /// answers it from any thread — and `progress` lands on the main queue.
+    func exportBatch(_ jobs: [ExportJob], to directory: URL,
+                     format: ExportFormat, quality: Double,
+                     isCancelled: @escaping () -> Bool,
+                     progress: @escaping (Int, String) -> Void,
+                     completion: @escaping (Result<BatchExportResult, Error>) -> Void) {
+        run(exportQueue) { () -> BatchExportResult in
+            BatchExport.run(jobs, to: directory, format: format, quality: quality,
+                            renderer: try self.rendererForExport(),
+                            isCancelled: isCancelled,
+                            progress: { done, name in
+                                DispatchQueue.main.async { progress(done, name) }
+                            })
+        } completion: { completion($0) }
+    }
+
+    /// Only ever touched on `exportQueue`.
+    private func rendererForExport() throws -> Renderer {
+        if let existing = exportRenderer { return existing }
+        let r = try Renderer()
+        exportRenderer = r
+        return r
     }
 
     // MARK: - Grid previews
