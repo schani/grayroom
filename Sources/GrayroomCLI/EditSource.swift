@@ -42,7 +42,7 @@ public enum EditSourceError: Error, CustomStringConvertible, Equatable {
 /// Precedence, highest first:
 ///
 /// 1. `--edit file.json`;
-/// 2. the input file's development in the library — #1 unless `--development` says otherwise;
+/// 2. the input file's first remaining development, unless `--development` says otherwise;
 /// 3. a default `EditState`.
 ///
 /// `--set` overrides are applied on top of whichever won.
@@ -75,15 +75,14 @@ public enum EditSource {
             }
             origin = .file(url)
         } else if let library, let photoID {
-            let wanted = developmentOrdinal ?? 1
-            let developments = try library.developments(for: photoID)
-            if let match = developments.first(where: { $0.ordinal == wanted }), let id = match.id {
+            if let match = try development(for: photoID, ordinal: developmentOrdinal, in: library),
+               let id = match.id {
                 edit = match.edit
                 origin = .libraryDevelopment(id: id, ordinal: match.ordinal)
-            } else if developmentOrdinal != nil {
+            } else if let developmentOrdinal {
                 // An explicit --development that does not exist is a mistake, not a
                 // reason to silently render the defaults.
-                throw EditSourceError.noSuchDevelopment(wanted, photoID)
+                throw EditSourceError.noSuchDevelopment(developmentOrdinal, photoID)
             }
         }
 
@@ -93,9 +92,8 @@ public enum EditSource {
 
     /// `render --save`: write the effective edit back to the library.
     ///
-    /// The development written is the one the edit came from, or `--development`'s ordinal,
-    /// or #1. A file the library has never seen is imported first, so `--save`
-    /// always has somewhere to put the edit.
+    /// Writes to the source development, the explicit ordinal, or the first
+    /// remaining development. Files new to the library are imported first.
     @discardableResult
     public static func save(_ resolved: ResolvedEdit,
                             input: URL,
@@ -112,12 +110,18 @@ public enum EditSource {
         if case .libraryDevelopment(let id, _) = resolved.origin {
             return try library.updateDevelopment(id: id, edit: resolved.edit)
         }
-        let wanted = developmentOrdinal ?? 1
-        if let existing = try library.developments(for: photoID).first(where: { $0.ordinal == wanted }),
+        if let existing = try development(for: photoID, ordinal: developmentOrdinal, in: library),
            let id = existing.id {
             return try library.updateDevelopment(id: id, edit: resolved.edit)
         }
         return try library.addDevelopment(photoID: photoID, edit: resolved.edit)
+    }
+
+    private static func development(for photoID: Int64, ordinal: Int?,
+                                    in library: Library) throws -> Development? {
+        let developments = try library.developments(for: photoID)
+        guard let ordinal else { return developments.first }
+        return developments.first { $0.ordinal == ordinal }
     }
 }
 

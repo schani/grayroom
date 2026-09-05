@@ -87,6 +87,39 @@ final class EditSourceTests: XCTestCase {
         XCTAssertEqual(resolved.photoID, photoID)
     }
 
+    func testDefaultDevelopmentMatchesExportAfterDeletingOrdinalOne() throws {
+        let photoID = try temp.importFile(input)
+        let first = try library.addDevelopment(photoID: photoID, edit: distinctiveEdit(exposure: 1))
+        let second = try library.addDevelopment(photoID: photoID, edit: distinctiveEdit(exposure: 2))
+        try library.deleteDevelopment(id: XCTUnwrap(first.id))
+
+        let resolved = try resolve(library: library)
+        XCTAssertEqual(resolved.edit, second.edit)
+        XCTAssertEqual(resolved.origin, .libraryDevelopment(id: try XCTUnwrap(second.id), ordinal: 2))
+        XCTAssertEqual(resolved.edit, try BatchExport.jobs(forPhotoIDs: [photoID], in: library)[0].edit)
+        XCTAssertThrowsError(try resolve(developmentOrdinal: 1, library: library))
+
+        let saved = try EditSource.save(resolved, input: input,
+                                        developmentOrdinal: nil, library: library)
+        XCTAssertEqual(saved.id, second.id)
+        XCTAssertEqual(try library.developments(for: photoID).count, 1)
+    }
+
+    func testSaveFileEditUpdatesFirstRemainingDevelopment() throws {
+        let photoID = try temp.importFile(input)
+        let first = try library.addDevelopment(photoID: photoID, edit: distinctiveEdit(exposure: 1))
+        let second = try library.addDevelopment(photoID: photoID, edit: distinctiveEdit(exposure: 2))
+        try library.deleteDevelopment(id: XCTUnwrap(first.id))
+        let edit = distinctiveEdit(exposure: -2)
+        let resolved = try resolve(editPath: writeEditFile(edit).path, library: library)
+
+        let saved = try EditSource.save(resolved, input: input,
+                                        developmentOrdinal: nil, library: library)
+        XCTAssertEqual(saved.id, second.id)
+        XCTAssertEqual(saved.edit, edit)
+        XCTAssertEqual(try library.developments(for: photoID).count, 1)
+    }
+
     func testExplicitDevelopmentOrdinal() throws {
         let photoID = try temp.importFile(input)
         try library.addDevelopment(photoID: photoID, edit: distinctiveEdit(exposure: 1))
