@@ -1439,7 +1439,8 @@ final class AppModel {
                 if let existing = try library.photo(withHash: hash), let id = existing.id {
                     photoID = id
                 } else {
-                    photoID = try Importer(library: library).importFile(at: url).photoID
+                    photoID = try Importer(library: library)
+                        .importFile(at: url, precomputedHash: FileHash.hexString(hash)).photoID
                     isNew = true
                 }
                 return (photoID, isNew, try library.developments(for: photoID).first)
