@@ -178,7 +178,7 @@ final class AppModel {
     }
     var eraserActive = false { didSet { canvas?.eraserActive = eraserActive } }
     var showBeforeAfter = false { didSet { pushTextureToCanvas() } }
-    var showMaskOverlay = false { didSet { requestRender(force: true) } }
+    var showMaskOverlay = false { didSet { requestRender() } }
     private(set) var zoomPercent: Double = 100
 
     // MARK: Export sheet
@@ -326,7 +326,7 @@ final class AppModel {
             guard let self else { return }
             self.canvas?.isHDREnabled = !suppressed
             self.loupeCanvas?.isHDREnabled = !suppressed
-            self.requestRender(force: true)
+            self.requestRender()
         }
         let center = NotificationCenter.default
         for (name, suppressed) in [
@@ -1252,7 +1252,7 @@ final class AppModel {
                     : "\(lensMake) \(lensModel)".trimmingCharacters(in: .whitespaces)
             }
         }
-        requestRender(force: true)
+        requestRender()
     }
 
     /// "Grayroom — Default Library", or the library's path when it is not the
@@ -1276,10 +1276,9 @@ final class AppModel {
     }
 
     /// Ask for a render of the current edit. Coalescing: the newest request
-    /// wins, so a fast slider drag never queues up stale frames. `force` exists
-    /// only to make the call site's intent readable — a request whose edit is
-    /// unchanged still re-renders, which is what the mask overlay toggle needs.
-    func requestRender(force: Bool = false) {
+    /// wins, so a fast slider drag never queues up stale frames. An unchanged
+    /// edit still re-renders, which is what the mask overlay toggle needs.
+    func requestRender() {
         guard service != nil, imageURL != nil else { return }
         pendingEdit = store.edit
         pump()
@@ -1464,7 +1463,7 @@ final class AppModel {
                         self.store.replace(first.edit, named: nil)
                         self.store.selectedMaskID = first.edit.masks.first?.id
                         self.store.markSaved()
-                        self.requestRender(force: true)
+                        self.requestRender()
                     } else if self.store.isDirty {
                         self.persistEdit(announce: false)
                     }
