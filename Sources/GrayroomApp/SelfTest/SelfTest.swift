@@ -88,6 +88,7 @@ enum SelfTest {
         case loading
         case termination
         case comparison
+        case folders
     }
 
     /// Whether this run is one of the two halves of the Library test.
@@ -180,6 +181,10 @@ enum SelfTest {
         enableAccessibility()
         startedAt = Date()
         deadline = startedAt.addingTimeInterval(300)
+        if mode == .folders {
+            Task { @MainActor in await runFolderCompactionChecks() }
+            return
+        }
         if mode == .comparison {
             Task { @MainActor in await runComparisonChecks() }
             return
@@ -852,7 +857,7 @@ enum SelfTest {
             switch mode {
             case .paint, nil: run(canvas: canvas, model: model)
             case .undo: runUndo(canvas: canvas, model: model)
-            case .importWindow, .library, .library2, .loading, .termination, .comparison: break
+            case .importWindow, .library, .library2, .loading, .termination, .comparison, .folders: break
             }
         }
     }

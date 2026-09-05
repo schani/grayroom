@@ -116,7 +116,8 @@ public struct FolderTree: Equatable, Sendable {
     }
 
     public init(photos: [CatalogPhoto],
-                bootVolumeName: String = FolderTree.bootVolumeName()) {
+                bootVolumeName: String = FolderTree.bootVolumeName(),
+                preservingFolder: String? = nil) {
         var entries: [Entry] = []
         entries.reserveCapacity(photos.count)
         var missing = 0
@@ -167,7 +168,7 @@ public struct FolderTree: Equatable, Sendable {
         self.roots = nodes.indices
             .filter { nodes[$0].isRoot }
             .map { FolderTree.node(at: $0, in: nodes, isRoot: true,
-                                   bootVolumeName: bootVolumeName) }
+                                   bootVolumeName: bootVolumeName, preservingFolder: preservingFolder) }
             .sorted(by: FolderTree.isOrderedBefore)
     }
 
@@ -288,7 +289,7 @@ public struct FolderTree: Equatable, Sendable {
 
     /// Freezes one subtree, collapsing chains on the way down.
     private static func node(at index: Int, in nodes: [Builder], isRoot: Bool,
-                             bootVolumeName: String) -> FolderNode {
+                             bootVolumeName: String, preservingFolder: String?) -> FolderNode {
         var index = index
         var components = [isRoot
             ? rootName(nodes[index].path, bootVolumeName: bootVolumeName)
@@ -296,12 +297,14 @@ public struct FolderTree: Equatable, Sendable {
         // A directory with nothing in it but one subdirectory is drawn as part
         // of that subdirectory's row. Its counts are the child's by
         // construction (no direct photos, one child), so nothing is lost.
-        while !isRoot, nodes[index].children.count == 1, nodes[index].directCount == 0 {
+        while !isRoot, nodes[index].path != preservingFolder,
+              nodes[index].children.count == 1, nodes[index].directCount == 0 {
             index = nodes[index].children[0]
             components.append(lastComponent(nodes[index].path))
         }
         let children = nodes[index].children
-            .map { node(at: $0, in: nodes, isRoot: false, bootVolumeName: bootVolumeName) }
+            .map { node(at: $0, in: nodes, isRoot: false,
+                        bootVolumeName: bootVolumeName, preservingFolder: preservingFolder) }
             .sorted(by: isOrderedBefore)
         return FolderNode(id: nodes[index].path,
                           leafName: components[components.count - 1],

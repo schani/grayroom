@@ -164,6 +164,23 @@ final class LibraryBrowserStateTests: XCTestCase {
         XCTAssertEqual(state.folders.node(at: "/pics/2025")?.count, 3)
     }
 
+    func testRebuildKeepsSelectedParentWhenOnlyDescendantPhotosRemain() {
+        let photos = [photo(1, "/pics/trip/direct.dng"), photo(2, "/pics/trip/day/a.dng"),
+                      photo(3, "/elsewhere/b.dng")]
+        let state = browser(photos)
+        state.selection = .folder(path: "/pics/trip")
+        state.clickPhoto(2, modifiers: [])
+        state.rebuild(from: Array(photos.dropFirst()))
+
+        XCTAssertEqual(state.selection, .folder(path: "/pics/trip"))
+        XCTAssertEqual(state.visiblePhotoIDs, [2])
+        XCTAssertEqual(state.highlightedPhotoIDs, [2])
+        XCTAssertEqual(state.folders.node(at: "/pics/trip")?.count, 1)
+
+        state.rebuild(from: Array(photos.dropFirst()) + [photo(4, "/pics/trip/new/b.dng")])
+        XCTAssertEqual(state.visiblePhotoIDs, [2, 4], "the filter still covers the whole parent")
+    }
+
     /// A folder whose last photo is gone is gone; the panel falls back to the
     /// whole catalog rather than showing an empty grid for a row that is not
     /// there any more.

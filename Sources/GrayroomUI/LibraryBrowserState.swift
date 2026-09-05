@@ -106,15 +106,15 @@ public final class LibraryBrowserState {
     /// enough to do outright — one pass over the catalog — so there is no
     /// incremental path to get wrong.
     public func rebuild(from photos: [CatalogPhoto]) {
-        folders = FolderTree(photos: photos)
+        var selectedPath: String?
+        if case .folder(let path) = selection { selectedPath = path }
+        folders = FolderTree(photos: photos, preservingFolder: selectedPath)
         catalogIDs = photos.map(\.id)
         for root in folders.roots where !knownRoots.contains(root.id) {
             expandedFolders.insert(root.id)
             knownRoots.insert(root.id)
         }
-        // A folder can stop existing — its last photo removed, or its chain
-        // folded into another row. Falling back to the whole catalog is what
-        // Lightroom does with a source that goes away.
+        // Fall back to the catalog when the selected folder has no photos left.
         if case .folder(let path) = selection, folders.node(at: path) == nil {
             selection = .all       // `didSet` refilters
             return
