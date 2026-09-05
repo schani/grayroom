@@ -106,18 +106,21 @@ final class RenderService {
         } completion: { completion($0) }
     }
 
-    /// The "before" image: the same decode through an all-defaults edit, i.e.
-    /// decode + output transform and nothing else. Computed once per decode.
+    /// The "before" image, decoded and rendered with defaults. Reuses an
+    /// existing default decode; otherwise decodes the original independently.
     ///
     /// All-defaults includes `hdr = false`, so "before" is always the SDR
     /// rendition — holding `\` on an HDR edit shows what the picture was, which
     /// is the comparison the key is for.
-    func renderDefaults(input: MTLTexture,
+    func renderDefaults(url: URL, defaultInput: MTLTexture?,
                         completion: @escaping (Result<MTLTexture, Error>) -> Void) {
         run(queue) {
-            try self.renderer.pipeline.render(input: input, edit: EditState(),
-                                              output: .display,
-                                              generateDisplayMipmaps: true).texture
+            let defaults = EditState()
+            let original = try defaultInput
+                ?? self.renderer.decoder.decode(url: url, edit: defaults).texture
+            return try self.renderer.pipeline.render(input: original, edit: defaults,
+                                                      output: .display,
+                                                      generateDisplayMipmaps: true).texture
         } completion: { completion($0) }
     }
 

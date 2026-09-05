@@ -134,7 +134,7 @@ extension SelfTest {
     }
 
     @MainActor
-    private static func waitForLoading(_ ready: () -> Bool) async {
+    static func waitForLoading(_ ready: () -> Bool) async {
         let end = Date().addingTimeInterval(5)
         while !ready(), Date() < end {
             try? await Task.sleep(for: .milliseconds(10))

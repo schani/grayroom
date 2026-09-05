@@ -1341,13 +1341,14 @@ final class AppModel {
                         self.previewSize = size
                         self.canvas?.setImageSize(size)
                     }
-                    self.beforeTexture = nil
-                    service.renderDefaults(input: image.texture) { [weak self] result in
-                        guard let self, self.openGeneration == generation,
-                              self.decodeKey == key else { return }
-                        if case .success(let t) = result {
-                            self.beforeTexture = t
-                            if self.showBeforeAfter { self.pushTextureToCanvas() }
+                    if self.beforeTexture == nil {
+                        let defaultKey = DecodeKey(url: url, edit: EditState(), maxDimension: nil)
+                        service.renderDefaults(url: url, defaultInput: key == defaultKey ? image.texture : nil) { [weak self] result in
+                            guard let self, self.openGeneration == generation else { return }
+                            if case .success(let t) = result {
+                                self.beforeTexture = t
+                                if self.showBeforeAfter { self.pushTextureToCanvas() }
+                            }
                         }
                     }
                     // The frame's real size is only known now, so ask again.
