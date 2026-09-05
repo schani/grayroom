@@ -303,7 +303,9 @@ final class PreviewBuilder {
             }
             self.queue.async {
                 let stored = PreviewBuilder.store(image, for: rendered, in: store)
-                DispatchQueue.main.async { self.deliver(stored, for: rendered, remember: true) }
+                DispatchQueue.main.async {
+                    self.deliver(stored, for: request, remember: true, renderedKind: rendered.kind)
+                }
             }
         }
     }
@@ -322,7 +324,9 @@ final class PreviewBuilder {
         }
     }
 
-    private func deliver(_ image: CGImage?, for request: Request, remember: Bool) {
+    /// Match the queued request separately from the edit the database supplied.
+    private func deliver(_ image: CGImage?, for request: Request, remember: Bool,
+                         renderedKind: PreviewKind? = nil) {
         let id = request.id
         inFlight = false
         // A newer request for this photo arrived while this one was running —
@@ -337,7 +341,7 @@ final class PreviewBuilder {
         if let image {
             memory.setObject(image, forKey: NSNumber(value: id),
                              cost: PreviewBuilder.cost(image))
-            memoryKind[id] = request.kind
+            memoryKind[id] = renderedKind ?? request.kind
         } else if remember {
             // Remembered for the session: a file that is not there now will not
             // be there on the next scroll either, and re-asking on every cell

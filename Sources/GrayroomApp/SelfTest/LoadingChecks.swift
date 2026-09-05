@@ -66,6 +66,57 @@ extension SelfTest {
                     && app.errorMessage == nil,
                   "an old decode failure cannot cancel the next photo")
 
+            let catalog = PhotoCatalog()
+            try catalog.load(from: library)
+            guard let stalePhoto = catalog.photo(id: aID) else { fail("missing catalog photo") }
+            edit.tone.exposure = 4
+            _ = try library.updateDevelopment(id: developmentID, edit: edit)
+            let builder = PreviewBuilder()
+            builder.library = library
+            builder.previews = try PreviewStore.open(for: library)
+            let image = try ImageWriter.makeCGImage(pixels, bitsPerComponent: 8)
+            var renderCount = 0
+            var delivered = 0
+            builder.render = { _, _, done in
+                renderCount += 1
+                if renderCount <= 4 { done(image) }
+            }
+            builder.image(for: stalePhoto) { result in
+                if result != nil { delivered += 1 }
+            }
+            await waitForLoading { delivered > 0 || renderCount > 4 }
+            check(renderCount == 1 && delivered == 1,
+                  "a stale catalog request finishes once (renders: \(renderCount), deliveries: \(delivered))")
+            check(try builder.previews?.preview(for: stalePhoto.hash)?.fingerprint == edit.fingerprint,
+                  "the stored preview identifies the edit actually rendered")
+            check(builder.tasks.tasks.isEmpty, "the completed preview leaves no running task")
+
+            let coalescing = PreviewBuilder()
+            coalescing.library = library
+            var completions: [(CGImage?) -> Void] = []
+            var renderedEdits: [EditState] = []
+            var newest = stalePhoto
+            newest.developmentFingerprint = edit.fingerprint
+            var latestDeliveries = 0
+            coalescing.render = { _, edit, done in
+                renderedEdits.append(edit)
+                completions.append(done)
+            }
+            coalescing.image(for: newest) { _ in latestDeliveries += 1 }
+            await waitForLoading { completions.count == 1 }
+            edit.tone.exposure = -1
+            _ = try library.updateDevelopment(id: developmentID, edit: edit)
+            newest.developmentFingerprint = edit.fingerprint
+            coalescing.image(for: newest) { _ in latestDeliveries += 1 }
+            completions.first?(image)
+            await waitForLoading { completions.count == 2 }
+            check(latestDeliveries == 0, "a newer request prevents delivery of the old render")
+            if completions.count == 2 { completions[1](image) }
+            await waitForLoading { latestDeliveries == 2 }
+            check(latestDeliveries == 2 && renderedEdits.last == edit,
+                  "coalesced requests receive the newest edit")
+            check(coalescing.cached(newest) != nil, "the newest render is cached under its fingerprint")
+
             app.open(url: a, knownPhotoID: aID)
             await waitForLoading { app.store.edit == edit && !app.isDecoding && !app.isRendering }
             try library.deleteDevelopment(id: developmentID)
