@@ -298,21 +298,15 @@ public final class ImageDecoder {
               as? [String: Any]
         else { throw DecodeError.undecodable(url) }
 
-        let pixelWidth = (properties[kCGImagePropertyPixelWidth as String] as? NSNumber)?
-            .doubleValue
-        let pixelHeight = (properties[kCGImagePropertyPixelHeight as String] as? NSNumber)?
-            .doubleValue
-        guard let pixelWidth, let pixelHeight, pixelWidth > 0, pixelHeight > 0 else {
+        guard let native = nativeSize(in: properties) else {
             throw DecodeError.undecodable(url)
         }
-        // Un-oriented, to match what `CIRAWFilter.nativeSize` reports.
-        let native = CGSize(width: pixelWidth, height: pixelHeight)
         let rawOrientation = (properties[kCGImagePropertyOrientation as String] as? NSNumber)?
             .uint32Value
         let orientation = rawOrientation
             .flatMap(CGImagePropertyOrientation.init(rawValue:)) ?? .up
         let swapped = orientation.rawValue >= 5
-        let oriented = swapped ? CGSize(width: pixelHeight, height: pixelWidth) : native
+        let oriented = swapped ? CGSize(width: native.height, height: native.width) : native
 
         let tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any]
         let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any]
@@ -525,8 +519,9 @@ public final class ImageDecoder {
         }
         // Un-oriented, to match the RAW path's `nativeSize`.
         let oriented = image.extent.size
-        let info = try? ImageDecoder.probe(url: url)
-        let native = info?.nativeSize ?? oriented
+        let source = CGImageSourceCreateWithURL(url as CFURL, nil)
+        let properties = source.flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [String: Any] }
+        let native = properties.flatMap(ImageDecoder.nativeSize(in:)) ?? oriented
 
         let asShotTemp = ImageDecoder.standardNeutralTemperature
         let asShotTint = ImageDecoder.standardNeutralTint
@@ -544,6 +539,13 @@ public final class ImageDecoder {
                             asShotTemperature: asShotTemp,
                             asShotTint: asShotTint,
                             nativeSize: native)
+    }
+
+    private static func nativeSize(in properties: [String: Any]) -> CGSize? {
+        guard let width = (properties[kCGImagePropertyPixelWidth as String] as? NSNumber)?.doubleValue,
+              let height = (properties[kCGImagePropertyPixelHeight as String] as? NSNumber)?.doubleValue,
+              width > 0, height > 0 else { return nil }
+        return CGSize(width: width, height: height)
     }
 
     /// Temp/tint for an already-rendered image, in the same direction as the

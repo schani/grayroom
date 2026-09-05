@@ -298,6 +298,32 @@ final class StandardImageTests: XCTestCase {
 
     // MARK: - Reduction and orientation
 
+    func testNativeDimensionsSurviveOrientationAndReduction() throws {
+        let (context, _) = try TestGPU.require()
+        let decoder = ImageDecoder(metal: context)
+        let original = try SyntheticImage.write(patches: Array(repeating: 128, count: 12),
+                                                 to: "native-source.png", type: .png, height: 8)
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(original as CFURL, nil))
+        for orientation in 1...8 {
+            let url = SyntheticImage.directory.appendingPathComponent("native-\(orientation).tiff")
+            let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(
+                url as CFURL, UTType.tiff.identifier as CFString, 1, nil))
+            CGImageDestinationAddImageFromSource(destination, source, 0,
+                                                [kCGImagePropertyOrientation: orientation] as CFDictionary)
+            XCTAssertTrue(CGImageDestinationFinalize(destination))
+            for edge in [nil, 6] as [Int?] {
+                var edit = EditState()
+                edit.whiteBalance.temperature = 9000
+                let decoded = try decoder.decode(url: url, edit: edit, maxDimension: edge)
+                XCTAssertEqual(decoded.nativeSize, CGSize(width: 12, height: 8), "orientation \(orientation)")
+                let width = edge == nil ? 12 : 6
+                let height = edge == nil ? 8 : 4
+                XCTAssertEqual(decoded.width, orientation < 5 ? width : height)
+                XCTAssertEqual(decoded.height, orientation < 5 ? height : width)
+            }
+        }
+    }
+
     func testMaxDimensionReducesAStandardImage() throws {
         let (ctx, _) = try TestGPU.require()
         let url = try SyntheticImage.write(patches: [UInt8](repeating: 128, count: 64),
