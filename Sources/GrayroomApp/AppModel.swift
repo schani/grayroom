@@ -1205,6 +1205,7 @@ final class AppModel {
         currentPhotoID = knownPhotoID
         developmentID = nil
         openGeneration += 1
+        let generation = openGeneration
         decoded = nil
         draftTexture = nil
         decodeKey = nil
@@ -1213,6 +1214,8 @@ final class AppModel {
         coverageTexture = nil
         lastRenderedEdit = nil
         lastRenderWasDraft = false
+        previewSize = .zero
+        fullSize = .zero
         histogram = .empty
         statusMessage = nil
         errorMessage = nil
@@ -1221,6 +1224,7 @@ final class AppModel {
         // as long as the new file takes to open.
         cameraDescription = ""
         lensDescription = ""
+        pushTextureToCanvas()
         // Not under a self-test: `CFFIXED_USER_HOME` does not redirect
         // cfprefsd, so this would land in the real user's preferences.
         if !SelfTest.isRequested {
@@ -1230,10 +1234,10 @@ final class AppModel {
         store.replace(EditState(), named: nil)
         store.selectedMaskID = nil
         store.markSaved()
-        loadFromLibrary(url: url, generation: openGeneration, knownPhotoID: knownPhotoID)
+        loadFromLibrary(url: url, generation: generation, knownPhotoID: knownPhotoID)
 
         service.probe(url: url) { [weak self] result in
-            guard let self else { return }
+            guard let self, self.openGeneration == generation else { return }
             if case .success(let info) = result {
                 self.fullSize = info.orientedSize
                 self.store.asShotTemperature = info.asShotTemperature
@@ -1305,6 +1309,7 @@ final class AppModel {
         pendingEdit = nil
         lastRenderedEdit = edit
         renderInFlight = true
+        let generation = openGeneration
 
         let key = DecodeKey(url: url, edit: edit, maxDimension: nil)
         if key != decodeKey || decoded == nil {
@@ -1313,6 +1318,11 @@ final class AppModel {
                            draftLongEdge: PreviewStrategy.draftLongEdge) { [weak self] result in
                 guard let self else { return }
                 self.isDecoding = false
+                guard self.openGeneration == generation else {
+                    self.renderInFlight = false
+                    self.pump()
+                    return
+                }
                 switch result {
                 case .failure(let error):
                     self.errorMessage = "Decode failed: \(error)"
@@ -1333,9 +1343,11 @@ final class AppModel {
                     }
                     self.beforeTexture = nil
                     service.renderDefaults(input: image.texture) { [weak self] result in
+                        guard let self, self.openGeneration == generation,
+                              self.decodeKey == key else { return }
                         if case .success(let t) = result {
-                            self?.beforeTexture = t
-                            if self?.showBeforeAfter == true { self?.pushTextureToCanvas() }
+                            self.beforeTexture = t
+                            if self.showBeforeAfter { self.pushTextureToCanvas() }
                         }
                     }
                     // The frame's real size is only known now, so ask again.
@@ -1359,6 +1371,7 @@ final class AppModel {
         }
         let input = (draft ? draftTexture : nil) ?? decoded.texture
         let isDraft = input !== decoded.texture
+        let generation = openGeneration
         isRendering = true
         let coverageIndex = showMaskOverlay ? store.selectedMaskIndex : nil
         service.renderPreview(input: input, edit: hdrSuppression.displayEdit(edit),
@@ -1367,6 +1380,10 @@ final class AppModel {
             guard let self else { return }
             self.isRendering = false
             self.renderInFlight = false
+            guard self.openGeneration == generation else {
+                self.pump()
+                return
+            }
             switch result {
             case .failure(let error):
                 self.errorMessage = "Render failed: \(error)"
