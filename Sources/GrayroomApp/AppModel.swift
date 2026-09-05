@@ -140,8 +140,8 @@ final class AppModel {
 
     // MARK: Status
 
-    private(set) var isDecoding = false
-    private(set) var isRendering = false
+    var isDecoding: Bool { renderPhase == .decoding }
+    var isRendering: Bool { renderPhase == .rendering }
     private(set) var isExporting = false
     private(set) var lastRenderMilliseconds: Double = 0
     private(set) var histogram = HistogramModel.empty
@@ -211,7 +211,9 @@ final class AppModel {
     /// `true` when what the canvas is showing came from the draft pass, i.e. a
     /// refine is owed as soon as the loop has nothing newer to do.
     private var lastRenderWasDraft = false
-    private var renderInFlight = false
+    private enum RenderPhase { case idle, decoding, rendering }
+    private var renderPhase = RenderPhase.idle
+    private var renderInFlight: Bool { renderPhase != .idle }
     /// When the user last moved something. Grid previews stay off the GPU for
     /// `editingQuietPeriod` after it.
     private var lastEditAt = Date.distantPast
@@ -1308,25 +1310,22 @@ final class AppModel {
         guard step != .idle, let edit = pendingEdit ?? lastRenderedEdit else { return }
         pendingEdit = nil
         lastRenderedEdit = edit
-        renderInFlight = true
         let generation = openGeneration
 
         let key = DecodeKey(url: url, edit: edit, maxDimension: nil)
         if key != decodeKey || decoded == nil {
-            isDecoding = true
+            renderPhase = .decoding
             service.decode(url: url, edit: edit, maxDimension: nil,
                            draftLongEdge: PreviewStrategy.draftLongEdge) { [weak self] result in
                 guard let self else { return }
-                self.isDecoding = false
+                self.renderPhase = .idle
                 guard self.openGeneration == generation else {
-                    self.renderInFlight = false
                     self.pump()
                     return
                 }
                 switch result {
                 case .failure(let error):
                     self.errorMessage = "Decode failed: \(error)"
-                    self.renderInFlight = false
                     self.pendingEdit = nil
                     self.lastRenderWasDraft = false
                 case .success(let decode):
@@ -1367,20 +1366,19 @@ final class AppModel {
     /// covers a different extent than the image underneath it.
     private func runPipeline(_ edit: EditState, draft: Bool) {
         guard let service, let decoded else {
-            renderInFlight = false
+            renderPhase = .idle
             return
         }
         let input = (draft ? draftTexture : nil) ?? decoded.texture
         let isDraft = input !== decoded.texture
         let generation = openGeneration
-        isRendering = true
+        renderPhase = .rendering
         let coverageIndex = showMaskOverlay ? store.selectedMaskIndex : nil
         service.renderPreview(input: input, edit: hdrSuppression.displayEdit(edit),
                               coverageMaskIndex: coverageIndex,
                               computeHistogram: !isDraft) { [weak self] result in
             guard let self else { return }
-            self.isRendering = false
-            self.renderInFlight = false
+            self.renderPhase = .idle
             guard self.openGeneration == generation else {
                 self.pump()
                 return

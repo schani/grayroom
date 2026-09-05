@@ -66,6 +66,31 @@ extension SelfTest {
                     && app.errorMessage == nil,
                   "an old decode failure cannot cancel the next photo")
 
+            app.open(url: bad, knownPhotoID: badID)
+            await waitForLoading { !app.isDecoding && !app.isRendering }
+            check(app.errorMessage != nil, "a current decode failure leaves the render loop idle")
+            app.open(url: b, knownPhotoID: bID)
+            await waitForLoading { app.previewSize == CGSize(width: 16, height: 16) && !app.isDecoding && !app.isRendering }
+            let canvas = app.makeCanvas()
+            guard let initialTexture = canvas.imageTexture else { fail("missing initial render") }
+            let initialLuminance = try TextureReadback.read(initialTexture).meanLuminance
+            app.store.perform("Exposure") { $0.tone.exposure = 1 }
+            check(app.isRendering && !app.isDecoding, "tone changes render without decoding")
+            app.store.perform("Exposure") { $0.tone.exposure = -2 }
+            app.store.perform("Exposure") { $0.tone.exposure = 2 }
+            await waitForLoading { !app.isDecoding && !app.isRendering }
+            check(try TextureReadback.read(canvas.imageTexture!).meanLuminance > initialLuminance,
+                  "queued edits finish on the newest exposure")
+            app.store.perform("White Balance") { $0.whiteBalance.temperature = 9000 }
+            check(app.isDecoding && !app.isRendering, "white balance starts a decode")
+            await waitForLoading { !app.isDecoding && !app.isRendering }
+            let finished = try TextureReadback.read(canvas.imageTexture!).pixels
+            app.requestRender()
+            check(app.isRendering && !app.isDecoding, "an unchanged edit reuses the decode")
+            await waitForLoading { !app.isDecoding && !app.isRendering }
+            check(try TextureReadback.read(canvas.imageTexture!).pixels == finished,
+                  "re-rendering the same edit preserves the pixels")
+
             let catalog = PhotoCatalog()
             try catalog.load(from: library)
             guard let stalePhoto = catalog.photo(id: aID) else { fail("missing catalog photo") }
