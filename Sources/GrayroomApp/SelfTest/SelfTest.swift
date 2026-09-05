@@ -9,7 +9,7 @@ import Metal
 import Observation
 import UniformTypeIdentifiers
 
-/// `GRAYROOM_SELFTEST=paint|undo|import|library|library2 swift run GrayroomApp <file.DNG>`
+/// `GRAYROOM_SELFTEST=paint|undo|import|library|library2|loading swift run GrayroomApp <file.DNG>`
 ///
 /// Whole-app checks, each in its own process: `paint` (a stroke drawn with real
 /// mouse events), `undo` (Cmd-Z / Cmd-Shift-Z pushed through the real menu-bar
@@ -84,6 +84,8 @@ enum SelfTest {
         ///     swift run GrayroomApp
         /// ```
         case library2
+        /// Photo switching, autosave and preview requests, using synthetic files.
+        case loading
     }
 
     /// Whether this run is one of the two halves of the Library test.
@@ -176,6 +178,10 @@ enum SelfTest {
         enableAccessibility()
         startedAt = Date()
         deadline = startedAt.addingTimeInterval(300)
+        if mode == .loading {
+            Task { @MainActor in await runLoadingChecks() }
+            return
+        }
         // The import window does not need a document, so it does not wait for
         // one — pointing this mode at a RAW file just to get past the poll
         // would be a decode the test has no use for.
@@ -836,7 +842,7 @@ enum SelfTest {
             switch mode {
             case .paint, nil: run(canvas: canvas, model: model)
             case .undo: runUndo(canvas: canvas, model: model)
-            case .importWindow, .library, .library2: break
+            case .importWindow, .library, .library2, .loading: break
             }
         }
     }

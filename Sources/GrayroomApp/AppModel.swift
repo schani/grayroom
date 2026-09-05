@@ -230,6 +230,8 @@ final class AppModel {
     /// Bumped on every `open(url:)`; a lookup that lands after the user has
     /// moved on to another file is discarded.
     private var openGeneration = 0
+    private var libraryLookupInFlight = false
+    private var pendingOpen: (url: URL, photoID: Int64?)?
     /// The library work (hash, import, development lookup) runs here so a 50 MB read
     /// never lands on the main thread.
     private let libraryQueue = DispatchQueue(label: "grayroom.library", qos: .userInitiated)
@@ -1188,6 +1190,15 @@ final class AppModel {
             errorMessage = "File not found: \(url.path)"
             return
         }
+        if store.isDirty, library != nil {
+            if libraryLookupInFlight {
+                pendingOpen = (url, knownPhotoID)
+                return
+            }
+            persistEdit(announce: false)
+            guard !store.isDirty else { return }
+        }
+        pendingOpen = nil
         autosaveTask?.cancel()
         service.clearMaskCache()
         imageURL = url
@@ -1399,6 +1410,7 @@ final class AppModel {
     /// would be the slowest part of opening it.
     private func loadFromLibrary(url: URL, generation: Int, knownPhotoID: Int64? = nil) {
         guard let library else { return }
+        libraryLookupInFlight = true
         libraryQueue.async {
             let outcome = Result {
                 () -> (photoID: Int64, isNew: Bool, first: Development?) in
@@ -1418,8 +1430,10 @@ final class AppModel {
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.openGeneration == generation else { return }
+                self.libraryLookupInFlight = false
                 switch outcome {
                 case .failure(let error):
+                    self.pendingOpen = nil
                     self.errorMessage = "Could not read the library: \(error)"
                 case .success(let (photoID, isNew, first)):
                     self.currentPhotoID = photoID
@@ -1441,6 +1455,12 @@ final class AppModel {
                     // development in hand, an already-finished render of it is
                     // this photo's picture.
                     self.pushLoupeRender()
+                    if let next = self.pendingOpen {
+                        self.pendingOpen = nil
+                        if !self.store.isDirty {
+                            self.open(url: next.url, knownPhotoID: next.photoID)
+                        }
+                    }
                 }
             }
         }
@@ -1468,7 +1488,8 @@ final class AppModel {
     /// A no-op while the library lookup is still in flight — it finishes by
     /// calling back here if the edit is dirty by then.
     private func persistEdit(announce: Bool) {
-        guard let library, imageURL != nil, let photoID = currentPhotoID else { return }
+        guard !libraryLookupInFlight, let library, imageURL != nil,
+              let photoID = currentPhotoID else { return }
         let edit = store.edit
         do {
             if let developmentID {
