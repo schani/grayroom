@@ -1813,7 +1813,7 @@ extension AppModel: CanvasInputHandler {
     func canvasBeforeAfterHeld(_ held: Bool) {
         // "Before" is a comparison against an edit, and the loupe is not
         // editing anything.
-        guard mode == .develop else { return }
+        guard !held || mode == .develop else { return }
         showBeforeAfter = held
     }
 }

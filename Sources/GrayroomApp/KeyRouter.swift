@@ -33,9 +33,16 @@ import GrayroomUI
 final class KeyRouter {
     private unowned let model: AppModel
     private var monitor: Any?
+    private var deactivationObserver: NSObjectProtocol?
+    private var beforeAfterKeyCode: UInt16?
 
     init(model: AppModel) {
         self.model = model
+    }
+
+    deinit {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        if let deactivationObserver { NotificationCenter.default.removeObserver(deactivationObserver) }
     }
 
     /// Installed once, at launch. Local (not global): it sees only this app's
@@ -47,10 +54,24 @@ final class KeyRouter {
             guard let self else { return event }
             return self.handle(event) ? nil : event
         }
+        deactivationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.releaseBeforeAfter() }
+    }
+
+    private func releaseBeforeAfter() {
+        guard beforeAfterKeyCode != nil else { return }
+        beforeAfterKeyCode = nil
+        model.canvasBeforeAfterHeld(false)
     }
 
     /// `true` when the event was consumed.
     func handle(_ event: NSEvent) -> Bool {
+        if event.type == .keyUp, event.keyCode == beforeAfterKeyCode {
+            releaseBeforeAfter()
+            return true
+        }
+        guard event.type == .keyDown else { return false }
         // `keyWindow` first, but not only: an app launched from a terminal as a
         // bare Mach-O can be active with a *main* window and no key window at
         // all, and in that state a `keyWindow`-only router silently does
@@ -74,14 +95,12 @@ final class KeyRouter {
         // the non-coalesced one), and an emptiness test throws the key away.
         if characters == "\\", modifiers.isDisjoint(with: [.command, .control, .option, .shift]),
            window == KeyRouter.mainWindow(), model.mode == .develop {
-            if event.type == .keyUp {
-                model.canvasBeforeAfterHeld(false)
-            } else if !event.isARepeat {
+            if !event.isARepeat {
+                beforeAfterKeyCode = event.keyCode
                 model.canvasBeforeAfterHeld(true)
             }
             return true
         }
-        guard event.type == .keyDown else { return false }
         // ⌥⌘S — macOS's shortcut for a sidebar, and the one Option key this
         // router claims. It has to be claimed here: AppKit answers ⌥⌘S itself,
         // out of the window's own toolbar, and its answer for a SwiftUI
