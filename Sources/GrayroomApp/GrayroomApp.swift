@@ -74,6 +74,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        var answer: Bool?
+        var waiting = false
+        AppModel.shared.saveBeforeTermination { allowed in
+            if waiting { sender.reply(toApplicationShouldTerminate: allowed) }
+            else { answer = allowed }
+        }
+        waiting = true
+        return answer.map { $0 ? .terminateNow : .terminateCancel } ?? .terminateLater
+    }
+
     /// Double-clicking a RAW in the Finder (or `open -a`) lands here. Being
     /// handed a file is a request to develop it.
     func application(_ application: NSApplication, open urls: [URL]) {

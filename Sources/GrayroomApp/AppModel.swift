@@ -232,6 +232,7 @@ final class AppModel {
     private var openGeneration = 0
     private var libraryLookupInFlight = false
     private var pendingOpen: (url: URL, photoID: Int64?)?
+    private var terminationReply: ((Bool) -> Void)?
     /// The library work (hash, import, development lookup) runs here so a 50 MB read
     /// never lands on the main thread.
     private let libraryQueue = DispatchQueue(label: "grayroom.library", qos: .userInitiated)
@@ -1448,6 +1449,13 @@ final class AppModel {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.openGeneration == generation else { return }
                 self.libraryLookupInFlight = false
+                defer {
+                    if let reply = self.terminationReply {
+                        self.terminationReply = nil
+                        if case .failure = outcome { reply(false) }
+                        else { self.saveBeforeTermination(reply) }
+                    }
+                }
                 switch outcome {
                 case .failure(let error):
                     self.pendingOpen = nil
@@ -1497,6 +1505,17 @@ final class AppModel {
     func saveNow() {
         autosaveTask?.cancel()
         persistEdit(announce: true)
+    }
+
+    func saveBeforeTermination(_ reply: @escaping (Bool) -> Void) {
+        pendingOpen = nil
+        guard imageURL != nil, store.isDirty else { reply(true); return }
+        if libraryLookupInFlight {
+            terminationReply = reply
+            return
+        }
+        saveNow()
+        reply(!store.isDirty)
     }
 
     /// Writes the current edit to the photo's development, creating development #1 the

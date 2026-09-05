@@ -86,6 +86,7 @@ enum SelfTest {
         case library2
         /// Photo switching, autosave and preview requests, using synthetic files.
         case loading
+        case termination
     }
 
     /// Whether this run is one of the two halves of the Library test.
@@ -178,6 +179,10 @@ enum SelfTest {
         enableAccessibility()
         startedAt = Date()
         deadline = startedAt.addingTimeInterval(300)
+        if mode == .termination {
+            Task { @MainActor in await runTerminationChecks() }
+            return
+        }
         if mode == .loading {
             Task { @MainActor in await runLoadingChecks() }
             return
@@ -842,7 +847,7 @@ enum SelfTest {
             switch mode {
             case .paint, nil: run(canvas: canvas, model: model)
             case .undo: runUndo(canvas: canvas, model: model)
-            case .importWindow, .library, .library2, .loading: break
+            case .importWindow, .library, .library2, .loading, .termination: break
             }
         }
     }
