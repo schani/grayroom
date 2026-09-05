@@ -352,6 +352,31 @@ final class ImportSelectionTests: XCTestCase {
 
     // MARK: - Sorting and filtering
 
+    func testSortTiesKeepScanOrderWithAndWithoutHiddenEntries() {
+        let date = Date(timeIntervalSince1970: 100)
+        let names = ["z", "imported", "a", "nil2", "b", "nil1"]
+        let entries = names.enumerated().map { index, name in
+            ImportEntry(url: url(name), filename: [0, 3, 5].contains(index) ? "photo10" : "photo2",
+                        captureDate: [3, 5].contains(index) ? nil : date,
+                        status: name == "imported" ? .alreadyImported : .new,
+                        checked: [1, 2, 4].contains(index))
+        }
+        let cases: [(ImportSortOrder, [String])] = [
+            (.captureTime, ["z", "imported", "a", "b", "nil2", "nil1"]),
+            (.checkedState, ["imported", "a", "b", "z", "nil2", "nil1"]),
+            (.filename, ["imported", "a", "b", "z", "nil2", "nil1"]),
+        ]
+        for (sort, expected) in cases {
+            for hide in [false, true] {
+                var selection = ImportSelection(entries: entries)
+                selection.sort = sort
+                selection.hideImported = hide
+                XCTAssertEqual(selection.visibleEntries.map(\.url),
+                               expected.filter { !hide || $0 != "imported" }.map(url))
+            }
+        }
+    }
+
     func testSortByFilename() {
         var selection = self.selection(["delta.dng", "alpha.dng", "charlie.dng"])
         selection.sort = .filename

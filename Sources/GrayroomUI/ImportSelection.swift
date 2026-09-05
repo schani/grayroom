@@ -160,34 +160,24 @@ public struct ImportSelection: Equatable, Sendable {
     /// shift-ranges and arrow keys move in.
     public var visibleEntries: [ImportEntry] {
         let filtered = hideImported ? entries.filter { !$0.alreadyImported } : entries
-        // Every sort carries the scan-order index as its last tiebreak, which
-        // is what makes `.checkedState` a stable partition rather than an
-        // arbitrary shuffle of two groups.
-        let indexed = filtered.enumerated().map { ($0.offset, $0.element) }
-        let sorted: [(Int, ImportEntry)]
         switch sort {
         case .captureTime:
-            sorted = indexed.sorted { a, b in
-                switch (a.1.captureDate, b.1.captureDate) {
-                case let (x?, y?) where x != y: return x < y
+            return filtered.sorted { a, b in
+                switch (a.captureDate, b.captureDate) {
+                case let (x?, y?): return x < y
                 // A file with no EXIF date sorts after every dated one rather
                 // than pretending to have been shot at the epoch.
-                case (nil, _?): return false
                 case (_?, nil): return true
-                default: return a.0 < b.0
+                default: return false
                 }
             }
         case .checkedState:
-            sorted = indexed.sorted { a, b in
-                a.1.checked == b.1.checked ? a.0 < b.0 : (a.1.checked && !b.1.checked)
-            }
+            return filtered.sorted { $0.checked && !$1.checked }
         case .filename:
-            sorted = indexed.sorted { a, b in
-                let order = a.1.filename.localizedStandardCompare(b.1.filename)
-                return order == .orderedSame ? a.0 < b.0 : order == .orderedAscending
+            return filtered.sorted { a, b in
+                a.filename.localizedStandardCompare(b.filename) == .orderedAscending
             }
         }
-        return sorted.map(\.1)
     }
 
     /// What the Import button will take — counted across *all* entries, not
