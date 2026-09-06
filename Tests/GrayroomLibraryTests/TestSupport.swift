@@ -16,6 +16,9 @@ final class TempLibrary {
                                     isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         library = try Library(url: directory.appendingPathComponent("library.sqlite"))
+        library.originalStorage = OriginalStorage(
+            cacheDirectory: directory.appendingPathComponent("cache"),
+            objectStore: TestObjectStore(directory: directory.appendingPathComponent("objects")))
     }
 
     /// Writes `contents` into the sandbox and returns its URL.
@@ -68,6 +71,23 @@ final class TempLibrary {
         try? library.close()
         // WAL and SHM files go with the directory.
         try? FileManager.default.removeItem(at: directory)
+    }
+}
+
+private struct TestObjectStore: OriginalObjectStore {
+    let directory: URL
+
+    func put(file: URL, key: String, sha256: Data) throws {
+        let destination = directory.appendingPathComponent(key)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.copyItem(at: file, to: destination)
+        }
+    }
+
+    func get(key: String, to destination: URL) throws {
+        try FileManager.default.copyItem(at: directory.appendingPathComponent(key), to: destination)
     }
 }
 

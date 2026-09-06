@@ -49,6 +49,12 @@ struct RootView: View {
         .sheet(isPresented: $model.isExportSheetPresented) {
             ExportSheet(model: model)
         }
+        .sheet(isPresented: $model.isOriginalStorageSetupPresented) {
+            OriginalStorageSetupSheet(
+                setup: model.originalStorageSetup,
+                chooseCacheDirectory: model.chooseOriginalCacheDirectory,
+                save: model.saveOriginalStorageSetup)
+        }
     }
 
     private var develop: some View {

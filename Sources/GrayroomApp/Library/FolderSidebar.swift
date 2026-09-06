@@ -33,16 +33,16 @@ struct FolderSidebar: View {
                                  selection: .all, select: select)
                     .tag(FolderSelection.all)
             }
-            Section("Folders") {
+            Section("Dates") {
                 ForEach(model.folders.roots) { root in
                     FolderOutline(model: model, node: root, isVolume: true)
                 }
             }
             Section {
-                FolderSidebarRow(path: "missing", icon: "questionmark.folder",
-                                 leafName: "Missing", count: model.folders.missingCount,
+                FolderSidebarRow(path: "missing", icon: "calendar.badge.questionmark",
+                                 leafName: "Unknown Date", count: model.folders.missingCount,
                                  isDimmed: model.folders.missingCount == 0,
-                                 tooltip: "Photos the library remembers and has no file for",
+                                 tooltip: "Photos without a capture date",
                                  selection: .missing, select: select)
                     .tag(FolderSelection.missing)
             }
@@ -93,7 +93,7 @@ private struct FolderOutline: View {
     private var row: some View {
         // A volume's row is one line — the volume *is* the leaf, and it has no
         // folded-away parents above it to show.
-        FolderSidebarRow(path: node.id, icon: isVolume ? "externaldrive" : "folder",
+        FolderSidebarRow(path: node.id, icon: isVolume ? "calendar" : "folder",
                          leafName: node.leafName, parentChain: node.parentChain,
                          count: node.count, tooltip: node.id,
                          selection: .folder(path: node.id),

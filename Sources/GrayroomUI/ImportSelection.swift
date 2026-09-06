@@ -8,15 +8,9 @@ import Foundation
 public enum ImportEntryStatus: Equatable, Sendable {
     /// Not hashed yet.
     case pending
-    /// Hashed, and the library has no photo with those bytes at any location.
+    /// Hashed, and the library has no photo with those bytes.
     case new
-    /// The library has a photo with these exact bytes **and** at least one
-    /// recorded location for it.
-    ///
-    /// Both halves matter. A photo whose every location has been removed is a
-    /// row the library still remembers but no longer has a file for, so
-    /// offering to add this file back is the right thing to do, not a
-    /// duplicate.
+    /// The library has a photo with these exact bytes.
     case alreadyImported
 }
 

@@ -90,7 +90,8 @@ final class BatchExportTests: XCTestCase {
 
         var jobs = try BatchExport.jobs(forPhotoIDs: [id], in: library)
         XCTAssertEqual(jobs.map(\.stem), ["frame"])
-        XCTAssertEqual(jobs.first?.source?.path, file.path)
+        XCTAssertEqual(try jobs.first?.source.map { try Data(contentsOf: $0) },
+                       try Data(contentsOf: file))
         XCTAssertEqual(jobs.first?.edit, EditState(), "an undeveloped photo exports neutral")
 
         var first = EditState()

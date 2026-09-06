@@ -15,7 +15,7 @@ public enum LibraryViewMode: String, Equatable, Sendable {
 ///
 /// The panel is a `List` and the grid is a `LazyVGrid`, and neither of them can
 /// be asked a question in a unit test. So the *state* lives here instead: which
-/// source is selected, which volumes are open, which photos that leaves on
+/// source is selected, which date rows are open, which photos that leaves on
 /// screen, what the bottom bar says, and what happens to the grid's highlight
 /// when the filter moves under it. `AppModel` owns one of these and forwards to
 /// it; the views read it and write it back through bindings.
@@ -41,7 +41,7 @@ public final class LibraryBrowserState {
         }
     }
 
-    /// Which folder rows are open, by path. Volumes are opened once, when they
+    /// Which date rows are open. Years are opened once, when they
     /// first appear; after that it is the user's business.
     public var expandedFolders: Set<String> = []
 
@@ -91,7 +91,7 @@ public final class LibraryBrowserState {
 
     private var visibleIDs: Set<Int64> = []
     private var catalogIDs: [Int64] = []
-    /// Volumes the panel has already opened once, so closing one by hand
+    /// Years the panel has already opened once, so closing one by hand
     /// survives the next rebuild.
     private var knownRoots: Set<String> = []
 
@@ -101,8 +101,8 @@ public final class LibraryBrowserState {
 
     /// Rebuilds the tree from the catalog and re-filters the grid.
     ///
-    /// Called after anything that changes which photos, or which files, the
-    /// library holds: an import, a deletion, a location that went away. Cheap
+    /// Called after anything that changes which photos the library holds: an
+    /// import or deletion. Cheap
     /// enough to do outright — one pass over the catalog — so there is no
     /// incremental path to get wrong.
     public func rebuild(from photos: [CatalogPhoto]) {
@@ -282,10 +282,10 @@ public final class LibraryBrowserState {
         }
     }
 
-    /// Opens every row between a volume and this folder, so that folder's row
+    /// Opens every row between a year and this date, so that date's row
     /// is on screen. What clicking each triangle in turn does.
     public func expandAncestors(of path: String) {
-        for node in folders.allNodes where FolderTree.directory(path, isWithin: node.id) {
+        for node in folders.allNodes where path == node.id || path.hasPrefix(node.id + "/") {
             expandedFolders.insert(node.id)
         }
     }

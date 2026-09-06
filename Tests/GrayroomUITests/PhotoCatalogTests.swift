@@ -15,6 +15,12 @@ private final class TempCatalog {
                                     isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         library = try Library(url: directory.appendingPathComponent("library.sqlite"))
+        try library.setConfiguration(directory.appendingPathComponent("objects").absoluteString,
+                                     forKey: "storage.endpoint")
+        try library.setConfiguration("test", forKey: "storage.region")
+        try library.setConfiguration("photos", forKey: "storage.bucket")
+        try library.setConfiguration(directory.appendingPathComponent("cache").path,
+                                     forKey: "cache.directory")
     }
 
     /// Distinct bytes per name, so every file hashes differently.
@@ -60,43 +66,22 @@ final class PhotoCatalogTests: XCTestCase {
 
     // MARK: - Loading
 
-    /// The three location counts a real library actually contains: a photo with
-    /// one path, a photo with two (the same bytes at two places), and a photo
-    /// the library remembers but has no file for.
-    func testLoadResolvesZeroOneAndTwoLocations() throws {
+    func testLoadResolvesTheHashBasedCacheURL() throws {
         let one = try temp.importFile("one.dng", capturedAt: date(0))
         let two = try temp.importFile("two.dng", capturedAt: date(60))
-        // The same bytes at a second path: one photo, two locations.
         let copy = try temp.writeFile("copy-of-two.dng", bytes: "two.dng")
         let second = try Importer(library: temp.library, probe: { _ in PhotoMetadata() })
             .importFile(at: copy)
         XCTAssertEqual(second.photoID, two)
         XCTAssertFalse(second.isNewPhoto)
-        // …and one whose every location has been removed.
-        let none = try temp.importFile("gone.dng", capturedAt: date(120))
-        for location in try temp.library.locations(for: none) {
-            if let id = location.id { _ = try temp.library.removeLocation(id: id) }
-        }
 
         let catalog = PhotoCatalog()
         try catalog.load(from: temp.library)
 
-        XCTAssertEqual(catalog.count, 3)
-        XCTAssertEqual(catalog.photo(id: one)?.firstLocation,
-                       temp.directory.appendingPathComponent("one.dng").path)
-        // MIN(path): "copy-of-two.dng" sorts before "two.dng".
-        XCTAssertEqual(catalog.photo(id: two)?.firstLocation,
-                       temp.directory.appendingPathComponent("copy-of-two.dng").path)
-        XCTAssertNil(catalog.photo(id: none)?.firstLocation)
-        XCTAssertNil(catalog.photo(id: none)?.url)
-        // *Every* path, sorted — the Folders panel files one photo under each
-        // directory it has a file in.
-        XCTAssertEqual(catalog.photo(id: one)?.locations,
-                       [temp.directory.appendingPathComponent("one.dng").path])
-        XCTAssertEqual(catalog.photo(id: two)?.locations,
-                       [temp.directory.appendingPathComponent("copy-of-two.dng").path,
-                        temp.directory.appendingPathComponent("two.dng").path])
-        XCTAssertEqual(catalog.photo(id: none)?.locations, [])
+        XCTAssertEqual(catalog.count, 2)
+        let stored = try XCTUnwrap(temp.library.photo(id: one))
+        let expected = try OriginalStorage.resolved(for: temp.library).cacheURL(for: stored)
+        XCTAssertEqual(catalog.photo(id: one)?.cacheURL, expected)
         XCTAssertEqual(catalog.photo(id: one)?.originalName, "one.dng")
         XCTAssertEqual(catalog.photo(id: one)?.width, 6000)
     }

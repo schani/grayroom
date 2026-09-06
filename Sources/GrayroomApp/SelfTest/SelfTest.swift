@@ -9,7 +9,7 @@ import Metal
 import Observation
 import UniformTypeIdentifiers
 
-/// `GRAYROOM_SELFTEST=paint|undo|import|library|library2 swift run GrayroomApp <file.DNG>`
+/// `GRAYROOM_SELFTEST=paint|undo|import|library|library2|storage swift run GrayroomApp <file.DNG>`
 ///
 /// Whole-app checks, each in its own process: `paint` (a stroke drawn with real
 /// mouse events), `undo` (Cmd-Z / Cmd-Shift-Z pushed through the real menu-bar
@@ -84,6 +84,8 @@ enum SelfTest {
         ///     swift run GrayroomApp
         /// ```
         case library2
+        /// The required first-run original-storage sheet and its save path.
+        case originalStorageSetup = "storage"
     }
 
     /// Whether this run is one of the two halves of the Library test.
@@ -183,6 +185,10 @@ enum SelfTest {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { runImportWindow() }
             return
         }
+        if mode == .originalStorageSetup {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { runOriginalStorageSetup() }
+            return
+        }
         // Same reason: the library test starts from an empty library and no
         // document at all — waiting for a first render would wait forever.
         if isLibraryRun {
@@ -207,9 +213,7 @@ enum SelfTest {
     /// synthetic JPEG in, so the run exercises both decode paths without
     /// writing into `testdata/`.
     ///
-    /// `subfolder`, when given, is created and the JPEG goes in *there* instead
-    /// of beside the RAWs: that is the second directory the Folders panel has
-    /// to show, and the one photo selecting it has to filter the grid down to.
+    /// `subfolder`, when given, is created and the JPEG goes there.
     static func stageSourceWithAJPEG(_ original: URL, subfolder: String? = nil) -> URL {
         let staged = outputDirectory.appendingPathComponent("import-source", isDirectory: true)
         try? FileManager.default.createDirectory(at: outputDirectory,
@@ -836,7 +840,7 @@ enum SelfTest {
             switch mode {
             case .paint, nil: run(canvas: canvas, model: model)
             case .undo: runUndo(canvas: canvas, model: model)
-            case .importWindow, .library, .library2: break
+            case .importWindow, .library, .library2, .originalStorageSetup: break
             }
         }
     }

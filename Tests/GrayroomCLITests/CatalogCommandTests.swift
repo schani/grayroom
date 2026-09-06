@@ -48,7 +48,6 @@ final class CatalogCommandTests: XCTestCase {
         XCTAssertEqual(fields[4], "green")
         XCTAssertEqual(fields[5], "keeper,street")
         XCTAssertEqual(fields[6], "1", "development count")
-        XCTAssertTrue(fields[7].hasSuffix("a.dng"), fields[7])
         XCTAssertTrue(output.stderr.contains("1 photo(s)"), output.stderr)
     }
 
@@ -202,7 +201,6 @@ final class CatalogCommandTests: XCTestCase {
         XCTAssertTrue(out.contains("gps:           -"), out)
         XCTAssertTrue(out.contains("tags:          -"), out)
         XCTAssertTrue(out.contains("developments:  -"), out)
-        XCTAssertFalse(out.contains("locations:     -"), "it does have a location")
     }
 
     func testShowPrintsTheLensWithItsID() throws {

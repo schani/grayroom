@@ -72,22 +72,19 @@ final class ExportCommandTests: XCTestCase {
         XCTAssertEqual(try names(), ["a-2.png", "a.png"])
     }
 
-    /// A photo whose file the library has lost is reported and does not stop
-    /// the rest.
-    func testAPhotoWithNoFileIsReportedAsAFailure() throws {
+    func testExportRefetchesAnEvictedOriginal() throws {
         let a = try temp.writeImage("a.jpg", width: 32, height: 24)
         let b = try temp.writeImage("b.jpg", width: 40, height: 30, seed: 9)
         try temp.run(["import", a.path, b.path])
-        let lost = try PhotoRef.resolveID(a.path, in: temp.library)
-        for location in try temp.library.locations(for: lost) {
-            _ = try temp.library.removeLocation(id: location.id!)
-        }
+        let first = try PhotoRef.resolveID(a.path, in: temp.library)
+        let photo = try XCTUnwrap(temp.library.photo(id: first))
+        let storage = try OriginalStorage.resolved(for: temp.library)
+        try FileManager.default.removeItem(at: storage.cacheURL(for: photo))
 
-        let result = try temp.run(["export", "\(lost)", b.path, "--to", directory.path])
+        let result = try temp.run(["export", "\(first)", b.path, "--to", directory.path])
 
-        XCTAssertEqual(try names(), ["b.png"])
-        XCTAssertTrue(result.stderr.contains("failed a:"), result.stderr)
-        XCTAssertTrue(result.stderr.contains("exported 1 of 2"), result.stderr)
+        XCTAssertEqual(try names(), ["a.png", "b.png"])
+        XCTAssertTrue(result.stderr.contains("exported 2"), result.stderr)
     }
 
     func testItRefusesAPhotoItCannotResolve() {

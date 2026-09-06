@@ -22,7 +22,7 @@ final class ImporterTests: XCTestCase {
 
     // MARK: - Identity
 
-    func testSameBytesAtTwoPathsIsOnePhotoWithTwoLocations() throws {
+    func testSameBytesAtTwoPathsIsOnePhoto() throws {
         let bytes = Data("one photo, two paths".utf8)
         let a = try temp.writeFile("a/IMG.raw", bytes)
         let b = try temp.writeFile("b/COPY.raw", bytes)
@@ -32,14 +32,10 @@ final class ImporterTests: XCTestCase {
         let second = try importer.importFile(at: b)
 
         XCTAssertTrue(first.isNewPhoto)
-        XCTAssertEqual(first.location, .added)
         XCTAssertFalse(second.isNewPhoto)
-        XCTAssertEqual(second.location, .added)
         XCTAssertEqual(first.photoID, second.photoID)
 
         XCTAssertEqual(try library.photos().count, 1)
-        let paths = try library.locations(for: first.photoID).map(\.path)
-        XCTAssertEqual(Set(paths), [a.standardizedFileURL.path, b.standardizedFileURL.path])
 
         // The name recorded is the one the photo came in under.
         let photo = try XCTUnwrap(library.photo(id: first.photoID))
@@ -56,15 +52,11 @@ final class ImporterTests: XCTestCase {
 
         XCTAssertTrue(first.isNewPhoto)
         XCTAssertFalse(again.isNewPhoto)
-        XCTAssertEqual(again.location, .unchanged)
         XCTAssertEqual(first.photoID, again.photoID)
         XCTAssertEqual(try library.photos().count, 1)
-        XCTAssertEqual(try library.locations(for: first.photoID).count, 1)
     }
 
-    /// The bytes at a recorded path changed: the path now describes the new
-    /// photo, and the outcome names the photo it was taken from.
-    func testChangedBytesAtAKnownPathRepointTheLocation() throws {
+    func testChangedBytesAtAKnownPathCreateANewPhoto() throws {
         let url = try temp.writeFile("IMG.raw", Data("first bytes".utf8))
         let importer = self.importer()
         let first = try importer.importFile(at: url)
@@ -74,10 +66,6 @@ final class ImporterTests: XCTestCase {
 
         XCTAssertTrue(second.isNewPhoto)
         XCTAssertNotEqual(second.photoID, first.photoID)
-        XCTAssertEqual(second.location, .repointed(fromPhotoID: first.photoID))
-        XCTAssertEqual(try library.locations(for: first.photoID).count, 0)
-        XCTAssertEqual(try library.locations(for: second.photoID).map(\.path),
-                       [url.standardizedFileURL.path])
     }
 
     func testDifferentBytesAreDifferentPhotos() throws {
@@ -88,18 +76,6 @@ final class ImporterTests: XCTestCase {
         let second = try importer.importFile(at: b)
         XCTAssertNotEqual(first.photoID, second.photoID)
         XCTAssertEqual(try library.photos().count, 2)
-    }
-
-    func testPathsAreStoredAbsoluteAndStandardized() throws {
-        let url = try temp.writeFile("dir/IMG.raw", Data("standardize me".utf8))
-        let messy = temp.directory
-            .appendingPathComponent("dir")
-            .appendingPathComponent("..")
-            .appendingPathComponent("dir")
-            .appendingPathComponent("IMG.raw")
-        let result = try importer().importFile(at: messy)
-        let locations = try library.locations(for: result.photoID)
-        XCTAssertEqual(locations.map(\.path), [url.standardizedFileURL.path])
     }
 
     // MARK: - Metadata
@@ -254,9 +230,8 @@ final class ImporterTests: XCTestCase {
         XCTAssertFalse(camera.make.isEmpty)
         XCTAssertFalse(camera.model.isEmpty)
 
-        // Same file, second time: no new photo, no new location.
+        // Same file, second time: no new photo.
         let again = try Importer(library: library).importFile(at: url)
         XCTAssertFalse(again.isNewPhoto)
-        XCTAssertEqual(again.location, .unchanged)
     }
 }

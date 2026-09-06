@@ -1,43 +1,42 @@
+import Foundation
+import GrayroomLibrary
 import XCTest
 @testable import GrayroomUI
 
 final class GridDragFilesTests: XCTestCase {
-    private func photo(_ id: Int64, _ locations: [String]) -> CatalogPhoto {
-        CatalogPhoto(id: id, originalName: "photo\(id).DNG", locations: locations)
-    }
+    func testDragMaterializesSelectedOriginalsInGridOrder() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("drag-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = DragStore()
+        let storage = OriginalStorage(cacheDirectory: root, objectStore: store)
+        let aData = Data("a".utf8)
+        let bData = Data("b".utf8)
+        let aSource = root.appendingPathComponent("a")
+        let bSource = root.appendingPathComponent("b")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try aData.write(to: aSource)
+        try bData.write(to: bSource)
+        let a = CatalogPhoto(id: 1, hash: try FileHash.sha256(of: aSource), originalName: "a.DNG")
+        let b = CatalogPhoto(id: 2, hash: try FileHash.sha256(of: bSource), originalName: "b.JPG")
+        store.objects[storage.objectKey(hash: a.hash)] = aData
+        store.objects[storage.objectKey(hash: b.hash)] = bData
 
-    private var library: [CatalogPhoto] {
-        [photo(3, ["/a/three.DNG"]), photo(1, ["/a/one.DNG"]), photo(2, ["/a/two.DNG"])]
-    }
+        let files = try GridDragFiles.files(for: [2, 1], from: [a, b], originals: storage)
 
-    func testADragCarriesTheFilesOfThePhotosItNames() {
-        let files = GridDragFiles.files(for: [1, 2], from: library, exists: { _ in true })
-        XCTAssertEqual(files.map(\.url.path), ["/a/one.DNG", "/a/two.DNG"])
+        XCTAssertEqual(files.map(\.id), [1, 2])
+        XCTAssertEqual(files.map(\.url.pathExtension), ["dng", "jpg"])
+        XCTAssertEqual(try files.map { try Data(contentsOf: $0.url) },
+                       [Data("a".utf8), Data("b".utf8)])
     }
+}
 
-    /// The grid's order, not the order the ids came in.
-    func testTheFilesComeOutInGridOrder() {
-        let files = GridDragFiles.files(for: [2, 3, 1], from: library, exists: { _ in true })
-        XCTAssertEqual(files.map(\.url.path), ["/a/three.DNG", "/a/one.DNG", "/a/two.DNG"])
+private final class DragStore: OriginalObjectStore, @unchecked Sendable {
+    var objects: [String: Data] = [:]
+    func put(file: URL, key: String, sha256: Data) throws {
+        objects[key] = try Data(contentsOf: file)
     }
-
-    /// The library keeps every path it has seen a photo at; the drag wants the
-    /// one that is there now.
-    func testAPhotoContributesItsFirstLocationThatIsOnDisk() {
-        let moved = [photo(1, ["/gone/one.DNG", "/here/one.DNG"])]
-        let files = GridDragFiles.files(for: [1], from: moved, exists: { $0.hasPrefix("/here") })
-        XCTAssertEqual(files.map(\.url.path), ["/here/one.DNG"])
-    }
-
-    func testAPhotoWithNoFileOnDiskDragsNothing() {
-        let missing = [photo(1, ["/gone/one.DNG"]), photo(2, ["/a/two.DNG"])]
-        let files = GridDragFiles.files(for: [1, 2], from: missing,
-                                        exists: { $0 == "/a/two.DNG" })
-        XCTAssertEqual(files.map(\.url.path), ["/a/two.DNG"])
-    }
-
-    func testAPhotoTheLibraryHasNoPathForAtAllDragsNothing() {
-        XCTAssertTrue(GridDragFiles.files(for: [9], from: [photo(9, [])],
-                                          exists: { _ in true }).isEmpty)
+    func get(key: String, to destination: URL) throws {
+        try objects[key]!.write(to: destination)
     }
 }

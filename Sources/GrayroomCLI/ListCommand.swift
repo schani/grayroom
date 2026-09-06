@@ -8,7 +8,7 @@ struct List: ParsableCommand {
         abstract: "List photos in the library.",
         discussion: """
         One line per photo: id, hash prefix, capture date, camera, colour, \
-        tags, development count, first location. Filters compose.
+        tags and development count. Filters compose.
         """)
 
     @OptionGroup var libraryOptions: LibraryOptions
@@ -42,7 +42,6 @@ struct List: ParsableCommand {
             }
             let tags = try library.tags(for: id).map(\.name).joined(separator: ",")
             let developmentCount = try library.developments(for: id).count
-            let location = try library.locations(for: id).first?.path
             out += [
                 String(id),
                 Format.hashPrefix(photo),
@@ -51,7 +50,6 @@ struct List: ParsableCommand {
                 photo.color.name,
                 Format.orDash(tags),
                 String(developmentCount),
-                Format.orDash(location),
             ].joined(separator: "  ") + "\n"
         }
         print(out, terminator: "")

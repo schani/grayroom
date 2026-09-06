@@ -78,14 +78,17 @@ public enum ExportNaming {
 /// photo with no development, the neutral decode. So what lands in the folder is
 /// what the grid was showing.
 public enum BatchExport {
-    /// The jobs for a set of photos, in the order given.
     public static func jobs(forPhotoIDs ids: [Int64], in library: Library) throws -> [ExportJob] {
+        try jobs(forPhotoIDs: ids, in: library,
+                 originals: OriginalStorage.resolved(for: library))
+    }
+
+    /// The jobs for a set of photos, in the order given.
+    public static func jobs(forPhotoIDs ids: [Int64], in library: Library,
+                            originals: OriginalStorage) throws -> [ExportJob] {
         try ids.compactMap { id in
             guard let photo = try library.photo(id: id) else { return nil }
-            // First by path, as `CatalogPhoto.firstLocation` is, so the grid and
-            // the export open the same file.
-            let path = try library.locations(for: id).map(\.path).sorted().first
-            return ExportJob(source: path.map { URL(fileURLWithPath: $0) },
+            return ExportJob(source: try originals.localURL(for: photo),
                              edit: try library.developments(for: id).first?.edit ?? EditState(),
                              stem: ExportNaming.stem(ofFileName: photo.originalName))
         }

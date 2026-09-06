@@ -157,6 +157,7 @@ final class AppModel {
     let hdrSuppression = HDRSuppression()
     var statusMessage: String?
     var errorMessage: String?
+    private var originalStorageErrorMessage: String?
 
     /// Every long-running background job, with its progress and its cancel
     /// button — see `ActivityIndicator`.
@@ -186,6 +187,13 @@ final class AppModel {
     var isExportSheetPresented = false
     var exportFormat: ExportFormat = .png16
     var exportQuality: Double = 0.92
+
+    // MARK: Original storage setup
+
+    let originalStorageSetup = OriginalStorageSetupModel()
+    var isOriginalStorageSetupPresented = false
+    private let originalStorageCredentialStore = KeychainOriginalStorageCredentialStore()
+    private var openInitialDocumentAfterStorageSetup = false
 
     // MARK: Private state
 
@@ -268,6 +276,23 @@ final class AppModel {
         // time and nothing else. A library that would not open has no previews
         // either, and the grid falls back to reading each file directly.
         if let library {
+            if ProcessInfo.processInfo.environment["GRAYROOM_SELFTEST"] != nil,
+               SelfTest.mode != .originalStorageSetup {
+                let root = library.url.deletingLastPathComponent()
+                do {
+                    try library.setConfiguration(root.appendingPathComponent("test-objects")
+                        .absoluteString, forKey: "storage.endpoint")
+                    try library.setConfiguration("test", forKey: "storage.region")
+                    try library.setConfiguration("photos", forKey: "storage.bucket")
+                    try library.setConfiguration(root.appendingPathComponent("original-cache").path,
+                                                 forKey: "cache.directory")
+                    library.originalStorage = try OriginalStorage(library: library)
+                } catch {
+                    errorMessage = "Could not configure self-test storage: \(error)"
+                }
+            } else {
+                prepareOriginalStorage(library)
+            }
             do {
                 let store = try PreviewStore.open(for: library)
                 library.previewStore = store
@@ -283,6 +308,8 @@ final class AppModel {
         importModel.tasks = tasks
         previews.tasks = tasks
         previews.library = library
+        previews.originals = library?.originalStorage
+        loupeImages.originals = library?.originalStorage
         previews.render = { [weak self] url, edit, done in
             guard let service = self?.service else {
                 done(nil)
@@ -301,20 +328,101 @@ final class AppModel {
             return self.renderInFlight
                 || Date().timeIntervalSince(self.lastEditAt) < AppModel.editingQuietPeriod
         }
-        // Identity in this library is the file's bytes, so "already imported"
-        // is a hash question, not a path question — and it takes both halves:
-        // a photo the library knows but has no location for is one whose files
-        // are all gone, and adding this one back is exactly right.
+        // Identity in this library is the file's bytes.
         if let library {
             importModel.isHashImported = { hex in
-                guard let photo = ((try? library.photo(withHashHexString: hex)) ?? nil),
-                      let photoID = photo.id
-                else { return false }
-                return ((try? library.locations(for: photoID)) ?? []).isEmpty == false
+                ((try? library.photo(withHashHexString: hex)) ?? nil) != nil
             }
         }
         importModel.onImport = { [weak self] entries in self?.runImport(entries) }
         observeHDRSuppression()
+    }
+
+    private func prepareOriginalStorage(_ library: Library) {
+        do {
+            library.originalStorage = try OriginalStorage(
+                library: library, credentialStore: originalStorageCredentialStore)
+        } catch {
+            populateOriginalStorageSetup(from: library)
+            isOriginalStorageSetupPresented = true
+        }
+    }
+
+    private func populateOriginalStorageSetup(from library: Library) {
+        originalStorageSetup.endpoint =
+            (try? library.configurationValue(forKey: "storage.endpoint")) ?? ""
+        originalStorageSetup.region =
+            (try? library.configurationValue(forKey: "storage.region")) ?? ""
+        originalStorageSetup.bucket =
+            (try? library.configurationValue(forKey: "storage.bucket")) ?? ""
+        originalStorageSetup.prefix =
+            (try? library.configurationValue(forKey: "storage.prefix")) ?? "originals"
+        if let cache = try? library.configurationValue(forKey: "cache.directory"),
+           !cache.isEmpty {
+            originalStorageSetup.cacheDirectory = cache
+        }
+        let environment = ProcessInfo.processInfo.environment
+        if let accessKey = environment["AWS_ACCESS_KEY_ID"] {
+            originalStorageSetup.accessKeyID = accessKey
+            originalStorageSetup.secretAccessKey = environment["AWS_SECRET_ACCESS_KEY"] ?? ""
+            originalStorageSetup.sessionToken = environment["AWS_SESSION_TOKEN"] ?? ""
+        } else if let credentials = try? originalStorageCredentialStore.load() {
+            originalStorageSetup.accessKeyID = credentials.accessKeyID
+            originalStorageSetup.secretAccessKey = credentials.secretAccessKey
+            originalStorageSetup.sessionToken = credentials.sessionToken ?? ""
+        }
+    }
+
+    func chooseOriginalCacheDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: originalStorageSetup.cacheDirectory,
+                                 isDirectory: true)
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.originalStorageSetup.cacheDirectory = url.path
+        }
+    }
+
+    func saveOriginalStorageSetup() {
+        guard let library else { return }
+        originalStorageSetup.errorMessage = nil
+        let configuration = OriginalStorageConfiguration(
+            endpoint: originalStorageSetup.endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
+            region: originalStorageSetup.region.trimmingCharacters(in: .whitespacesAndNewlines),
+            bucket: originalStorageSetup.bucket.trimmingCharacters(in: .whitespacesAndNewlines),
+            prefix: originalStorageSetup.prefix.trimmingCharacters(in: .whitespacesAndNewlines),
+            cacheDirectory: originalStorageSetup.cacheDirectory
+                .trimmingCharacters(in: .whitespacesAndNewlines))
+        let token = originalStorageSetup.sessionToken.isEmpty
+            ? nil : originalStorageSetup.sessionToken
+        let credentials = S3Credentials(
+            accessKeyID: originalStorageSetup.accessKeyID
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            secretAccessKey: originalStorageSetup.secretAccessKey,
+            sessionToken: token)
+        do {
+            let storage = try configuration.makeStorage(credentials: credentials)
+            if !configuration.endpoint.lowercased().hasPrefix("file:") {
+                try originalStorageCredentialStore.save(credentials)
+            }
+            try configuration.save(to: library)
+            library.originalStorage = storage
+            previews.originals = storage
+            loupeImages.originals = storage
+            isOriginalStorageSetupPresented = false
+            if errorMessage == originalStorageErrorMessage { errorMessage = nil }
+            originalStorageErrorMessage = nil
+            reloadCatalog()
+            if openInitialDocumentAfterStorageSetup {
+                openInitialDocumentAfterStorageSetup = false
+                openInitialDocument()
+            }
+        } catch {
+            originalStorageSetup.errorMessage = "Could not save storage configuration: \(error)"
+        }
     }
 
     /// Follow the system's HDR suppression: the canvases stop asking for
@@ -344,9 +452,9 @@ final class AppModel {
     /// the activity centre as it goes.
     ///
     /// The scan has already hashed every one of these files, so the hashes come
-    /// along rather than being recomputed — which is most of the work. It still
-    /// runs one file at a time (the bottleneck is the disk, not the CPU) and
-    /// checks the task's cancel flag between files.
+    /// along rather than being recomputed — which is most of the work. Up to
+    /// five files upload concurrently; queued files check the task's cancel
+    /// flag before starting.
     func runImport(_ entries: [ImportEntry]) {
         guard let library, !entries.isEmpty, importTaskID == nil else { return }
         let urls = entries.map(\.url)
@@ -363,23 +471,23 @@ final class AppModel {
             var existing = 0
             var failed = 0
             var firstError: Error?
-            importer.importFiles(urls, precomputedHashes: hashes, progress: { finished, _, outcome in
+            importer.importFiles(urls, precomputedHashes: hashes) { finished, _, url, outcome in
                 switch outcome {
                 case .success(let result):
                     if result.isNewPhoto { added += 1 } else { existing += 1 }
                 case .failure(let error):
                     failed += 1
                     if firstError == nil { firstError = error }
-                    NSLog("import failed: %@: %@", urls[finished - 1].path, "\(error)")
+                    NSLog("import failed: %@: %@", url.path, "\(error)")
                 }
                 DispatchQueue.main.async { [weak self] in
                     self?.tasks.update(taskID, completed: finished,
-                                       detail: urls[finished - 1].lastPathComponent)
+                                       detail: url.lastPathComponent)
                 }
-            }, isCancelled: { [weak self] in
+            } isCancelled: { [weak self] in
                 guard let self else { return true }
                 return self.tasks.isCancelled(taskID)
-            })
+            }
             let cancelled = self?.tasks.isCancelled(taskID) ?? false
             let summary = AppModel.importSummary(added: added, existing: existing, failed: failed,
                                                  error: firstError)
@@ -416,8 +524,29 @@ final class AppModel {
             // longer shows — is no longer selected.
             browser.rebuild(from: catalog.photos)
         } catch {
-            errorMessage = "Could not read the library: \(error)"
+            reportLibraryReadFailure(error)
         }
+    }
+
+    private func reportLibraryReadFailure(_ error: Error) {
+        let message = "Could not read the library: \(error)"
+        errorMessage = message
+        guard Self.isOriginalStorageSetupError(error), let library else { return }
+        originalStorageErrorMessage = message
+        populateOriginalStorageSetup(from: library)
+        isOriginalStorageSetupPresented = true
+    }
+
+    private static func isOriginalStorageSetupError(_ error: Error) -> Bool {
+        if let error = error as? LibraryError {
+            switch error {
+            case .missingConfiguration, .missingStorageCredentials: return true
+            default: return false
+            }
+        }
+        return error is OriginalStorageConfigurationError
+            || error is KeychainOriginalStorageError
+            || error is S3Error
     }
 
     // MARK: The Folders panel, as the views address it
@@ -609,10 +738,6 @@ final class AppModel {
         loupeCache.dropFullResolution(except: loupePhoto?.id)
         service?.clearLoupeMaskCache()
         guard let photo = loupePhoto else { return }
-        guard photo.url != nil else {
-            loupeMessage = "\(photo.originalName) is not where the library left it"
-            return
-        }
         loupeUsesPipeline = photo.developmentFingerprint != nil
 
         // Nothing may ask for a picture until the frame and everything already
@@ -660,7 +785,7 @@ final class AppModel {
     /// at.
     private func requestLoupeResolution() {
         guard !isLoadingLoupe, libraryViewMode == .loupe, mode == .library,
-              let photo = loupePhoto, let url = photo.url, service != nil
+              let photo = loupePhoto, let url = photo.cacheURL, service != nil
         else { return }
         let native = loupeNativeLongEdge
         guard native > 0 else { return }
@@ -936,16 +1061,26 @@ final class AppModel {
     /// its row id, which we have, so there is no reason to read 50 MB off the
     /// disk to rediscover it.
     func openPhoto(id: Int64) {
-        guard let photo = catalog.photo(id: id) else { return }
-        guard let path = photo.firstLocation else {
-            errorMessage = "\(photo.originalName) has no file on disk"
+        guard let photo = catalog.photo(id: id), let originals = library?.originalStorage else {
+            errorMessage = "Original storage is not configured"
             return
         }
-        browser.selectPhotos([id])
-        _ = browser.exitLoupe()
-        clearLoupe()
-        open(url: URL(fileURLWithPath: path), knownPhotoID: id)
-        mode = .develop
+        libraryQueue.async { [weak self] in
+            do {
+                let url = try originals.localURL(hash: photo.hash,
+                                                 originalName: photo.originalName)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.browser.selectPhotos([id])
+                    _ = self.browser.exitLoupe()
+                    self.clearLoupe()
+                    self.open(url: url, knownPhotoID: id)
+                    self.mode = .develop
+                }
+            } catch {
+                DispatchQueue.main.async { self?.errorMessage = "Could not fetch original: \(error)" }
+            }
+        }
     }
 
     // MARK: Grid selection
@@ -971,7 +1106,9 @@ final class AppModel {
     /// in grid order, skipping the ones whose files are not there — see
     /// `GridDragFiles`.
     func draggedFiles(for ids: [Int64]) -> [DraggedPhotoFile] {
-        GridDragFiles.files(for: ids, from: catalog.photos)
+        guard let originals = library?.originalStorage else { return [] }
+        return ((try? GridDragFiles.files(for: ids, from: catalog.photos,
+                                          originals: originals)) ?? [])
             .map { DraggedPhotoFile(id: $0.id, url: $0.url) }
     }
 
@@ -1130,23 +1267,28 @@ final class AppModel {
     /// request to develop that file; silently reopening yesterday's file is
     /// not, so it loads in the background while the library grid stays up.
     func openInitialDocument() {
+        guard !isOriginalStorageSetupPresented else {
+            openInitialDocumentAfterStorageSetup = true
+            return
+        }
         let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-") }
         if let path = args.first {
             open(url: URL(fileURLWithPath: path))
             mode = .develop
             return
         }
-        // Never in a self-test: the file the *real* user last had open is
-        // remembered in a preference that `CFFIXED_USER_HOME` does not
-        // redirect, so reopening it here silently imports it into the
-        // throwaway library the test is measuring — see
-        // `SelfTest.startIfRequested`. A test that wants a document is given
-        // one on the command line.
+        // Never in a self-test: `CFFIXED_USER_HOME` does not redirect this
+        // preference, so it names the real user's file rather than test data.
+        // A test that wants a document gets one on the command line.
         guard !SelfTest.isRequested else { return }
         if let path = UserDefaults.standard.string(forKey: AppModel.lastFileDefaultsKey),
            FileManager.default.fileExists(atPath: path) {
-            open(url: URL(fileURLWithPath: path))
+            restoreLastOpenedFile(at: URL(fileURLWithPath: path))
         }
+    }
+
+    func restoreLastOpenedFile(at url: URL) {
+        open(url: url, importIfNeeded: false)
     }
 
     func presentOpenPanel() {
@@ -1181,8 +1323,10 @@ final class AppModel {
 
     /// `knownPhotoID` is the library row this file is already known to be, when
     /// the caller knows it (the grid does). It skips the hash — the only reason
-    /// opening a file has ever needed to read all of it.
-    func open(url: URL, knownPhotoID: Int64? = nil) {
+    /// opening a file has ever needed to read all of it. Session restoration
+    /// passes `importIfNeeded: false`, so an unknown last-opened file stays out
+    /// of both the catalog and object storage.
+    func open(url: URL, knownPhotoID: Int64? = nil, importIfNeeded: Bool = true) {
         guard let service else { return }
         guard FileManager.default.fileExists(atPath: url.path) else {
             errorMessage = "File not found: \(url.path)"
@@ -1219,7 +1363,8 @@ final class AppModel {
         store.replace(EditState(), named: nil)
         store.selectedMaskID = nil
         store.markSaved()
-        loadFromLibrary(url: url, generation: openGeneration, knownPhotoID: knownPhotoID)
+        loadFromLibrary(url: url, generation: openGeneration, knownPhotoID: knownPhotoID,
+                        importIfNeeded: importIfNeeded)
 
         service.probe(url: url) { [weak self] result in
             guard let self else { return }
@@ -1386,8 +1531,8 @@ final class AppModel {
 
     // MARK: - Library
 
-    /// Hash the file, import it if the library has never seen it, and adopt its
-    /// first development.
+    /// Hash the file, optionally import it if the library has never seen it,
+    /// and adopt its first development.
     ///
     /// All of that runs off the main thread: hashing a 50 MB RAW is tens of
     /// milliseconds, which is a visible hitch on a window that is also trying to
@@ -1397,36 +1542,36 @@ final class AppModel {
     /// `knownPhotoID` short-circuits the hash: a photo opened from the grid is
     /// already identified, and re-reading the whole file to find out what it is
     /// would be the slowest part of opening it.
-    private func loadFromLibrary(url: URL, generation: Int, knownPhotoID: Int64? = nil) {
+    private func loadFromLibrary(url: URL, generation: Int, knownPhotoID: Int64? = nil,
+                                 importIfNeeded: Bool = true) {
         guard let library else { return }
         libraryQueue.async {
             let outcome = Result {
-                () -> (photoID: Int64, isNew: Bool, first: Development?) in
+                () -> (photoID: Int64?, isNew: Bool, first: Development?) in
                 if let knownPhotoID {
                     return (knownPhotoID, false, try library.developments(for: knownPhotoID).first)
                 }
                 let hash = try FileHash.sha256(of: url)
-                let photoID: Int64
-                var isNew = false
                 if let existing = try library.photo(withHash: hash), let id = existing.id {
-                    photoID = id
-                } else {
-                    photoID = try Importer(library: library).importFile(at: url).photoID
-                    isNew = true
+                    return (id, false, try library.developments(for: id).first)
                 }
-                return (photoID, isNew, try library.developments(for: photoID).first)
+                guard importIfNeeded else { return (nil, false, nil) }
+                let photoID = try Importer(library: library).importFile(at: url).photoID
+                return (photoID, true, try library.developments(for: photoID).first)
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.openGeneration == generation else { return }
                 switch outcome {
                 case .failure(let error):
-                    self.errorMessage = "Could not read the library: \(error)"
+                    self.reportLibraryReadFailure(error)
                 case .success(let (photoID, isNew, first)):
                     self.currentPhotoID = photoID
                     self.developmentID = first?.id
                     // Opening a file the library had never seen imports it, so
                     // the grid has to learn about it.
-                    if isNew || self.catalog.index(of: photoID) == nil { self.reloadCatalog() }
+                    if let photoID, isNew || self.catalog.index(of: photoID) == nil {
+                        self.reloadCatalog()
+                    }
                     // An edit the user has already started beats a stored one:
                     // the lookup lost the race, it does not get to win it.
                     if let first, !self.store.isDirty {
@@ -1642,6 +1787,7 @@ final class AppModel {
         return result.isCancelled ? "Export cancelled — " + message : message
     }
 }
+
 
 // MARK: - Canvas input
 

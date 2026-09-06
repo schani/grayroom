@@ -22,9 +22,8 @@ extension SelfTest {
         try? FileManager.default.removeItem(at: destination)
         try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
 
-        // Imported behind the app's back and reloaded, the way the Folders
-        // checks take a location away: the import *window* is not what is under
-        // test here.
+        // Imported behind the app's back and reloaded; the import window is not
+        // under test here.
         var imported: [Int64] = []
         if let library = try? Library.openDefault() {
             let importer = Importer(library: library)

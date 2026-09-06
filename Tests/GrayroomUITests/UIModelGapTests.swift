@@ -97,7 +97,7 @@ final class PhotoCatalogFingerprintTests: XCTestCase {
                      hash: Data([UInt8(truncatingIfNeeded: id), 0xAB]),
                      originalName: "\(id).dng",
                      capturedAt: Date(timeIntervalSince1970: 1_700_000_000 + Double(id)),
-                     locations: ["/photos/\(id).dng"],
+                     cacheURL: URL(fileURLWithPath: "/photos/\(id).dng"),
                      developmentCount: developmentCount,
                      developmentFingerprint: fingerprint)
     }
@@ -128,8 +128,7 @@ final class PhotoCatalogFingerprintTests: XCTestCase {
     /// Lowercase hex — how the CLI addresses this photo.
     func testHashHexString() {
         XCTAssertEqual(photo(id: 1).hashHexString, "01ab")
-        XCTAssertEqual(photo(id: 1).url?.path, "/photos/1.dng")
-        XCTAssertEqual(photo(id: 1).firstLocation, "/photos/1.dng")
+        XCTAssertEqual(photo(id: 1).cacheURL?.path, "/photos/1.dng")
     }
 }
 

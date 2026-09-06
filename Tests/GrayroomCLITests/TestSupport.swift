@@ -19,6 +19,13 @@ final class TempLibrary {
             .appendingPathComponent("grayroom-cli-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         library = try Library(url: directory.appendingPathComponent("library.sqlite"))
+        try library.setConfiguration(directory.appendingPathComponent("objects").absoluteString,
+                                     forKey: "storage.endpoint")
+        try library.setConfiguration("test", forKey: "storage.region")
+        try library.setConfiguration("photos", forKey: "storage.bucket")
+        try library.setConfiguration("originals", forKey: "storage.prefix")
+        try library.setConfiguration(directory.appendingPathComponent("cache").path,
+                                     forKey: "cache.directory")
     }
 
     @discardableResult

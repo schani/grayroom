@@ -126,29 +126,6 @@ public struct Photo: LibraryRecord, Identifiable, Equatable, Sendable {
     public var hashHexString: String { FileHash.hexString(hash) }
 }
 
-// MARK: - Location
-
-public struct Location: LibraryRecord, Identifiable, Equatable, Sendable {
-    public static let databaseTableName = "locations"
-
-    public var id: Int64?
-    public var photoId: Int64
-    /// Absolute and standardized (`URL.standardizedFileURL.path`).
-    public var path: String
-
-    public init(id: Int64? = nil, photoId: Int64, path: String) {
-        self.id = id
-        self.photoId = photoId
-        self.path = path
-    }
-
-    public mutating func didInsert(_ inserted: InsertionSuccess) {
-        id = inserted.rowID
-    }
-
-    public var url: URL { URL(fileURLWithPath: path) }
-}
-
 // MARK: - Development
 
 /// One rendition of a photo: a single `EditState`, stored as JSON.

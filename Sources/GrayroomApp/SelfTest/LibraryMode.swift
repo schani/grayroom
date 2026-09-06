@@ -89,8 +89,7 @@ extension SelfTest {
               "…and it is the only item in the menu bar claiming ⌥⌘S "
                   + "(\(claimants.map(\.title)))")
 
-        // 3. Fill the library through the real import path, with one photo in a
-        //    subfolder so the Folders panel has a tree to show and not a row.
+        // 3. Fill the library through the real import path.
         let path = ProcessInfo.processInfo.environment["GRAYROOM_SELFTEST_IMPORT_DIR"] ?? "testdata"
         let source = stageSourceWithAJPEG(URL(fileURLWithPath: path, isDirectory: true),
                                           subfolder: folderSubfolderName)
@@ -128,7 +127,7 @@ extension SelfTest {
                       "the grid has at least the photos that could be imported "
                           + "(\(app.catalog.count) cells, \(expected.count) checked, "
                           + "\(undecodable.count) undecodable)")
-                check(app.catalog.photos.allSatisfy { $0.firstLocation != nil },
+                check(app.catalog.photos.allSatisfy { $0.cacheURL != nil },
                       "every catalogued photo has a file on disk")
                 // The run is split in two — see `SelfTest.Mode.library2`. Both
                 // halves import into a throwaway library of their own; from
@@ -195,7 +194,7 @@ extension SelfTest {
                 //     payload the container asks the grid for.
                 let dragged = app.draggedFiles(for: app.highlightedPhotoIDs)
                 let wanted = app.highlightedPhotoIDs
-                    .compactMap { app.catalog.photo(id: $0)?.firstLocation }
+                    .compactMap { app.catalog.photo(id: $0)?.cacheURL?.path }
                 check(dragged.map(\.url.path) == wanted,
                       "a drag of the selection carries both photos' originals "
                           + "(\(dragged.map { $0.url.lastPathComponent }))")
@@ -286,7 +285,7 @@ extension SelfTest {
                 check(app.currentPhotoID == subject,
                       "…on the highlighted photo (\(subjectName))")
                 subjectName = app.imageURL?.lastPathComponent ?? subjectName
-                check(app.imageURL?.path == app.catalog.photo(id: subject)?.firstLocation,
+                check(app.imageURL == app.catalog.photo(id: subject)?.cacheURL,
                       "…opened from the catalog's own path (\(subjectName))")
                 check(findCanvas() != nil, "the develop canvas is in the window")
             },
@@ -465,12 +464,12 @@ extension SelfTest {
         // Smallest file first, in both cases: opening a photo decodes it, and a
         // hundred-megapixel frame costs seconds this run does not need to spend
         // to read a label off the status bar.
-        let byCost = app.catalog.photos.filter { $0.url != nil }
+        let byCost = app.catalog.photos.filter { $0.cacheURL != nil }
             .sorted { $0.byteSize < $1.byteSize }
         let lensCandidate = byCost.first { $0.lensId != nil }
         let plainCandidate = byCost.first { $0.lensId == nil }
         var withLens: (id: Int64, description: String)?
-        if let candidate = lensCandidate, let url = candidate.url,
+        if let candidate = lensCandidate, let url = candidate.cacheURL,
            let info = try? ImageDecoder.probe(url: url), let model = info.lensModel,
            !model.isEmpty {
             let make = info.lensMake ?? ""
@@ -480,7 +479,7 @@ extension SelfTest {
               "a photo the import gave a lens has one in its file too "
                   + "(\(lensCandidate?.originalName ?? "none"))")
         var withoutLens: Int64?
-        if let candidate = plainCandidate, let url = candidate.url,
+        if let candidate = plainCandidate, let url = candidate.cacheURL,
            let info = try? ImageDecoder.probe(url: url),
            (info.lensModel ?? "").isEmpty {
             withoutLens = candidate.id
@@ -582,16 +581,6 @@ extension SelfTest {
             } else {
                 body()
             }
-        }
-    }
-
-    /// Deletes every location row of a photo through the library API — the
-    /// "someone moved the files" case, done the way the app would do it.
-    static func removeLocations(of photoID: Int64) {
-        guard let library = try? Library.openDefault() else { return }
-        defer { try? library.close() }
-        for location in (try? library.locations(for: photoID)) ?? [] {
-            if let id = location.id { _ = try? library.removeLocation(id: id) }
         }
     }
 
@@ -699,4 +688,3 @@ extension SelfTest {
         exit(6)
     }
 }
-

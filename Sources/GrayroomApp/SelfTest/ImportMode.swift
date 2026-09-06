@@ -25,19 +25,14 @@ extension SelfTest {
         check(item?.keyEquivalentModifierMask == [.command, .shift],
               "File › Import… modifiers are Shift-Cmd")
 
-        // 2. A photo the library knows by hash but has no location for. Its
-        //    files are all gone, so offering to add one back is correct — this
-        //    is the case a path check and a naive hash check both get wrong.
         let path = ProcessInfo.processInfo.environment["GRAYROOM_SELFTEST_IMPORT_DIR"] ?? "testdata"
         // A JPEG alongside the RAWs: standard formats go through a different
         // decode path, and the grid has to treat them identically.
         let source = stageSourceWithAJPEG(URL(fileURLWithPath: path, isDirectory: true))
-        let orphaned = makeHashKnownButUnlocated(in: source)
-        if let orphaned { log("import self-test: orphaned by hash: \(orphaned.lastPathComponent)") }
-        // …and one that really *is* in the library, file and all: the case the
+        // One file is already in the library: the case the
         // grid greys out, the case "Hide already imported" hides, and the only
         // one of the three that must arrive unchecked.
-        let alreadyThere = makeAlreadyImported(in: source, avoiding: orphaned)
+        let alreadyThere = makeAlreadyImported(in: source, avoiding: nil)
         if let alreadyThere {
             log("import self-test: already imported: \(alreadyThere.lastPathComponent)")
         }
@@ -81,16 +76,6 @@ extension SelfTest {
             check(!tasks.tasks.contains { $0.title.hasPrefix("Scanning ") },
                   "the scan task went away when the scan finished")
             check(!model.isScanning, "the model stopped reporting a scan")
-            if let orphaned,
-               let item = model.items.first(where: { $0.url.lastPathComponent
-                   == orphaned.lastPathComponent }) {
-                check(item.status == .new,
-                      "a hash the library knows with zero locations counts as NEW "
-                          + "(got \(item.status))")
-                check(item.checked, "…and it arrived checked")
-            } else if orphaned != nil {
-                check(false, "the orphaned file is in the grid")
-            }
             check(model.items.allSatisfy { $0.status != .pending },
                   "every entry resolved out of .pending")
             if let jpeg = model.items.first(where: { $0.filename == "standard.jpg" }) {
@@ -196,7 +181,7 @@ extension SelfTest {
             if let alreadyThere,
                let item = model.items.first(where: { $0.url == alreadyThere }) {
                 check(item.status == .alreadyImported,
-                      "a file the library has, path and all, reads as already imported "
+                      "a file the library has reads as already imported "
                           + "(got \(item.status))")
                 check(!item.checked, "…and arrives unchecked, so Import does not re-add it")
             } else if alreadyThere != nil {
@@ -486,30 +471,7 @@ extension SelfTest {
         }
     }
 
-    /// Imports a *copy* of one of the source files and then removes the copy's
-    /// location row, leaving the library with a photo it knows by hash and has
-    /// no file for. Returns the original in `directory` that shares those bytes.
-    static func makeHashKnownButUnlocated(in directory: URL) -> URL? {
-        guard let library = try? Library.openDefault(),
-              let urls = try? ImportScanner.scan(directory: directory, recursive: true),
-              let original = urls.first else { return nil }
-        let copy = outputDirectory.appendingPathComponent("orphan-" + original.lastPathComponent)
-        try? FileManager.default.createDirectory(at: outputDirectory,
-                                                 withIntermediateDirectories: true)
-        try? FileManager.default.removeItem(at: copy)
-        guard (try? FileManager.default.copyItem(at: original, to: copy)) != nil,
-              let result = try? Importer(library: library).importFile(at: copy)
-        else { return nil }
-        for location in (try? library.locations(for: result.photoID)) ?? [] {
-            if let id = location.id { _ = try? library.removeLocation(id: id) }
-        }
-        try? FileManager.default.removeItem(at: copy)
-        try? library.close()
-        return original
-    }
-
-    /// Imports one of the source files **where it is**, so the library has its
-    /// hash *and* its path. The scan must then call it `.alreadyImported`.
+    /// Imports one source file. The scan must then call it `.alreadyImported`.
     ///
     /// A different file from the orphan's: a photo cannot be both the one the
     /// library has lost and the one it still has.

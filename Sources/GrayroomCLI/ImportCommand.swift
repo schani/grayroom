@@ -7,9 +7,8 @@ struct Import: ParsableCommand {
         commandName: "import",
         abstract: "Add RAW files to the library.",
         discussion: """
-        Files are identified by the SHA-256 of their bytes, so the same file at \
-        two paths is one photo with two locations and re-importing costs nothing. \
-        Directories are walked for camera RAW files.
+        Files are identified by SHA-256. Each original is uploaded and cached \
+        before its catalog row is inserted. Directories are walked for images.
         """)
 
     @OptionGroup var libraryOptions: LibraryOptions
@@ -28,21 +27,17 @@ struct Import: ParsableCommand {
         let library = try libraryOptions.open()
         let importer = Importer(library: library)
 
-        var added = 0, existing = 0, repointed = 0, newPhotos = 0, failed = 0
+        var existing = 0, newPhotos = 0, failed = 0
         var out = ""
 
         func report(_ result: ImportResult) throws {
-            let verb: String
-            switch result.location {
-            case .added: verb = "added"; added += 1
-            case .unchanged: verb = "exists"; existing += 1
-            case .repointed: verb = "repointed"; repointed += 1
-            }
+            let verb = result.isNewPhoto ? "imported" : "exists"
+            if !result.isNewPhoto { existing += 1 }
             if result.isNewPhoto { newPhotos += 1 }
             let photo = try library.photo(id: result.photoID)
             let hash = photo.map { Format.hashPrefix($0) } ?? "-"
             out += "\(verb.padding(toLength: 9, withPad: " ", startingAt: 0))  "
-                + "\(hash)  \(result.path)\n"
+                + "\(hash)\n"
         }
 
         for path in paths {
@@ -68,8 +63,7 @@ struct Import: ParsableCommand {
         }
 
         print(out, terminator: "")
-        var summary = "\(added + existing + repointed) file(s): \(added) added, "
-            + "\(existing) exists, \(repointed) repointed; \(newPhotos) new photo(s)"
+        var summary = "\(newPhotos) new photo(s), \(existing) existing"
         if failed > 0 { summary += ", \(failed) skipped" }
         print(summary)
     }

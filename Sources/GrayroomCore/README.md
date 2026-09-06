@@ -1244,8 +1244,8 @@ Support/Grayroom/library.sqlite`; every entry point takes an explicit path, and
 the CLI's `--library` / `$GRAYROOM_LIBRARY` override it.
 
 A photo is identified by the **SHA-256 of the whole file** (`FileHash`, streamed
-in 1 MB chunks), so the same file at two paths is one photo with two locations
-and re-importing a path costs a hash and nothing else. A photo has any number of
+in 1 MB chunks). The original lives in S3-compatible object storage under its
+hash. The local hash-and-extension file is a cache. A photo has any number of
 **developments**; a development is one `EditState`, stored as JSON in
 `developments.edit_json`. Colour is a single-valued Lightroom-style label, tags
 are free-form many-to-many.
@@ -1255,22 +1255,22 @@ cameras      id, make, model                          UNIQUE(make, model)
 photos       id, hash BLOB UNIQUE, byte_size, original_name, imported_at, captured_at,
              camera_id -> cameras (nullable), width, height,
              latitude, longitude, altitude (nullable), color
-locations    id, photo_id -> photos (cascade), path TEXT UNIQUE
+configuration key PRIMARY KEY, value
 developments id, photo_id -> photos (cascade), ordinal, edit_json (json_valid),
              created_at, updated_at                   UNIQUE(photo_id, ordinal)
 tags         id, name UNIQUE COLLATE NOCASE
 photo_tags   photo_id -> photos, tag_id -> tags        PRIMARY KEY(photo_id, tag_id)
 ```
 
-`Importer` hashes a file, probes it for capture date, camera and GPS through
-`ImageDecoder.probe` (metadata only, no GPU), and upserts the photo and its
-location. A path whose bytes have changed is repointed at the photo they now
-hash to.
+`Importer` hashes and probes a file, uploads it, atomically populates the cache,
+then inserts the photo. A failed upload or cache copy is a failed import and
+does not create a catalog row.
 
 ### CLI
 
 ```
 grayroom import <paths...> [--no-recursive]
+grayroom config set|get|list ...
 grayroom ls [--color red|yellow|green|blue|purple|unlabeled] [--tag name] [--camera id]
 grayroom show <photo>
 grayroom tag add|rm <photo> <name>
@@ -1281,6 +1281,12 @@ grayroom developments rm <development-id>
 grayroom developments export <development-id> <out.json>
 grayroom developments set <development-id> key=value...
 ```
+
+Storage uses `storage.endpoint`, `storage.region`, `storage.bucket`, optional
+`storage.prefix` (default `originals`), and `cache.directory`. Credentials come
+from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional
+`AWS_SESSION_TOKEN`, or from the app's setup sheet, which stores them in macOS
+Keychain. They are not stored in SQLite.
 
 `<photo>` is a photo id, a hash prefix (which must be unique), or a path to the
 file (hashed and looked up). Ids win over hash prefixes, because ids are what

@@ -1,4 +1,5 @@
 import Foundation
+import GrayroomLibrary
 
 /// What a drag out of the photo grid hands over: the photos' own originals.
 ///
@@ -19,21 +20,15 @@ public enum GridDragFiles {
     /// the order the ids arrived in — a multi-photo drop should land in the
     /// order it was picked up.
     ///
-    /// A photo contributes its **first location that is still on disk**. The
-    /// library keeps every path it has ever seen a photo at, and the first of
-    /// them is not necessarily the one that is there now; one whose files have
-    /// all moved away contributes nothing, because there is no file to hand
-    /// over.
     public static func files(
         for ids: [Int64],
         from photos: [CatalogPhoto],
-        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
-    ) -> [File] {
+        originals: OriginalStorage
+    ) throws -> [File] {
         let wanted = Set(ids)
-        return photos.filter { wanted.contains($0.id) }.compactMap { photo in
-            photo.locations.first(where: exists).map {
-                File(id: photo.id, url: URL(fileURLWithPath: $0))
-            }
+        return try photos.filter { wanted.contains($0.id) }.map { photo in
+            File(id: photo.id,
+                 url: try originals.localURL(hash: photo.hash, originalName: photo.originalName))
         }
     }
 }

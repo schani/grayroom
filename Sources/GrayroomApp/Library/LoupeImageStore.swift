@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import GrayroomCore
+import GrayroomLibrary
 import GrayroomUI
 
 /// The camera's own picture of one photo, read off the file at the size the
@@ -45,14 +46,11 @@ final class LoupeImageStore {
 
     private var pending: [Key: [(CGImage?) -> Void]] = [:]
     private let queue = DispatchQueue(label: "grayroom.loupe", qos: .userInitiated)
+    var originals: OriginalStorage?
 
     /// The camera's picture, at most `longEdge` pixels on its longer side.
     func image(for photo: CatalogPhoto, longEdge: Int,
                completion: @escaping (CGImage?) -> Void) {
-        guard let url = photo.url else {
-            completion(nil)
-            return
-        }
         let key = Key(photoID: photo.id, longEdge: longEdge)
         if pending[key] != nil {
             pending[key]?.append(completion)
@@ -60,7 +58,10 @@ final class LoupeImageStore {
         }
         pending[key] = [completion]
         queue.async { [weak self] in
-            let image = EmbeddedPreview.thumbnail(url: url, maxPixelSize: longEdge)
+            let url = try? self?.originals?.localURL(hash: photo.hash,
+                                                     originalName: photo.originalName)
+            let image = url.flatMap { EmbeddedPreview.thumbnail(url: $0,
+                                                                 maxPixelSize: longEdge) }
             DispatchQueue.main.async { self?.deliver(image, for: key) }
         }
     }

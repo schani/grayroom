@@ -99,26 +99,6 @@ final class LibraryErrorPathTests: XCTestCase {
         XCTAssertTrue(try library.removeTag(photoID: id, name: " STREET "))
     }
 
-    // MARK: - Locations
-
-    func testLocationLookupByPath() throws {
-        let id = try photo("a.dng")
-        let path = temp.directory.appendingPathComponent("a.dng").standardizedFileURL.path
-
-        let found = try XCTUnwrap(library.location(atPath: path))
-        XCTAssertEqual(found.photoId, id)
-        XCTAssertEqual(found.url.path, path, "Location.url is its path")
-
-        XCTAssertNil(try library.location(atPath: "/nowhere/a.dng"))
-        // The stored path is standardized, so an unstandardized spelling of the
-        // same file does not match this raw lookup.
-        XCTAssertNil(try library.location(atPath: path + "/../a.dng"))
-    }
-
-    func testRemovingAMissingLocationIsFalse() throws {
-        XCTAssertFalse(try library.removeLocation(id: 404))
-    }
-
     // MARK: - Cameras
 
     func testCameraFindOrCreateIsIdempotentAndOrdered() throws {
@@ -159,24 +139,6 @@ final class LibraryErrorPathTests: XCTestCase {
         XCTAssertEqual(try library.photos(withHashPrefix: "abc").map(\.id), ids.map { $0 })
         XCTAssertEqual(try library.photos(withHashPrefix: "ABCD").map(\.id), [ids[0]])
         XCTAssertEqual(try library.photos(withHashPrefix: "abcd" + tail).map(\.id), [ids[0]])
-    }
-
-    // MARK: - Snapshot
-
-    /// `firstLocation` is defined as the lexicographically first path, not
-    /// "whichever row came back first", so a library opens the same file every
-    /// launch.
-    func testFirstLocationIsTheLexicographicallyFirstPath() throws {
-        let id = try photo("m.dng")
-        try library.addLocation(photoID: id, path: "/zzz/m.dng")
-        try library.addLocation(photoID: id, path: "/aaa/m.dng")
-
-        let summary = try XCTUnwrap(library.catalogSnapshot().summaries[id])
-        XCTAssertEqual(summary.locations.first, "/aaa/m.dng")
-        XCTAssertEqual(summary.firstLocation, "/aaa/m.dng")
-        XCTAssertEqual(summary.locations.count, 3)
-
-        XCTAssertNil(PhotoSummary().firstLocation)
     }
 
     // MARK: - Colour

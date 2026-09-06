@@ -40,30 +40,14 @@ public struct PhotoMetadata: Equatable, Sendable {
     }
 }
 
-/// What became of the file's path.
-public enum LocationOutcome: Equatable, Sendable {
-    /// The path was not in the library and now is.
-    case added
-    /// The path was already recorded against this same photo.
-    case unchanged
-    /// The path was recorded against a *different* photo — the bytes there
-    /// changed since it was last seen — and now points at this one.
-    case repointed(fromPhotoID: Int64)
-}
-
 public struct ImportResult: Equatable, Sendable {
     public var photoID: Int64
     /// `false` when the same bytes were already in the library.
     public var isNewPhoto: Bool
-    public var location: LocationOutcome
-    /// The absolute, standardized path that was imported.
-    public var path: String
 
-    public init(photoID: Int64, isNewPhoto: Bool, location: LocationOutcome, path: String) {
+    public init(photoID: Int64, isNewPhoto: Bool) {
         self.photoID = photoID
         self.isNewPhoto = isNewPhoto
-        self.location = location
-        self.path = path
     }
 }
 
@@ -101,20 +85,25 @@ public enum ImportScanner {
     }
 }
 
-/// Hash → upsert photo → upsert location.
-///
-/// Identity is the SHA-256 of the whole file, so the same file at two paths is
-/// one photo with two locations, and re-importing a path already in the library
-/// changes nothing.
+/// Hash → upload and cache → insert photo.
 public final class Importer {
     /// Injectable so tests can import arbitrary bytes without a RAW decoder.
     public typealias MetadataProbe = (URL) throws -> PhotoMetadata
 
     public let library: Library
+    private let suppliedOriginals: OriginalStorage?
     private let probe: MetadataProbe
+
+    public init(library: Library, originals: OriginalStorage,
+                probe: @escaping MetadataProbe = Importer.probeRAW) {
+        self.library = library
+        self.suppliedOriginals = originals
+        self.probe = probe
+    }
 
     public init(library: Library, probe: @escaping MetadataProbe = Importer.probeRAW) {
         self.library = library
+        self.suppliedOriginals = nil
         self.probe = probe
     }
 
@@ -142,32 +131,35 @@ public final class Importer {
     ///   have not changed since it looked.
     @discardableResult
     public func importFile(at url: URL, precomputedHash: String? = nil) throws -> ImportResult {
+        let originals = try suppliedOriginals ?? OriginalStorage.resolved(for: library)
+        return try importFile(at: url, precomputedHash: precomputedHash, originals: originals)
+    }
+
+    private func importFile(at url: URL, precomputedHash: String?,
+                            originals: OriginalStorage) throws -> ImportResult {
         let standardized = url.standardizedFileURL
-        let path = standardized.path
         let hash = try precomputedHash.flatMap(FileHash.data(fromHexString:))
             ?? FileHash.sha256(of: standardized)
 
         // Hashing already happened outside the transaction; only look at
         // metadata when the bytes are actually new to the library.
         if let existing = try library.photo(withHash: hash), let photoID = existing.id {
-            let outcome = try library.dbPool.write { db in
-                try Library.addLocation(db, photoID: photoID, path: path).outcome
-            }
-            return ImportResult(photoID: photoID, isNewPhoto: false, location: outcome,
-                                path: path)
+            try originals.storeImportedFile(standardized, hash: hash,
+                                            originalName: existing.originalName)
+            return ImportResult(photoID: photoID, isNewPhoto: false)
         }
 
         let metadata = try probe(standardized)
-        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+        let attributes = try FileManager.default.attributesOfItem(atPath: standardized.path)
         let byteSize = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        try originals.storeImportedFile(standardized, hash: hash,
+                                        originalName: standardized.lastPathComponent)
 
         return try library.dbPool.write { db in
             // Another writer may have inserted these bytes since the read above.
             if let existing = try Photo.filter(Column("hash") == hash).fetchOne(db),
                let photoID = existing.id {
-                let outcome = try Library.addLocation(db, photoID: photoID, path: path).outcome
-                return ImportResult(photoID: photoID, isNewPhoto: false, location: outcome,
-                                    path: path)
+                return ImportResult(photoID: photoID, isNewPhoto: false)
             }
 
             var cameraID: Int64?
@@ -205,38 +197,66 @@ public final class Importer {
                 color: .unlabeled)
             try photo.insert(db)
             let photoID = photo.id!
-            let outcome = try Library.addLocation(db, photoID: photoID, path: path).outcome
-            return ImportResult(photoID: photoID, isNewPhoto: true, location: outcome,
-                                path: path)
+            return ImportResult(photoID: photoID, isNewPhoto: true)
         }
     }
 
-    /// Imports a list of files one at a time.
+    /// Imports up to five files concurrently.
     ///
     /// A file that fails is reported through `progress` and skipped — one
     /// unreadable frame does not abandon the other 199. `precomputedHashes` is
     /// keyed by standardized URL and lets a caller that has already hashed the
     /// files skip doing it twice. `progress` is called
-    /// once per file with `(filesFinished, total, outcome)`, on whatever thread
-    /// this runs on; `isCancelled` is consulted before each file, so a
-    /// cancelled run stops between files rather than mid-write.
+    /// once per file with `(filesFinished, total, URL, outcome)`, serially on
+    /// one of the worker threads. `isCancelled` is consulted before each file;
+    /// uploads already in flight finish.
     @discardableResult
     public func importFiles(_ urls: [URL],
                             precomputedHashes: [URL: String] = [:],
-                            progress: ((Int, Int, Result<ImportResult, Error>) -> Void)? = nil,
+                            progress: ((Int, Int, URL, Result<ImportResult, Error>) -> Void)? = nil,
                             isCancelled: () -> Bool = { false }) -> [ImportResult] {
-        var results: [ImportResult] = []
         let total = urls.count
-        for (index, url) in urls.enumerated() {
-            if isCancelled() { break }
-            let outcome = Result {
-                try importFile(at: url,
-                               precomputedHash: precomputedHashes[url.standardizedFileURL])
+        guard total > 0 else { return [] }
+        let originals: OriginalStorage
+        do {
+            originals = try suppliedOriginals ?? OriginalStorage.resolved(for: library)
+        } catch {
+            var finished = 0
+            for url in urls where !isCancelled() {
+                finished += 1
+                progress?(finished, total, url, .failure(error))
             }
-            if case .success(let result) = outcome { results.append(result) }
-            progress?(index + 1, total, outcome)
+            return []
         }
-        return results
+        let state = ImportBatchState(count: total)
+        DispatchQueue.concurrentPerform(iterations: min(5, total)) { _ in
+            while true {
+                state.lock.lock()
+                guard state.nextIndex < total, !isCancelled() else {
+                    state.lock.unlock()
+                    return
+                }
+                let index = state.nextIndex
+                state.nextIndex += 1
+                state.lock.unlock()
+
+                let url = urls[index]
+                let outcome = Result {
+                    try importFile(at: url,
+                                   precomputedHash: precomputedHashes[url.standardizedFileURL],
+                                   originals: originals)
+                }
+                state.lock.lock()
+                state.outcomes[index] = outcome
+                state.finished += 1
+                progress?(state.finished, total, url, outcome)
+                state.lock.unlock()
+            }
+        }
+        return state.outcomes.compactMap { outcome in
+            guard case .success(let result)? = outcome else { return nil }
+            return result
+        }
     }
 
     /// Imports every importable image in a directory, skipping anything else.
@@ -254,5 +274,16 @@ public final class Importer {
     /// and the decoder cannot disagree about what is openable.
     public static func isSupportedImage(_ url: URL) -> Bool {
         ImageFormat.isSupported(url)
+    }
+}
+
+private final class ImportBatchState: @unchecked Sendable {
+    let lock = NSLock()
+    var nextIndex = 0
+    var finished = 0
+    var outcomes: [Result<ImportResult, Error>?]
+
+    init(count: Int) {
+        outcomes = Array(repeating: nil, count: count)
     }
 }

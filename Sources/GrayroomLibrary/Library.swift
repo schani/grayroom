@@ -45,6 +45,8 @@ public enum LibraryError: Error, CustomStringConvertible {
     case notADirectory(URL)
     case emptyTagName
     case emptyLensModel
+    case missingConfiguration(String)
+    case missingStorageCredentials
 
     public var description: String {
         switch self {
@@ -53,6 +55,9 @@ public enum LibraryError: Error, CustomStringConvertible {
         case .notADirectory(let u): return "not a directory: \(u.path)"
         case .emptyTagName: return "a tag name cannot be empty"
         case .emptyLensModel: return "a lens model cannot be empty"
+        case .missingConfiguration(let key): return "missing configuration key: \(key)"
+        case .missingStorageCredentials:
+            return "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required"
         }
     }
 }
@@ -74,6 +79,8 @@ public final class Library {
     /// with the photo. Left `nil` — every command that never deletes anything —
     /// the second file is not even opened.
     public var previewStore: PreviewStore?
+    /// The process-local service used for originals. It is not persisted.
+    public var originalStorage: OriginalStorage?
 
     public init(path: String) throws {
         self.url = URL(fileURLWithPath: path)
@@ -157,10 +164,9 @@ public final class Library {
                     color INTEGER NOT NULL DEFAULT 0
                 );
 
-                CREATE TABLE locations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-                    path TEXT NOT NULL UNIQUE
+                CREATE TABLE configuration (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
                 );
 
                 CREATE TABLE developments (
@@ -184,7 +190,6 @@ public final class Library {
                     PRIMARY KEY (photo_id, tag_id)
                 );
 
-                CREATE INDEX index_locations_on_photo_id ON locations(photo_id);
                 CREATE INDEX index_developments_on_photo_id ON developments(photo_id);
                 CREATE INDEX index_photos_on_camera_id ON photos(camera_id);
                 CREATE INDEX index_photos_on_lens_id ON photos(lens_id);

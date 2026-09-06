@@ -7,16 +7,18 @@ import XCTest
 /// loupe, and the grid's scroll position surviving a trip through Develop.
 final class LibraryLoupeStateTests: XCTestCase {
 
-    private func photo(_ id: Int64, _ locations: String...) -> CatalogPhoto {
-        CatalogPhoto(id: id, originalName: "photo-\(id).dng", locations: locations.sorted())
+    private func photo(_ id: Int64, year: Int) -> CatalogPhoto {
+        let date = Calendar.current.date(from: DateComponents(year: year, month: 1, day: 2,
+                                                               hour: 12))!
+        return CatalogPhoto(id: id, originalName: "photo-\(id).dng", capturedAt: date)
     }
 
     private var library: [CatalogPhoto] {
         [
-            photo(1, "/pics/2024/a.dng"),
-            photo(2, "/pics/2024/b.dng"),
-            photo(3, "/pics/2025/c.dng"),
-            photo(4, "/pics/2024/d.dng"),
+            photo(1, year: 2024),
+            photo(2, year: 2024),
+            photo(3, year: 2025),
+            photo(4, year: 2024),
         ]
     }
 
@@ -64,7 +66,7 @@ final class LibraryLoupeStateTests: XCTestCase {
     /// A photo the selected source does not show cannot be the loupe's.
     func testEnteringOnAPhotoOutsideTheFilterIsRefused() {
         let state = browser()
-        state.selection = .folder(path: "/pics/2024")
+        state.selection = .folder(path: "2024")
         XCTAssertNil(state.enterLoupe(on: 3))
         XCTAssertEqual(state.viewMode, .grid)
     }
@@ -116,7 +118,7 @@ final class LibraryLoupeStateTests: XCTestCase {
         let state = browser()
         state.enterLoupe(on: 3)
         XCTAssertFalse(state.isSidebarShowing)
-        state.selection = .folder(path: "/pics/2024")
+        state.selection = .folder(path: "2024")
         XCTAssertEqual(state.viewMode, .grid)
         XCTAssertTrue(state.isSidebarShowing)
     }
@@ -153,7 +155,7 @@ final class LibraryLoupeStateTests: XCTestCase {
 
     func testTheArrowsWalkTheFilteredOrderAndStopAtBothEnds() {
         let state = browser()
-        state.selection = .folder(path: "/pics/2024")
+        state.selection = .folder(path: "2024")
         XCTAssertEqual(state.visiblePhotoIDs, [1, 2, 4])
         state.enterLoupe(on: 1)
 
@@ -201,7 +203,7 @@ final class LibraryLoupeStateTests: XCTestCase {
     func testAPhotoThatLeavesTheGridTakesTheLoupeWithIt() {
         let state = browser()
         state.enterLoupe(on: 3)
-        state.selection = .folder(path: "/pics/2024")
+        state.selection = .folder(path: "2024")
         XCTAssertEqual(state.viewMode, .grid)
         XCTAssertNil(state.loupePhotoID)
     }

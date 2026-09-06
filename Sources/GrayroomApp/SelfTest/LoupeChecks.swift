@@ -155,7 +155,7 @@ extension SelfTest {
                                     check: @escaping (Bool, String) -> Void,
                                     failures: @escaping () -> [String]) {
         phase("grid scroll")
-        guard let subject = app.catalog.photos.first(where: { $0.url != nil })?.id else {
+        guard let subject = app.catalog.photos.first(where: { $0.cacheURL != nil })?.id else {
             check(false, "a photo with a file to develop")
             finishLibrary(failures())
         }
@@ -429,7 +429,7 @@ extension SelfTest {
         // The cheapest other photo to open: all this one has to do is take the
         // render loop away from the subject.
         guard let other = app.visiblePhotos
-            .filter({ $0.id != subject && $0.url != nil })
+            .filter({ $0.id != subject && $0.cacheURL != nil })
             .min(by: { $0.byteSize < $1.byteSize })?.id else {
             check(false, "another photo to take the develop view away")
             done()
@@ -477,7 +477,7 @@ extension SelfTest {
                       String(format: "…the +2 EV development, not the camera's picture "
                              + "(%.4f > %.4f)", luminance, beforeLuminance))
                 // The pipeline's own answer for that edit at that size.
-                if let url = photo?.url, let edit = storedDevelopment(subject), edge > 0,
+                if let url = photo?.cacheURL, let edit = storedDevelopment(subject), edge > 0,
                    let reference = try? Renderer().renderPreview(url: url, edit: edit,
                                                                  maxDimension: edge) {
                     let expected = meanLuminance(reference)
@@ -954,7 +954,7 @@ extension SelfTest {
         // 1:1 now loads the file's own pixels, and a hundred-megapixel decode is
         // a minute of run time to make a point about the zoom.
         guard let subject = moderateSubject(app)
-                ?? app.visiblePhotos.filter({ $0.url != nil })
+                ?? app.visiblePhotos.filter({ $0.cacheURL != nil })
                     .max(by: { max($0.width ?? 0, $0.height ?? 0)
                              < max($1.width ?? 0, $1.height ?? 0) })?.id else {
             check(false, "a photo to zoom in the loupe")
@@ -1080,7 +1080,7 @@ extension SelfTest {
     /// backs in `testdata`.
     static func moderateSubject(_ app: AppModel) -> Int64? {
         app.visiblePhotos
-            .filter { $0.url != nil && max($0.width ?? 0, $0.height ?? 0) >= 5000
+            .filter { $0.cacheURL != nil && max($0.width ?? 0, $0.height ?? 0) >= 5000
                         && max($0.width ?? 0, $0.height ?? 0) < 9000 }
             .min(by: { $0.byteSize < $1.byteSize })?.id
     }
@@ -1240,7 +1240,7 @@ extension SelfTest {
         // not showing the 512 px preview" is only a claim about a photo that
         // *has* more than 512 px.
         guard let subject = app.visiblePhotos
-            .filter({ $0.url != nil && max($0.width ?? 0, $0.height ?? 0)
+            .filter({ $0.cacheURL != nil && max($0.width ?? 0, $0.height ?? 0)
                         > PreviewBuilder.pixelSize })
             .min(by: { $0.byteSize < $1.byteSize })?.id else {
             check(false, "a photo bigger than \(PreviewBuilder.pixelSize) px to develop")

@@ -70,9 +70,8 @@ final class ImportModel {
 
     // MARK: Injected
 
-    /// Whether the library holds a photo with this SHA-256 (hex) that still has
-    /// at least one location. Called on the scan queue, so whatever is behind
-    /// it has to tolerate that (GRDB's pool does).
+    /// Whether the library holds a photo with this SHA-256. Called on the scan
+    /// queue, so whatever is behind it has to tolerate that (GRDB's pool does).
     var isHashImported: (String) -> Bool = { _ in false }
     /// Handed the checked entries — URL *and* hash — when the user presses
     /// Import.

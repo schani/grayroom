@@ -29,13 +29,9 @@ final class ImportCommandTests: XCTestCase {
         let photos = try library.photos()
         XCTAssertEqual(photos.count, 1)
         let photo = try XCTUnwrap(photos.first)
-        XCTAssertEqual(try library.locations(for: try XCTUnwrap(photo.id)).map(\.path),
-                       [file.standardizedFileURL.path])
-
-        XCTAssertTrue(output.stdout.contains("added"), output.stdout)
+        XCTAssertTrue(output.stdout.contains("imported"), output.stdout)
         XCTAssertTrue(output.stdout.contains(String(photo.hashHexString.prefix(12))), output.stdout)
-        XCTAssertTrue(output.stdout.contains(file.standardizedFileURL.path), output.stdout)
-        XCTAssertTrue(output.stdout.contains("1 file(s): 1 added, 0 exists, 0 repointed; 1 new photo(s)"),
+        XCTAssertTrue(output.stdout.contains("1 new photo(s), 0 existing"),
                       output.stdout)
     }
 
@@ -58,13 +54,11 @@ final class ImportCommandTests: XCTestCase {
 
         XCTAssertEqual(try library.photos().count, 1)
         XCTAssertTrue(output.stdout.contains("exists"), output.stdout)
-        XCTAssertTrue(output.stdout.contains("1 file(s): 0 added, 1 exists, 0 repointed; 0 new photo(s)"),
+        XCTAssertTrue(output.stdout.contains("0 new photo(s), 1 existing"),
                       output.stdout)
     }
 
-    /// Identity is the hash, so the same bytes at a second path is one photo
-    /// with two locations — a new *location*, not a new photo.
-    func testTheSameBytesAtASecondPathAddALocationButNotAPhoto() throws {
+    func testTheSameBytesAtASecondPathIsNotANewPhoto() throws {
         let first = try temp.writeImage("a.jpg")
         try temp.run(["import", first.path])
         let second = temp.directory.appendingPathComponent("copy/a.jpg")
@@ -75,32 +69,20 @@ final class ImportCommandTests: XCTestCase {
         let output = try temp.run(["import", second.path])
 
         XCTAssertEqual(try library.photos().count, 1)
-        let id = try XCTUnwrap(library.photos().first?.id)
-        XCTAssertEqual(try library.locations(for: id).count, 2)
-        XCTAssertTrue(output.stdout.contains("1 file(s): 1 added, 0 exists, 0 repointed; 0 new photo(s)"),
+        XCTAssertTrue(output.stdout.contains("0 new photo(s), 1 existing"),
                       output.stdout)
     }
 
-    /// Different bytes at a path the library already knows means the file was
-    /// replaced: the location is repointed at the new photo rather than left
-    /// describing something that is no longer there.
-    func testChangedBytesAtAKnownPathAreReportedAsRepointed() throws {
+    func testChangedBytesAtAKnownPathCreateANewPhoto() throws {
         let file = try temp.writeImage("a.jpg", seed: 0)
         try temp.run(["import", file.path])
-        let originalID = try XCTUnwrap(library.photos().first?.id)
-
         try FileManager.default.removeItem(at: file)
         _ = try temp.writeImage("a.jpg", width: 33, height: 21, seed: 77)
         let output = try temp.run(["import", file.path])
 
-        XCTAssertTrue(output.stdout.contains("repointed"), output.stdout)
-        XCTAssertTrue(output.stdout.contains("0 added, 0 exists, 1 repointed; 1 new photo(s)"),
+        XCTAssertTrue(output.stdout.contains("1 new photo(s), 0 existing"),
                       output.stdout)
         XCTAssertEqual(try library.photos().count, 2)
-        XCTAssertTrue(try library.locations(for: originalID).isEmpty,
-                      "the old photo should have lost the path")
-        let location = try XCTUnwrap(library.location(atPath: file.standardizedFileURL.path))
-        XCTAssertNotEqual(location.photoId, originalID)
     }
 
     // MARK: - Directories
@@ -114,7 +96,7 @@ final class ImportCommandTests: XCTestCase {
 
         XCTAssertEqual(try library.photos().count, 2)
         XCTAssertFalse(output.stdout.contains("notes.txt"), output.stdout)
-        XCTAssertTrue(output.stdout.contains("2 file(s): 2 added"), output.stdout)
+        XCTAssertTrue(output.stdout.contains("2 new photo(s)"), output.stdout)
     }
 
     func testNoRecursiveStaysInTheTopDirectory() throws {

@@ -3,8 +3,8 @@ import GrayroomLibrary
 import Observation
 
 /// One photo as the library grid needs it: its row, flattened together with the
-/// four things the row does not carry (its paths, how many developments it has,
-/// its tags, and the fingerprint of development #1).
+/// three things the row does not carry (how many developments it has, its tags,
+/// and the fingerprint of development #1).
 ///
 /// A value type with no database handle in it, so the grid can hold ten
 /// thousand of these and a cell can be diffed by `==`.
@@ -24,9 +24,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
     public var altitude: Double?
     public var byteSize: Int64
     public var color: ColorLabel
-    /// Every path the library has for this photo, sorted. Empty when it has
-    /// none at all — the "missing" case the Folders panel gathers.
-    public var locations: [String]
+    public var cacheURL: URL?
     public var developmentCount: Int
     public var tags: [String]
     /// `EditState.fingerprint` of development #1, `nil` when the photo has no
@@ -50,7 +48,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
                 altitude: Double? = nil,
                 byteSize: Int64 = 0,
                 color: ColorLabel = .unlabeled,
-                locations: [String] = [],
+                cacheURL: URL? = nil,
                 developmentCount: Int = 0,
                 tags: [String] = [],
                 developmentFingerprint: Data? = nil) {
@@ -68,7 +66,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
         self.altitude = altitude
         self.byteSize = byteSize
         self.color = color
-        self.locations = locations
+        self.cacheURL = cacheURL
         self.developmentCount = developmentCount
         self.tags = tags
         self.developmentFingerprint = developmentFingerprint
@@ -76,7 +74,7 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
 
     /// A row plus its aggregates. `nil` for a photo that has not been inserted
     /// yet — the catalog only ever describes stored photos.
-    public init?(photo: Photo, summary: PhotoSummary = PhotoSummary()) {
+    public init?(photo: Photo, summary: PhotoSummary = PhotoSummary(), cacheURL: URL? = nil) {
         guard let id = photo.id else { return nil }
         self.init(id: id,
                   hash: photo.hash,
@@ -92,20 +90,11 @@ public struct CatalogPhoto: Identifiable, Equatable, Sendable {
                   altitude: photo.altitude,
                   byteSize: photo.byteSize,
                   color: photo.color,
-                  locations: summary.locations,
+                  cacheURL: cacheURL,
                   developmentCount: summary.developmentCount,
                   tags: summary.tags,
                   developmentFingerprint: summary.developmentFingerprint)
     }
-
-    /// The path to open, and `nil` when the library has no file for this photo
-    /// at all. Defined as the lexicographically first of the photo's paths (the
-    /// snapshot sorts them), not "whichever one came back first", so the same
-    /// library opens the same file from one launch to the next.
-    public var firstLocation: String? { locations.first }
-
-    /// The file to open, when there is one.
-    public var url: URL? { firstLocation.map { URL(fileURLWithPath: $0) } }
 
     /// Lowercase hex — how the CLI addresses this photo.
     public var hashHexString: String { FileHash.hexString(hash) }
@@ -186,6 +175,7 @@ public final class PhotoCatalog {
     /// Reads the whole library: one snapshot, five statements, sorted here.
     public func load(from library: Library) throws {
         let snapshot = try library.catalogSnapshot()
+        let originals = try? OriginalStorage.resolved(for: library)
         cameraNames = [:]
         for camera in try library.allCameras() {
             guard let id = camera.id else { continue }
@@ -198,7 +188,8 @@ public final class PhotoCatalog {
         }
         replace(snapshot.photos.compactMap { photo in
             guard let id = photo.id else { return nil }
-            return CatalogPhoto(photo: photo, summary: snapshot.summaries[id] ?? PhotoSummary())
+            return CatalogPhoto(photo: photo, summary: snapshot.summaries[id] ?? PhotoSummary(),
+                                cacheURL: originals?.cacheURL(for: photo))
         })
     }
 

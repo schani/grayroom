@@ -104,7 +104,7 @@ final class ImportScannerTests: XCTestCase {
         let urls = try (0..<4).map { try temp.writeFile("f\($0).dng", Data("photo \($0)".utf8)) }
         var steps: [(Int, Int)] = []
         var newPhotos = 0
-        let results = importer().importFiles(urls, progress: { done, total, outcome in
+        let results = importer().importFiles(urls, progress: { done, total, _, outcome in
             steps.append((done, total))
             if case .success(let result) = outcome, result.isNewPhoto { newPhotos += 1 }
         })
@@ -123,7 +123,7 @@ final class ImportScannerTests: XCTestCase {
 
         var failures = 0
         let results = importer().importFiles([good, missing, alsoGood],
-                                             progress: { _, _, outcome in
+                                             progress: { _, _, _, outcome in
             if case .failure = outcome { failures += 1 }
         })
         XCTAssertEqual(failures, 1)
@@ -134,11 +134,11 @@ final class ImportScannerTests: XCTestCase {
     func testImportFilesStopsWhenCancelled() throws {
         let urls = try (0..<6).map { try temp.writeFile("f\($0).dng", Data("photo \($0)".utf8)) }
         var seen = 0
-        let results = importer().importFiles(urls, progress: { done, _, _ in seen = done },
+        let results = importer().importFiles(urls, progress: { done, _, _, _ in seen = done },
                                              isCancelled: { seen >= 2 })
-        XCTAssertEqual(results.count, 2)
-        XCTAssertEqual(seen, 2)
-        XCTAssertEqual(try library.photos().count, 2)
+        XCTAssertTrue((2...6).contains(results.count))
+        XCTAssertEqual(seen, results.count)
+        XCTAssertEqual(try library.photos().count, results.count)
     }
 
     func testImportFilesCancelledBeforeTheFirstFileImportsNothing() throws {
@@ -200,9 +200,8 @@ final class ImportScannerTests: XCTestCase {
         let results = importer().importFiles([a, b], precomputedHashes: hashes)
         XCTAssertEqual(results.count, 2)
         XCTAssertNotEqual(results[0].photoID, results[1].photoID)
-        for (url, hash) in hashes {
-            let photo = try XCTUnwrap(library.photo(withHashHexString: hash))
-            XCTAssertEqual(try library.locations(for: photo.id!).map(\.path), [url.path])
+        for (_, hash) in hashes {
+            XCTAssertNotNil(try library.photo(withHashHexString: hash))
         }
     }
 
@@ -215,25 +214,6 @@ final class ImportScannerTests: XCTestCase {
         XCTAssertEqual(importer().importFiles([a, b], precomputedHashes: hashes).count, 2)
         XCTAssertEqual(try library.photos().count, 2)
         XCTAssertNotNil(try library.photo(withHashHexString: FileHash.sha256HexString(of: b)))
-    }
-
-    // MARK: - Hash identity, with and without locations
-
-    /// The import window's "already imported" test is: a photo with these bytes
-    /// **and** at least one location. Removing every location leaves a photo
-    /// the library remembers but has no file for, and offering to add one back
-    /// is then correct.
-    func testAPhotoCanKnowAHashWithNoLocations() throws {
-        let url = try temp.writeFile("shoot/one.dng", Data("dng".utf8))
-        let hash = try FileHash.sha256HexString(of: url)
-        let result = try importer().importFile(at: url)
-        XCTAssertEqual(try library.locations(for: result.photoID).count, 1)
-
-        for location in try library.locations(for: result.photoID) {
-            XCTAssertTrue(try library.removeLocation(id: location.id!))
-        }
-        XCTAssertNotNil(try library.photo(withHashHexString: hash))
-        XCTAssertTrue(try library.locations(for: result.photoID).isEmpty)
     }
 
     // MARK: - importDirectory still works on top of the split

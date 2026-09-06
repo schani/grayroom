@@ -6,8 +6,8 @@ import SwiftUI
 /// a folder, with per-file checkboxes and the bulk commands that make ticking a
 /// card's worth of frames bearable.
 ///
-/// Nothing is copied or moved — the files stay where they are and the library
-/// records their paths.
+/// Import uploads each selected original, populates the local cache, and then
+/// adds it to the library.
 ///
 /// The grid itself is `ThumbnailGrid`, shared with the library; the keyboard
 /// (arrows, P, U, space, +/-, Esc) is routed at the window level by

@@ -148,9 +148,9 @@ deleting them (stage 3).
 
 A photo is identified by the **SHA-256 of the whole file** (CryptoKit, streamed in
 1 MB chunks; disk-bound on Apple Silicon). The hash is the external identity (dedupe
-on import, CLI addressing); tables use integer rowid keys internally. The same file
-at two paths is one photo with two locations. Locations are trusted: we never
-re-stat or re-hash a stored path, and a missing file is simply an error at open time.
+on import, CLI addressing); tables use integer rowid keys internally. Originals
+live in S3-compatible object storage under their hash. A local hash-and-extension
+file is a disposable cache.
 
 ### Schema (`PRAGMA user_version` migrations via GRDB)
 
@@ -160,15 +160,15 @@ photos       id, hash BLOB UNIQUE, byte_size, original_name, imported_at, captur
              camera_id → cameras (nullable), width, height,
              latitude, longitude, altitude (nullable),
              color INTEGER DEFAULT 0 (0 unlabeled, 1 red, 2 yellow, 3 green, 4 blue, 5 purple)
-locations    id, photo_id → photos (cascade), path TEXT UNIQUE
+configuration key PRIMARY KEY, value
 developments id, photo_id → photos (cascade), ordinal, edit_json (json_valid, EditState),
              created_at, updated_at                   UNIQUE(photo_id, ordinal)
 tags         id, name UNIQUE COLLATE NOCASE
 photo_tags   photo_id → photos, tag_id → tags          PRIMARY KEY(photo_id, tag_id)
 ```
 
-A photo has any number of locations (including zero) and any number of
-**developments** (a development = one `EditState`; common counts are 0 and 1).
+A photo has any number of **developments** (a development = one `EditState`;
+common counts are 0 and 1).
 Developments are JSON blobs because `EditState` already decodes tolerantly;
 `json_extract` is available if we ever need
 to query inside. Color is a single-valued Lightroom-style label (how winners are
@@ -177,9 +177,9 @@ picked); tags are free-form many-to-many. No ratings for now.
 ### Stages
 
 1. `GrayroomLibrary` target: GRDB dependency, `FileHash`, `Library` (open/migrate),
-   records (`Camera`, `Photo`, `Location`, `Development`, `Tag`), `Importer` (hash →
-   upsert photo/location, metadata incl. capture date, camera, GPS via the decoder's
-   probe), operations (tags, color, developments, queries). Tests on a temp DB.
+   records (`Camera`, `Photo`, `Development`, `Tag`), object storage and cache,
+   `Importer` (hash → upload/cache → insert photo, with metadata from the decoder's
+   probe), operations (configuration, tags, color, developments, queries).
 2. CLI: `import`, `ls` (filter by color/tag/camera, `--sort capture|name`),
    `tag`, `color`, `developments`; `render` takes its edit from the library
    (`--development`) or `--edit file.json`. Sidecar code removed entirely. App:
@@ -194,22 +194,12 @@ picked); tags are free-form many-to-many. No ratings for now.
    - `PhotoCatalog` (in `GrayroomUI`) holds the whole library in RAM — one
      `CatalogPhoto` per photo, sorted by capture date with undated frames last —
      built from a single `Library.catalogSnapshot()`: the photo rows plus the
-     aggregates that go with them (every location, development count,
-     development #1's fingerprint, tags). Locations come back as one ordered
-     scan grouped in Swift rather than a `group_concat`, because a path may
-     contain any byte but `/`. No query while scrolling; selection is a set of
-     row ids.
-   - **Folders panel.** Lightroom's left panel, reduced to its three sources: a
-     Catalog section ("All Photographs" and its count), the folder tree, and a
-     "Missing" row for the photos the library remembers and has no file for —
-     drawn even at zero, greyed. `FolderTree` (in `GrayroomUI`) builds it from
-     the catalog in one pass: roots are volumes (`/` under the boot volume's
-     name, `/Volumes/<x>` beside it), a chain of directories with nothing in it
-     but one subdirectory is drawn as one row named after the joined path
-     ("Users/schani/Pictures"), and every row carries the number of *distinct*
-     photos in it or below it. Selecting a row filters the grid
-     (`FolderSelection` = the catalog, one folder and everything under it, or
-     the missing files); the grid's highlight keeps only what is still on
+     aggregates that go with them (development count, development #1's
+     fingerprint, tags). No query while scrolling; selection is a set of row ids.
+   - **Dates panel.** The Library sidebar keeps the Catalog section, followed by
+     a viewer-local year/month/day hierarchy and an "Unknown Date" row.
+     Every row carries the number of photos in it or below it. Selecting a row
+     filters the grid; the grid's highlight keeps only what is still on
      screen, the arrows and ⌘A span the filtered list, and the bottom bar
      counts it. The panel is mouse-driven — the arrows always belong to the
      grid — and it shows and hides with the standard title-bar button, ⌥⌘S, or
@@ -291,13 +281,9 @@ picked); tags are free-form many-to-many. No ratings for now.
      row in `previews.sqlite` at 512 px with no fingerprint; developing one photo
      (+2 EV, autosaved) turns *its* row into a `source = 1` one whose fingerprint
      is development #1's; and the picture the grid holds afterwards is measurably
-     brighter than the embedded preview it replaced. Then the Folders panel: the
-     rows it draws, read back through **accessibility** (name and count), a real
-     click on a subfolder filtering the grid to the one photo staged into it,
-     its parent restoring the rest, the arrows still moving the *grid* after
-     that click, the folder surviving `d`/`g`, a location removed through the
-     library API turning up under Missing, and the panel folding away on ⌥⌘S
-     and coming back.
+     brighter than the embedded preview it replaced. Then the Dates panel: the
+     year/month/day rows read through **accessibility**, and a real click on a
+     day filtering the grid. The panel still folds away on ⌥⌘S and comes back.
 
      The run is split across two processes, one per half of what it covers:
      `library` does the grid's keys, the previews (grid and loupe) and the

@@ -103,6 +103,7 @@ final class PreviewBuilder {
     /// The developments to render from. Without it every photo falls back to its
     /// embedded preview.
     var library: Library?
+    var originals: OriginalStorage?
     /// Where the JPEGs live. Without it every preview is rebuilt every launch.
     var previews: PreviewStore?
     /// Renders one photo through the real pipeline, off the interactive queue.
@@ -117,7 +118,7 @@ final class PreviewBuilder {
         /// The photo's content hash — how `previews.sqlite` keys its rows, so
         /// that a re-import under a new rowid still finds its picture.
         let hash: Data
-        let url: URL?
+        let originalName: String
         let kind: PreviewKind
     }
 
@@ -175,7 +176,7 @@ final class PreviewBuilder {
             completion(nil)
             return
         }
-        let request = Request(id: id, hash: photo.hash, url: photo.url,
+        let request = Request(id: id, hash: photo.hash, originalName: photo.originalName,
                               kind: PreviewKind(developmentFingerprint:
                                                   photo.developmentFingerprint))
 
@@ -205,7 +206,7 @@ final class PreviewBuilder {
     /// all, or one nothing could read. That is the exclamation badge; a preview
     /// that simply has not arrived yet is not this.
     func isMissing(_ photo: CatalogPhoto) -> Bool {
-        photo.firstLocation == nil || failed.contains(photo.id)
+        failed.contains(photo.id)
     }
 
     /// Development #1 was just written: drop what is in memory and build the new
@@ -242,7 +243,8 @@ final class PreviewBuilder {
         let stillNeeded = isStillNeeded[id] ?? { true }
         inFlight = true
 
-        guard let url = request.url else {
+        guard let url = try? originals?.localURL(hash: request.hash,
+                                                 originalName: request.originalName) else {
             deliver(nil, for: request, remember: true)
             return
         }
@@ -290,7 +292,8 @@ final class PreviewBuilder {
         }
         // What was actually read, which is what the row must say it is: the
         // development may have moved since the catalog snapshot was taken.
-        let rendered = Request(id: request.id, hash: request.hash, url: request.url,
+        let rendered = Request(id: request.id, hash: request.hash,
+                               originalName: request.originalName,
                                kind: .rendered(edit.fingerprint))
         let store = previews
         SelfTest.note("preview \(request.id): rendering development #1")

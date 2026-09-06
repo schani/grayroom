@@ -231,10 +231,8 @@ extension SelfTest {
                     check(sizeSlider.minX > activitySlotInLibrary.minX,
                           "…at the trailing end")
                 }
-                // A photo whose file is still there: `showDevelop` refuses a
-                // frame the library has lost, and one of these has had its
-                // location taken away on purpose a few steps back.
-                let openable = app.visiblePhotos.first { $0.firstLocation != nil }
+                // A photo with a configured cache URL.
+                let openable = app.visiblePhotos.first { $0.cacheURL != nil }
                 check(openable != nil, "a photo with a file to develop")
                 if let openable { _ = clickCell(cellID(openable.id)) }
                 sendKey("d", modifiers: [], window: window, virtualKey: 2)
@@ -452,17 +450,13 @@ extension SelfTest {
         // than the two minutes a hundred-megapixel frame costs — most of it
         // in the PNG encoder, which is not what this checks.
         //
-        // Addressed by *path*, not through the catalog: the Folders checks
-        // take this photo's location away on purpose, and File › Open… does
-        // not care — it is a file the user picked, which the library then
-        // recognises by its hash. Any photo on disk stands in when there is no
-        // staged source (a run pointed at someone else's folder).
+        // Addressed by path to exercise File › Open…. Any cached photo stands
+        // in when there is no staged source.
         let staged = stagedSource?
             .appendingPathComponent(folderSubfolderName, isDirectory: true)
             .appendingPathComponent("standard.jpg")
-        let photos = app.catalog.photos.filter { $0.firstLocation != nil }
-        let fallback = photos.min { $0.byteSize < $1.byteSize }?.firstLocation
-            .map { URL(fileURLWithPath: $0) }
+        let photos = app.catalog.photos.filter { $0.cacheURL != nil }
+        let fallback = photos.min { $0.byteSize < $1.byteSize }?.cacheURL
         guard let url = staged.flatMap({
             FileManager.default.fileExists(atPath: $0.path) ? $0 : nil
         }) ?? fallback else {

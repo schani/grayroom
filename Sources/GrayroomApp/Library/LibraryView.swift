@@ -129,7 +129,7 @@ struct LibraryView: View {
             // Lightroom's double-click: into the loupe, not Develop (`d` is
             // the only way there from the grid).
             onOpen: { model.libraryClick($0.id, modifiers: []); model.showLoupe() },
-            help: { $0.firstLocation ?? "\($0.originalName) — no file on disk" },
+            help: { $0.originalName },
             // Read, not kept: this view is never taken out of the window, so
             // the scroll view holds its own position (see `RootView`) and
             // nothing here ever puts one back. What the model carries is the
@@ -192,7 +192,7 @@ struct LibraryCell: View {
                 } else if previews.isMissing(photo) {
                     // The library remembers this photo; its file does not
                     // answer. Saying so in the cell is the whole reason the
-                    // catalog carries `firstLocation`.
+                    // The catalog carries the cache URL.
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: max(size * 0.18, 14)))
                         .foregroundStyle(.orange)

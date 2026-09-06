@@ -2,13 +2,9 @@ import Foundation
 import GRDB
 import GrayroomCore
 
-/// The three things a photo's *row* does not say, gathered per photo by
+/// The things a photo's *row* does not say, gathered per photo by
 /// `Library.catalogSnapshot()`.
 public struct PhotoSummary: Equatable, Sendable {
-    /// Every path the library has for this photo, sorted — empty for a photo it
-    /// remembers but has no file for. All of them, not just the first, because
-    /// the Folders panel counts a photo under every directory it sits in.
-    public var locations: [String]
     public var developmentCount: Int
     /// Tag names, alphabetically.
     public var tags: [String]
@@ -17,14 +13,8 @@ public struct PhotoSummary: Equatable, Sendable {
     /// against, so it has to come along with the snapshot.
     public var developmentFingerprint: Data?
 
-    /// The lexicographically first of the photo's recorded paths, or `nil` when
-    /// it has none. Defined rather than "whichever row came back first", so the
-    /// same library opens the same file from one launch to the next.
-    public var firstLocation: String? { locations.first }
-
-    public init(locations: [String] = [], developmentCount: Int = 0, tags: [String] = [],
+    public init(developmentCount: Int = 0, tags: [String] = [],
                 developmentFingerprint: Data? = nil) {
-        self.locations = locations
         self.developmentCount = developmentCount
         self.tags = tags
         self.developmentFingerprint = developmentFingerprint
@@ -34,6 +24,37 @@ public struct PhotoSummary: Equatable, Sendable {
 /// Every operation is synchronous and throwing: the library is a local SQLite
 /// file, and the callers (CLI, app model) already have their own concurrency.
 extension Library {
+
+    // MARK: - Configuration
+
+    public func configurationValue(forKey key: String) throws -> String? {
+        try dbPool.read { db in
+            try String.fetchOne(db, sql: "SELECT value FROM configuration WHERE key = ?",
+                                arguments: [key])
+        }
+    }
+
+    public func configuration() throws -> [String: String] {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT key, value FROM configuration ORDER BY key")
+            return Dictionary(uniqueKeysWithValues: rows.map { ($0["key"], $0["value"]) })
+        }
+    }
+
+    public func setConfiguration(_ value: String, forKey key: String) throws {
+        try setConfiguration([key: value])
+    }
+
+    public func setConfiguration(_ values: [String: String]) throws {
+        try dbPool.write { db in
+            for (key, value) in values {
+                try db.execute(sql: """
+                    INSERT INTO configuration (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """, arguments: [key, value])
+            }
+        }
+    }
 
     // MARK: - Photos
 
@@ -108,7 +129,7 @@ extension Library {
         }
     }
 
-    /// Cascades: the photo's locations, developments and tag links go with it,
+    /// Cascades: the photo's developments and tag links go with it,
     /// and so does its preview when `previewStore` is wired up — that one is a
     /// different database file, so SQLite cannot do it for us.
     @discardableResult
@@ -148,10 +169,10 @@ extension Library {
     /// Everything the grid needs about every photo, read as one consistent
     /// snapshot.
     ///
-    /// Five statements, no `N+1`: the photos themselves plus four aggregates
+    /// Four statements, no `N+1`: the photos themselves plus three aggregates
     /// keyed by photo id. A grid of ten thousand frames that asked the database
-    /// for each photo's first path, development count and tags separately would
-    /// issue thirty thousand queries to draw one screen; this issues five and
+    /// for each photo's development count and tags separately would
+    /// issue twenty thousand queries to draw one screen; this issues four and
     /// joins them in RAM, which is what `PhotoCatalog` then holds.
     ///
     /// They run inside one `read`, so the aggregates cannot describe a
@@ -163,20 +184,6 @@ extension Library {
             summaries.reserveCapacity(photos.count)
             for photo in photos {
                 if let id = photo.id { summaries[id] = PhotoSummary() }
-            }
-            // Every path, grouped in Swift rather than with `group_concat`: a
-            // POSIX path may contain any byte but `/` and NUL, so there is no
-            // separator that is safe to join on and split back. One ordered
-            // scan of a table with one row per file costs less than getting
-            // that wrong, and `ORDER BY` is what makes `firstLocation` the
-            // lexicographically first path rather than whichever row SQLite
-            // happened to return.
-            let locations = try Row.fetchAll(db, sql: """
-                SELECT photo_id, path FROM locations ORDER BY photo_id, path
-                """)
-            for row in locations {
-                let id: Int64 = row["photo_id"]
-                summaries[id, default: PhotoSummary()].locations.append(row["path"])
             }
             let developments = try Row.fetchAll(db, sql: """
                 SELECT photo_id, COUNT(*) AS n FROM developments GROUP BY photo_id
@@ -283,52 +290,6 @@ extension Library {
         var lens = Lens(make: make, model: model)
         try lens.insert(db)
         return lens
-    }
-
-    // MARK: - Locations
-
-    public func locations(for photoID: Int64) throws -> [Location] {
-        try dbPool.read { db in
-            try Location.filter(Column("photo_id") == photoID)
-                .order(Column("path"))
-                .fetchAll(db)
-        }
-    }
-
-    public func location(atPath path: String) throws -> Location? {
-        try dbPool.read { db in try Location.filter(Column("path") == path).fetchOne(db) }
-    }
-
-    /// The path is stored absolute and standardized. Adding a path a photo
-    /// already has is a no-op that returns the existing row.
-    @discardableResult
-    public func addLocation(photoID: Int64, path: String) throws -> Location {
-        try dbPool.write { db in
-            try Library.addLocation(db, photoID: photoID, path: path).location
-        }
-    }
-
-    static func addLocation(_ db: Database, photoID: Int64, path: String)
-        throws -> (location: Location, outcome: LocationOutcome) {
-        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
-        if var existing = try Location.filter(Column("path") == standardized).fetchOne(db) {
-            let previous = existing.photoId
-            guard previous != photoID else { return (existing, .unchanged) }
-            // The bytes at this path changed since it was recorded. Import is
-            // the one moment we actually know that, so the row is repointed
-            // rather than left describing a file that no longer exists there.
-            existing.photoId = photoID
-            try existing.update(db)
-            return (existing, .repointed(fromPhotoID: previous))
-        }
-        var location = Location(photoId: photoID, path: standardized)
-        try location.insert(db)
-        return (location, .added)
-    }
-
-    @discardableResult
-    public func removeLocation(id: Int64) throws -> Bool {
-        try dbPool.write { db in try Location.deleteOne(db, key: id) }
     }
 
     // MARK: - Developments

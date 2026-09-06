@@ -56,12 +56,6 @@ struct Show: ParsableCommand {
         let tags = try library.tags(for: id).map(\.name)
         out += "tags:          \(Format.orDash(tags.joined(separator: ", ")))\n"
 
-        let locations = try library.locations(for: id)
-        out += locations.isEmpty ? "locations:     -\n" : "locations:\n"
-        for location in locations {
-            out += "  \(location.id.map(String.init) ?? "-")  \(location.path)\n"
-        }
-
         let developments = try library.developments(for: id)
         out += developments.isEmpty ? "developments:  -\n" : "developments:\n"
         for entry in developments {

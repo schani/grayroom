@@ -53,7 +53,7 @@ final class LibraryTests: XCTestCase {
 
     func testSchemaIsCreatedWithForeignKeysOn() throws {
         try library.dbPool.read { db in
-            for table in ["cameras", "lenses", "photos", "locations", "developments", "tags",
+            for table in ["cameras", "lenses", "photos", "configuration", "developments", "tags",
                           "photo_tags"] {
                 XCTAssertTrue(try db.tableExists(table), table)
             }
@@ -231,30 +231,11 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(try library.photos().map(\.id), [undated, early, late])
     }
 
-    // MARK: - Locations
-
-    func testAddAndRemoveLocation() throws {
-        let photoID = try makePhoto("a.raw")
-        let extra = temp.directory.appendingPathComponent("elsewhere/a.raw").path
-        let added = try library.addLocation(photoID: photoID, path: extra)
-        XCTAssertEqual(try library.locations(for: photoID).count, 2)
-
-        // Re-adding the same path changes nothing.
-        let again = try library.addLocation(photoID: photoID, path: extra)
-        XCTAssertEqual(again.id, added.id)
-        XCTAssertEqual(try library.locations(for: photoID).count, 2)
-
-        XCTAssertTrue(try library.removeLocation(id: try XCTUnwrap(added.id)))
-        XCTAssertEqual(try library.locations(for: photoID).count, 1)
-    }
-
     // MARK: - Cascade
 
     func testDeletePhotoCascades() throws {
         let photoID = try makePhoto("a.raw")
         let survivor = try makePhoto("b.raw")
-        try library.addLocation(photoID: photoID,
-                                path: temp.directory.appendingPathComponent("copy.raw").path)
         try library.addDevelopment(photoID: photoID, edit: sampleEdit())
         try library.addDevelopment(photoID: photoID, edit: EditState())
         try library.addTag(photoID: photoID, name: "doomed")
@@ -263,12 +244,10 @@ final class LibraryTests: XCTestCase {
         XCTAssertTrue(try library.deletePhoto(id: photoID))
 
         XCTAssertNil(try library.photo(id: photoID))
-        XCTAssertEqual(try library.locations(for: photoID).count, 0)
         XCTAssertEqual(try library.developments(for: photoID).count, 0)
         XCTAssertEqual(try library.tags(for: photoID).count, 0)
 
         try library.dbPool.read { db in
-            XCTAssertEqual(try Location.fetchCount(db), 1)
             XCTAssertEqual(try Development.fetchCount(db), 0)
             XCTAssertEqual(
                 try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM photo_tags"), 1)
