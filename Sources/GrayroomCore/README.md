@@ -7,7 +7,8 @@ shell over these types.
 Decode/     CIRAWFilter (RAW) or CIImage (JPEG/TIFF/PNG/HEIC)
             -> linear scene-referred rgba16Float MTLTexture
 Engine/     MetalContext (runtime-compiled shader library), Pipeline, Renderer, Histogram
-Stages/     CPU-side stage support (the tone curve + its LUT, the clarity mapping)
+Stages/     one type per image stage (kernel state + encode), plus their
+            CPU-side support (the tone curve's LUT, the clarity mapping)
 Masks/      stroke model, CPU reference rasterizer, GPU rasterisation + param maps
 Shaders/    MSL source, bundled as *text* resources
 Export/     texture readback + ImageIO writers
@@ -82,18 +83,22 @@ just the pipeline.
 ## Pipeline order
 
 ```
-decode(+WB)  ->  [masks]  ->  tone  ->  clarity  ->  bwMix  ->  toning  ->  output
-                                                                   |
-                                                                   +->  histogram
+decode(+WB)  ->  [masks]  ->  tone  ->  clarity  ->  mix  ->  toning  ->  output
+                                                                 |
+                                                                 +->  histogram
 ```
 
-Each stage is one `rgba16Float -> rgba16Float` compute pass, ping-ponging
-between two working textures (`clarity` is many passes, but it has the same
-signature and allocates its own scratch). `clarity` is skipped when neither the
-slider nor any mask asks for it; `bwMix` is skipped when `bwMix.enabled ==
-false` (colour passthrough, a debugging aid); `toning` is skipped when both
-saturations are zero. `Pipeline.render(upTo:)` can stop at any stage boundary,
-which is what the golden tests use to inspect linear intermediates.
+Each stage is a type in `Stages/` with an `encode(cb, source, destination, …)`
+that reads and writes `rgba16Float` (`clarity` is many passes internally, but it
+has the same signature and allocates its own scratch). `Pipeline.passes(for:)`
+lists the passes an edit needs, in order, leaving out any stage that would be
+the identity: `clarity` when neither the slider nor any mask asks for it, `mix`
+when `bwMix.enabled == false` (colour passthrough, a debugging aid), `toning`
+when both saturations are zero. `render` runs that list ping-ponging between two
+working textures, then the fixed output transform. `mix` is the slot the B&W
+mixer occupies; everything ahead of it is ratio-preserving.
+`Pipeline.render(upTo:)` can stop at any stage boundary, which is what the
+golden tests use to inspect linear intermediates.
 
 `output` has two forms, chosen by `Pipeline.render(output:)` — see *Output
 modes* — and the histogram taps the **linear** texture the output stage reads,

@@ -210,6 +210,19 @@ public final class MetalContext {
         return t
     }
 
+    /// One compute pass: a fresh encoder with `state` bound, `body`'s bindings,
+    /// a `width x height` dispatch.
+    func encodePass(_ cb: MTLCommandBuffer,
+                    _ state: MTLComputePipelineState,
+                    width: Int, height: Int,
+                    _ body: (MTLComputeCommandEncoder) -> Void) throws {
+        guard let e = cb.makeComputeCommandEncoder() else { throw MetalError.encoderFailed }
+        e.setComputePipelineState(state)
+        body(e)
+        dispatch(e, state, width: width, height: height)
+        e.endEncoding()
+    }
+
     /// Dispatch helper using non-uniform threadgroups (Apple Silicon supports
     /// `dispatchThreads`), with an in-kernel bounds guard as a belt-and-braces.
     func dispatch(_ encoder: MTLComputeCommandEncoder,

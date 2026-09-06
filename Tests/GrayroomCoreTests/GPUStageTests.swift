@@ -112,7 +112,7 @@ final class GPUStageTests: XCTestCase {
         var edit = EditState()
         edit.bwMix = .init(red: 40, orange: -20, yellow: 60, green: -80,
                            aqua: 10, blue: -60, purple: 25, magenta: -5)
-        let out = try run(edit, upTo: .bwMix)
+        let out = try run(edit, upTo: .mix)
         for idx in 0..<patches.count {
             let (r, g, b) = out.rgb(x: idx, y: 0)
             XCTAssertEqual(r, g, "patch \(idx) not achromatic")
@@ -125,10 +125,10 @@ final class GPUStageTests: XCTestCase {
     /// three stops, symmetric with ×8 at +100. That is the "red filter" reach
     /// Lightroom's mixer has and the old linear law (×0.2 … ×1.8) did not.
     func testFullySaturatedColourAtMinus100ReachesNearBlack() throws {
-        let neutral = try run(EditState(), upTo: .bwMix)
+        let neutral = try run(EditState(), upTo: .mix)
         var edit = EditState()
         edit.bwMix.red = -100
-        let dark = try run(edit, upTo: .bwMix)
+        let dark = try run(edit, upTo: .mix)
 
         let base = Double(neutral.rgb(x: P.pureRed, y: 0).0)
         XCTAssertGreaterThan(base, 0.05, "the reference patch must not already be black")
@@ -137,7 +137,7 @@ final class GPUStageTests: XCTestCase {
                        "sat = 1 at −100 must land on exactly 2^−maxEV")
 
         edit.bwMix.red = 100
-        let bright = try run(edit, upTo: .bwMix)
+        let bright = try run(edit, upTo: .mix)
         XCTAssertEqual(Double(bright.rgb(x: P.pureRed, y: 0).0) / base, 8, accuracy: 0.05,
                        "and be symmetric in stops in the other direction")
     }
@@ -145,7 +145,7 @@ final class GPUStageTests: XCTestCase {
     /// The GPU gain must equal the law `BWMixBands.gain` publishes, because the
     /// GUI reasons about the mixer through that mirror.
     func testMixerGainMatchesTheDocumentedLaw() throws {
-        let neutral = try run(EditState(), upTo: .bwMix)
+        let neutral = try run(EditState(), upTo: .mix)
         // Encoded HSV saturation of each patch, computed the way the kernel does.
         func encodedSat(_ p: (Float, Float, Float)) -> Double {
             let e = [p.0, p.1, p.2].map { pow(Double(max($0, 0)), 1 / 2.2) }
@@ -155,7 +155,7 @@ final class GPUStageTests: XCTestCase {
         for slider in [-100.0, -55.0, 25.0, 100.0] {
             var edit = EditState()
             edit.bwMix.red = slider          // hue 0 -> the red band alone
-            let out = try run(edit, upTo: .bwMix)
+            let out = try run(edit, upTo: .mix)
             for idx in [P.red, P.pureRed, P.midGray] {
                 let expected = BWMixBands.gain(mixAmount: slider,
                                                saturation: encodedSat(patches[idx]))
@@ -192,10 +192,10 @@ final class GPUStageTests: XCTestCase {
     }
 
     func testBlueSliderTargetsBlueNotRed() throws {
-        let neutral = try run(EditState(), upTo: .bwMix)
+        let neutral = try run(EditState(), upTo: .mix)
         var edit = EditState()
         edit.bwMix.blue = -100
-        let out = try run(edit, upTo: .bwMix)
+        let out = try run(edit, upTo: .mix)
 
         // (0.02, 0.02, 0.40) has encoded saturation 0.744, so it lands at
         // 2^(−3·0.744^0.6) ≈ 0.175 — several stops, not the ~0.7 EV the linear
@@ -212,18 +212,18 @@ final class GPUStageTests: XCTestCase {
     /// now lands entirely on the Magenta slider instead of being split 50/50
     /// with Purple.
     func testPureMagentaLandsOnTheMagentaSlider() throws {
-        let neutral = try run(EditState(), upTo: .bwMix)
+        let neutral = try run(EditState(), upTo: .mix)
         let base = Double(neutral.rgb(x: P.pureMagenta, y: 0).0)
 
         var onBand = EditState()
         onBand.bwMix.magenta = -100
-        let magenta = try run(onBand, upTo: .bwMix)
+        let magenta = try run(onBand, upTo: .mix)
         XCTAssertEqual(Double(magenta.rgb(x: P.pureMagenta, y: 0).0) / base,
                        1.0 / 8, accuracy: 0.002)
 
         var neighbour = EditState()
         neighbour.bwMix.purple = -100
-        let purple = try run(neighbour, upTo: .bwMix)
+        let purple = try run(neighbour, upTo: .mix)
         XCTAssertEqual(Double(purple.rgb(x: P.pureMagenta, y: 0).0), base,
                        accuracy: base * 0.01, "Purple must not touch a pure magenta")
     }
@@ -269,7 +269,7 @@ final class GPUStageTests: XCTestCase {
 
     func testNeutralPatchInvariantForAnySlider() throws {
         var rng = SeededRandom(seed: 0xBEEF)
-        let reference = try run(EditState(), upTo: .bwMix)
+        let reference = try run(EditState(), upTo: .mix)
         for _ in 0..<12 {
             var edit = EditState()
             edit.bwMix = .init(red: rng.double(in: -100...100),
@@ -280,7 +280,7 @@ final class GPUStageTests: XCTestCase {
                                blue: rng.double(in: -100...100),
                                purple: rng.double(in: -100...100),
                                magenta: rng.double(in: -100...100))
-            let out = try run(edit, upTo: .bwMix)
+            let out = try run(edit, upTo: .mix)
             for idx in [P.midGray, P.darkGray, P.nearWhite] {
                 XCTAssertEqual(Double(out.rgb(x: idx, y: 0).0),
                                Double(reference.rgb(x: idx, y: 0).0),
@@ -373,7 +373,7 @@ final class GPUStageTests: XCTestCase {
         }
         for balance in [-100.0, 0.0, 100.0] {
             let base = try TextureReadback.read(
-                pipe.render(input: tex, edit: EditState(), upTo: .bwMix).texture)
+                pipe.render(input: tex, edit: EditState(), upTo: .mix).texture)
             // Shadow wheel only, then highlight wheel only, same hue and
             // saturation: the tint each produces is linear in its weight, so the
             // ratio of the two chromas is the ratio of the two weights.
@@ -483,7 +483,7 @@ final class GPUStageTests: XCTestCase {
             (inputs[x], inputs[x], inputs[x])
         }
         let base = try TextureReadback.read(
-            pipe.render(input: tex, edit: EditState(), upTo: .bwMix).texture)
+            pipe.render(input: tex, edit: EditState(), upTo: .mix).texture)
         var edit = EditState()
         edit.toning = .init(shadowHue: 210, shadowSaturation: 60,
                             highlightHue: 210, highlightSaturation: 60)
@@ -509,7 +509,7 @@ final class GPUStageTests: XCTestCase {
             (inputs[x], inputs[x], inputs[x])
         }
         let base = try TextureReadback.read(
-            pipe.render(input: tex, edit: EditState(), upTo: .bwMix).texture)
+            pipe.render(input: tex, edit: EditState(), upTo: .mix).texture)
         var edit = EditState()
         edit.toning = .init(shadowHue: 40, shadowSaturation: 30,
                             highlightHue: 45, highlightSaturation: 25)

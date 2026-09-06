@@ -74,7 +74,7 @@ final class ClarityStage {
             gauss.append(try context.makeScalarTexture(width: s.width, height: s.height))
         }
         var eps = Float(ClarityMapping.epsLuminance)
-        try encodePass(cb, logLuma, w, h) { e in
+        try context.encodePass(cb, logLuma, width: w, height: h) { e in
             e.setTexture(source, index: 0)
             e.setTexture(gauss[0], index: 1)
             e.setBytes(&eps, length: MemoryLayout<Float>.stride, index: 0)
@@ -84,7 +84,8 @@ final class ClarityStage {
         // filter is the identity, so skip straight to the (identity) apply.
         if levels >= 2 && !params.isIdentity {
             for l in 1..<levels {
-                try encodePass(cb, downsample, gauss[l].width, gauss[l].height) { e in
+                try context.encodePass(cb, downsample,
+                                       width: gauss[l].width, height: gauss[l].height) { e in
                     e.setTexture(gauss[l - 1], index: 0)
                     e.setTexture(gauss[l], index: 1)
                 }
@@ -95,7 +96,8 @@ final class ClarityStage {
             for l in 0..<(levels - 1) {
                 accum.append(try context.makeScalarTexture(width: gauss[l].width,
                                                            height: gauss[l].height))
-                try encodePass(cb, clear, gauss[l].width, gauss[l].height) { e in
+                try context.encodePass(cb, clear,
+                                       width: gauss[l].width, height: gauss[l].height) { e in
                     e.setTexture(accum[l], index: 0)
                 }
             }
@@ -119,13 +121,15 @@ final class ClarityStage {
                     remapFine: 0)
 
                 // r_k(L) blurred straight down to level 1.
-                try encodePass(cb, remapDownsample, gauss[1].width, gauss[1].height) { e in
+                try context.encodePass(cb, remapDownsample,
+                                       width: gauss[1].width, height: gauss[1].height) { e in
                     e.setTexture(gauss[0], index: 0)
                     e.setTexture(scratch[1]!, index: 1)
                     e.setBytes(&u, length: MemoryLayout<ClarityUniforms>.stride, index: 0)
                 }
                 for l in 2..<levels {
-                    try encodePass(cb, downsample, gauss[l].width, gauss[l].height) { e in
+                    try context.encodePass(cb, downsample,
+                                           width: gauss[l].width, height: gauss[l].height) { e in
                         e.setTexture(scratch[l - 1]!, index: 0)
                         e.setTexture(scratch[l], index: 1)
                     }
@@ -134,7 +138,8 @@ final class ClarityStage {
                 for l in 0..<(levels - 1) {
                     u.remapFine = (l == 0) ? 1 : 0
                     let fine = (l == 0) ? gauss[0] : scratch[l]!
-                    try encodePass(cb, accumulate, gauss[l].width, gauss[l].height) { e in
+                    try context.encodePass(cb, accumulate,
+                                           width: gauss[l].width, height: gauss[l].height) { e in
                         e.setTexture(fine, index: 0)
                         e.setTexture(scratch[l + 1]!, index: 1)
                         e.setTexture(gauss[l], index: 2)
@@ -147,7 +152,8 @@ final class ClarityStage {
             // --- band weighting: level 0 (pixel scale) is not clarity's band --
             for l in 0..<(levels - 1) where ClarityMapping.levelGain(l) != 1 {
                 var g = ClarityLevelGainUniforms(levelGain: Float(ClarityMapping.levelGain(l)))
-                try encodePass(cb, levelGain, gauss[l].width, gauss[l].height) { e in
+                try context.encodePass(cb, levelGain,
+                                       width: gauss[l].width, height: gauss[l].height) { e in
                     e.setTexture(gauss[l], index: 0)
                     e.setTexture(gauss[l + 1], index: 1)
                     e.setTexture(accum[l], index: 2)
@@ -158,7 +164,8 @@ final class ClarityStage {
             // --- collapse: the residual is the *original* coarsest Gaussian --
             for l in stride(from: levels - 2, through: 0, by: -1) {
                 let coarse = (l == levels - 2) ? gauss[levels - 1] : accum[l + 1]
-                try encodePass(cb, collapse, accum[l].width, accum[l].height) { e in
+                try context.encodePass(cb, collapse,
+                                       width: accum[l].width, height: accum[l].height) { e in
                     e.setTexture(coarse, index: 0)
                     e.setTexture(accum[l], index: 1)
                 }
@@ -186,7 +193,8 @@ final class ClarityStage {
                                      toneCenter: Float(log2(0.18)),
                                      toneSigma: Float(ClarityMapping.toneWeightSigmaEV),
                                      toneFloor: Float(ClarityMapping.toneWeightFloor))
-        try encodePass(cb, apply, destination.width, destination.height) { e in
+        try context.encodePass(cb, apply,
+                               width: destination.width, height: destination.height) { e in
             e.setTexture(source, index: 0)
             e.setTexture(logIn, index: 1)
             e.setTexture(logOut, index: 2)
@@ -209,16 +217,5 @@ final class ClarityStage {
                       bytesPerRow: MemoryLayout<Float16>.size)
         }
         return t
-    }
-
-    private func encodePass(_ cb: MTLCommandBuffer,
-                            _ state: MTLComputePipelineState,
-                            _ w: Int, _ h: Int,
-                            _ body: (MTLComputeCommandEncoder) -> Void) throws {
-        guard let e = cb.makeComputeCommandEncoder() else { throw MetalError.encoderFailed }
-        e.setComputePipelineState(state)
-        body(e)
-        context.dispatch(e, state, width: w, height: h)
-        e.endEncoding()
     }
 }
