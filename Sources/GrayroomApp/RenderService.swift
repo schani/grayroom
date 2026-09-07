@@ -154,6 +154,19 @@ final class RenderService {
         } completion: { completion($0) }
     }
 
+    // MARK: - White balance selector
+
+    /// The temp/tint that render a clicked point neutral. On the interactive
+    /// queue and off the main thread: it decodes the file at 512 px, twice for
+    /// a rendered image.
+    func pickWhiteBalance(url: URL, edit: EditState, normalized p: CGPoint,
+                          completion: @escaping (Result<WhiteBalancePick, Error>) -> Void) {
+        run(queue) {
+            try WhiteBalancePicker.pick(url: url, edit: edit, normalized: p,
+                                        decoder: self.renderer.decoder)
+        } completion: { completion($0) }
+    }
+
     // MARK: - Export
 
     /// Full pipeline at full resolution from a fresh full-res decode.

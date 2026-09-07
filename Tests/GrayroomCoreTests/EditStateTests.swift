@@ -9,7 +9,8 @@ final class EditStateTests: XCTestCase {
         XCTAssertNil(e.whiteBalance.temperature)
         XCTAssertNil(e.whiteBalance.tint)
         XCTAssertEqual(e.tone, EditState.Tone())
-        XCTAssertTrue(e.bwMix.enabled)
+        XCTAssertEqual(e.treatment, .blackAndWhite)
+        XCTAssertEqual(e.style, .neutral)
         XCTAssertEqual(e.clarity, 0)
         XCTAssertEqual(e.toning, EditState.Toning())
         XCTAssertTrue(e.masks.isEmpty)
@@ -46,12 +47,41 @@ final class EditStateTests: XCTestCase {
         XCTAssertEqual(try EditState().applying(settings: ["hdr=true"]).tone, EditState.Tone())
     }
 
+    /// Treatment and style are strings in the JSON, and like every other field
+    /// a missing key — or a spelling this build does not know — falls back to
+    /// the default rather than failing the whole decode.
+    func testTreatmentAndStyleRoundTripAndFallBackToTheirDefaults() throws {
+        let bare = try EditState.decode(from: Data("""
+        {"version": 1, "tone": {"exposure": 0.5}}
+        """.utf8))
+        XCTAssertEqual(bare.treatment, .blackAndWhite)
+        XCTAssertEqual(bare.style, .neutral)
+
+        let bogus = try EditState.decode(from: Data("""
+        {"treatment": "sepia", "style": "bogus"}
+        """.utf8))
+        XCTAssertEqual(bogus.treatment, .blackAndWhite)
+        XCTAssertEqual(bogus.style, .neutral)
+
+        var e = EditState()
+        e.treatment = .color
+        e.style = .tealAndOrange
+        let json = try e.jsonData()
+        let text = String(decoding: json, as: UTF8.self)
+        XCTAssertTrue(text.contains("\"treatment\""), text)
+        XCTAssertTrue(text.contains("\"style\""), text)
+        XCTAssertEqual(try EditState.decode(from: json), e)
+
+        XCTAssertEqual(try EditState().applying(settings: ["treatment=color"]).treatment, .color)
+        XCTAssertEqual(try EditState().applying(settings: ["style=vividSlide"]).style, .vividSlide)
+    }
+
     func testRoundTrip() throws {
         var e = EditState()
         e.whiteBalance = .init(temperature: 5200, tint: -3.5)
         e.tone = .init(exposure: 0.75, contrast: 20, highlights: -40, shadows: 33, whites: -10, blacks: 5)
         e.bwMix = .init(red: -30, orange: 5, yellow: 12, green: -8,
-                        aqua: 40, blue: -60, purple: 2, magenta: -1, enabled: true)
+                        aqua: 40, blue: -60, purple: 2, magenta: -1)
         e.clarity = 22
         e.toning = .init(shadowHue: 215, shadowSaturation: 12,
                          highlightHue: 45, highlightSaturation: 10, balance: 10)
@@ -95,7 +125,7 @@ final class EditStateTests: XCTestCase {
         XCTAssertEqual(e.tone.exposure, 1.5)
         XCTAssertEqual(e.tone.contrast, 0)          // missing key -> default
         XCTAssertEqual(e.bwMix.red, -20)
-        XCTAssertTrue(e.bwMix.enabled)               // missing bool -> default true
+        XCTAssertEqual(e.treatment, .blackAndWhite)  // missing key -> default
         XCTAssertEqual(e.toning.shadowHue, 200)
         XCTAssertNil(e.whiteBalance.temperature)     // missing object -> default
     }
@@ -113,7 +143,7 @@ final class EditStateTests: XCTestCase {
                   "tone.shadows", "tone.whites", "tone.blacks",
                   "bwMix.red", "bwMix.orange", "bwMix.yellow", "bwMix.green",
                   "bwMix.aqua", "bwMix.blue", "bwMix.purple", "bwMix.magenta",
-                  "bwMix.enabled",
+                  "treatment", "style",
                   "toning.shadowHue", "toning.shadowSaturation",
                   "toning.highlightHue", "toning.highlightSaturation", "toning.balance"] {
             XCTAssertTrue(keys.contains(k), "missing settable key \(k)")
@@ -125,14 +155,14 @@ final class EditStateTests: XCTestCase {
             "tone.exposure=1.0",
             "bwMix.red=-50",
             "toning.shadowHue=210",
-            "bwMix.enabled=false",
+            "treatment=color",
             "clarity=15",
             "whiteBalance.temperature=5200",
         ])
         XCTAssertEqual(e.tone.exposure, 1.0)
         XCTAssertEqual(e.bwMix.red, -50)
         XCTAssertEqual(e.toning.shadowHue, 210)
-        XCTAssertFalse(e.bwMix.enabled)
+        XCTAssertEqual(e.treatment, .color)
         XCTAssertEqual(e.clarity, 15)
         XCTAssertEqual(e.whiteBalance.temperature, 5200)
         // untouched fields keep their defaults

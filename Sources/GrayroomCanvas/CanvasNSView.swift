@@ -8,13 +8,14 @@ import simd
 
 /// What a click-drag on the canvas does.
 public enum CanvasTool: String, CaseIterable {
-    case pan, brush, targeted
+    case pan, brush, targeted, whiteBalance
 
     public var label: String {
         switch self {
         case .pan: return "Pan"
         case .brush: return "Brush"
         case .targeted: return "Targeted"
+        case .whiteBalance: return "White Balance"
         }
     }
 }
@@ -39,6 +40,7 @@ public protocol CanvasInputHandler: AnyObject {
     func canvasBeginTargeted(atNormalized p: CGPoint)
     func canvasDragTargeted(dragPixels: Double)
     func canvasEndTargeted()
+    func canvasPickWhiteBalance(atNormalized p: CGPoint)
     func canvasKeyCommand(_ command: CanvasKeyCommand)
     func canvasBeforeAfterHeld(_ held: Bool)
 }
@@ -240,9 +242,9 @@ public final class CanvasNSView: MTKView {
     /// are write-only — a test can read this, but not what `addCursorRect` did.
     public var toolCursor: NSCursor {
         switch tool {
-        // In brush and targeted mode the crosshair marks the exact pixel the
-        // gesture will act on; panning is a grab.
-        case .brush, .targeted: return .crosshair
+        // In brush, targeted and white balance mode the crosshair marks the
+        // exact pixel the gesture will act on; panning is a grab.
+        case .brush, .targeted, .whiteBalance: return .crosshair
         case .pan: return .openHand
         }
     }
@@ -283,6 +285,10 @@ public final class CanvasNSView: MTKView {
         case .targeted:
             handler?.canvasBeginTargeted(atNormalized: transform.normalizedPoint(fromView: p))
             drag = .targeted(startView: p)
+        // One click, no drag: the eyedropper acts on mouse-down and is done.
+        case .whiteBalance:
+            handler?.canvasPickWhiteBalance(atNormalized: transform.normalizedPoint(fromView: p))
+            drag = .none
         case .pan:
             drag = .pan(lastView: p)
         }

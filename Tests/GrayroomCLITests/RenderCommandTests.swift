@@ -95,6 +95,52 @@ final class RenderCommandTests: XCTestCase {
         XCTAssertGreaterThan(try meanCode(bright), try meanCode(dark) + 10)
     }
 
+    /// The eyedropper from the command line: the white balance is picked off
+    /// the image and reported before the file is written.
+    func testNeutralAtPicksTheWhiteBalance() throws {
+        guard let dng = testDataURL("L1000003.DNG") else {
+            throw XCTSkip("no test DNG available")
+        }
+        let output = out("neutral.png")
+        let result = try temp.run(["render", dng.path, "-o", output.path,
+                                   "--max-dimension", "256", "--neutral-at", "0.3,0.7"])
+        XCTAssertTrue(result.stderr.contains("white balance from (0.30, 0.70):"), result.stderr)
+        XCTAssertTrue(result.stderr.contains(" K, tint "), result.stderr)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+    }
+
+    /// Validation runs before the command, so the parser reports it.
+    func testNeutralAtRejectsANonsensePoint() {
+        XCTAssertThrowsError(try Grayroom.parseAsRoot(
+            ["render", input.path, "-o", out("x.png").path, "--neutral-at", "0.3"])) { error in
+            XCTAssertTrue(Grayroom.message(for: error).contains("--neutral-at"),
+                          Grayroom.message(for: error))
+        }
+    }
+
+    /// A colour style reaches the pipeline through `--set` too: the default B&W
+    /// treatment writes a grey file, and the colour treatment with a style does
+    /// not.
+    func testAColourStyleWritesAColourFile() throws {
+        guard let dng = testDataURL("L1000003.DNG") else {
+            throw XCTSkip("no test DNG available")
+        }
+        let output = out("style.png")
+        try temp.run(["render", dng.path, "-o", output.path, "--max-dimension", "256",
+                      "--set", "treatment=color", "--set", "style=vividSlide"])
+
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(output as CFURL, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        let data = try XCTUnwrap(image.dataProvider?.data) as Data
+        let stride = image.bitsPerPixel / 8
+        var widest = 0
+        for i in Swift.stride(from: 0, to: data.count - stride, by: stride) {
+            let (r, g, b) = (Int(data[i]), Int(data[i + 1]), Int(data[i + 2]))
+            widest = max(widest, max(r, max(g, b)) - min(r, min(g, b)))
+        }
+        XCTAssertGreaterThan(widest, 8, "the render came out grey")
+    }
+
     func testHistogramIsPrintedOnlyWhenAsked() throws {
         let quiet = try temp.run(["render", input.path, "-o", out("a.png").path])
         XCTAssertFalse(quiet.stderr.contains("pixels="), quiet.stderr)

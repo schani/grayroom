@@ -1,4 +1,5 @@
 import ArgumentParser
+import CoreGraphics
 import Foundation
 import GrayroomCore
 import GrayroomLibrary
@@ -12,7 +13,8 @@ struct Render: ParsableCommand {
         discussion: """
         The edit comes from --edit if given, otherwise from the input file's \
         development in the library (#1 unless --development says otherwise), otherwise from \
-        the defaults. --set overrides apply on top either way.
+        the defaults. --set overrides apply on top either way. --neutral-at picks the white \
+        balance off the image itself, overriding whatever the resolved edit had.
         """)
 
     @OptionGroup var libraryOptions: LibraryOptions
@@ -26,6 +28,10 @@ struct Render: ParsableCommand {
 
     @Option(name: .customLong("max-dimension"), help: "Cap the longer output edge at N pixels.")
     var maxDimension: Int?
+
+    @Option(name: .customLong("neutral-at"),
+            help: "Pick the white balance from this point: X,Y as fractions 0…1, x right, y down.")
+    var neutralAt: String?
 
     @Flag(name: .customLong("histogram"), help: "Print a luminance histogram and clipping stats.")
     var histogram = false
@@ -46,7 +52,20 @@ struct Render: ParsableCommand {
     func validate() throws {
         if let m = maxDimension, m < 16 { throw fail("--max-dimension must be at least 16") }
         if quality < 0 || quality > 1 { throw fail("--quality must be between 0 and 1") }
+        _ = try neutralPoint()
         try editOptions.validate()
+    }
+
+    private func neutralPoint() throws -> CGPoint? {
+        guard let neutralAt else { return nil }
+        let parts = neutralAt.split(separator: ",").map {
+            Double($0.trimmingCharacters(in: .whitespaces))
+        }
+        guard parts.count == 2, let x = parts[0], let y = parts[1],
+              (0...1).contains(x), (0...1).contains(y) else {
+            throw fail("--neutral-at wants two comma-separated fractions between 0 and 1")
+        }
+        return CGPoint(x: x, y: y)
     }
 
     func run() throws {
@@ -63,13 +82,31 @@ struct Render: ParsableCommand {
         // `--save` needs a library; rendering does not, so a library that will
         // not open is only fatal when something asked to write to it.
         let library = save ? try libraryOptions.open() : libraryOptions.openIfAvailable()
-        let resolved = try editOptions.resolve(input: inputURL, library: library)
+        var resolved = try editOptions.resolve(input: inputURL, library: library)
+
+        let renderer = try Renderer()
+        // After the edit sources, before anything is written or rendered: the
+        // pick is a white balance the resolved edit did not have, and `--save`
+        // and `--save-edit` are meant to record what was rendered.
+        if let point = try neutralPoint() {
+            let pick = try WhiteBalancePicker.pick(url: inputURL, edit: resolved.edit,
+                                                   normalized: point,
+                                                   decoder: renderer.decoder)
+            if pick.isClipped {
+                standardError("white balance: sample is clipped, not applied\n")
+            } else {
+                resolved.edit.whiteBalance = pick.whiteBalance
+                standardError(String(format: "white balance from (%.2f, %.2f): %.0f K, tint %+.0f\n",
+                                     point.x, point.y,
+                                     pick.whiteBalance.temperature ?? 0,
+                                     pick.whiteBalance.tint ?? 0))
+            }
+        }
 
         if let saveEdit {
             try resolved.edit.save(to: URL(fileURLWithPath: saveEdit))
         }
 
-        let renderer = try Renderer()
         let result = try renderer.render(rawURL: inputURL,
                                          edit: resolved.edit,
                                          to: outputURL,

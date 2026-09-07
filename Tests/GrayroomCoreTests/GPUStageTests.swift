@@ -290,12 +290,12 @@ final class GPUStageTests: XCTestCase {
         }
     }
 
-    func testBWMixDisabledPassesColourThrough() throws {
+    func testColourTreatmentPassesColourThrough() throws {
         var edit = EditState()
-        edit.bwMix.enabled = false
+        edit.treatment = .color
         let out = try run(edit, upTo: .toning)
         let (r, _, b) = out.rgb(x: P.red, y: 0)
-        XCTAssertGreaterThan(r, b * 4, "colour should survive when the mix is disabled")
+        XCTAssertGreaterThan(r, b * 4, "the neutral style runs no pass, so colour survives")
     }
 
     // MARK: - Toning
@@ -563,7 +563,7 @@ final class GPUStageTests: XCTestCase {
 
     func testOutputTransformMatchesCPUReference() throws {
         var edit = EditState()
-        edit.bwMix.enabled = false          // keep colour so all channels are exercised
+        edit.treatment = .color             // keep colour so all channels are exercised
         let out = try run(edit, upTo: .output)
         let zero = EditState.Tone()
         for idx in 0..<patches.count {
@@ -586,7 +586,7 @@ final class GPUStageTests: XCTestCase {
         // shoulder that asymptotes at linear 1.0.
         let input = try ctx.makePatchTexture([(-0.5, -0.5, -0.5), (64, 64, 64)])
         var edit = EditState()
-        edit.bwMix.enabled = false
+        edit.treatment = .color
         let result = try pipe.render(input: input, edit: edit, upTo: .output)
         let out = try TextureReadback.read(result.texture)
         XCTAssertEqual(Double(out.rgb(x: 0, y: 0).0), 0, accuracy: 1e-4)
@@ -600,7 +600,7 @@ final class GPUStageTests: XCTestCase {
         let (ctx, pipe) = try TestGPU.require()
         let input = try ctx.makePatchTexture([(0.5, 0.5, 0.5), (2, 2, 2)])
         var edit = EditState()
-        edit.bwMix.enabled = false
+        edit.treatment = .color
         edit.tone = .init(exposure: 2, contrast: 100, whites: 100)
         let out = try TextureReadback.read(
             pipe.render(input: input, edit: edit, upTo: .tone).texture)
@@ -622,7 +622,7 @@ final class GPUStageTests: XCTestCase {
         let input = try ctx.makePatchTexture([(0, 0, 0), (0.18, 0.18, 0.18), (64, 64, 64), (64, 64, 64)],
                                              height: 4)
         var edit = EditState()
-        edit.bwMix.enabled = false
+        edit.treatment = .color
         let result = try pipe.render(input: input, edit: edit, upTo: .output, computeHistogram: true)
         let h = try XCTUnwrap(result.histogram)
 

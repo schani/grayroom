@@ -56,14 +56,9 @@ struct ToningUniforms {
 // The crossover uses `grSmootherstep` (Common.metal): C2 rather than smoothstep
 // because it modulates the whole midrange, where a curvature jump at the band
 // edges would show as a faint contour on a clean gradient.
-
-// Fully saturated RGB for a hue, normalised to r+g+b == 3. Neutral energy, so
-// the sign of the luminance excursion is set by where the hue sits relative to
-// the Rec.709 weights: warm/green hues lift, blue/magenta darken.
-inline float3 grToningTint(float hueDeg) {
-    float3 t = grHueToRGB(hueDeg);
-    return t * (3.0f / max(t.r + t.g + t.b, 1e-4f));
-}
+//
+// The arithmetic itself is `grSplitTone` in Common.metal, because the colour
+// styles apply the same block from their preset.
 
 kernel void toningKernel(texture2d<float, access::read>  src [[texture(0)]],
                          texture2d<float, access::write> dst [[texture(1)]],
@@ -74,31 +69,10 @@ kernel void toningKernel(texture2d<float, access::read>  src [[texture(0)]],
 
     float4 s = src.read(gid);
     float3 rgb = max(s.rgb, 0.0f);
-    float Y = grLuminance(rgb);
-    float t = sqrt(clamp(Y, 0.0f, 1.0f));
+    float t = sqrt(clamp(grLuminance(rgb), 0.0f, 1.0f));
 
-    float pivot = clamp(0.5f - 0.35f * u.balance, 0.08f, 0.92f);
-    float hw = max(u.crossoverHalfWidth, 1e-3f);
+    rgb = grSplitTone(rgb, t, u.shadowHue, u.shadowSat, u.highlightHue, u.highlightSat,
+                      u.balance, u.strength, u.crossoverHalfWidth, u.lumaPreserve);
 
-    float hwt = grSmootherstep(pivot - hw, pivot + hw, t);
-    float swt = 1.0f - hwt;
-
-    // Keep the extremes neutral. Both weights get the same fade, so their sum
-    // goes to 0 at pure black and pure white and is exactly 1 in between.
-    float fade = smoothstep(0.0f, 0.08f, t) * (1.0f - smoothstep(0.92f, 1.0f, t));
-    swt *= fade;
-    hwt *= fade;
-
-    float sAmt = clamp(u.shadowSat, 0.0f, 1.0f) * u.strength;
-    float hAmt = clamp(u.highlightSat, 0.0f, 1.0f) * u.strength;
-
-    float3 factor = 1.0f
-        + swt * sAmt * (grToningTint(u.shadowHue) - 1.0f)
-        + hwt * hAmt * (grToningTint(u.highlightHue) - 1.0f);
-    factor = max(factor, 0.0f);
-
-    // Partially normalise the tint's luminance (see the header).
-    factor /= pow(max(grLuminance(factor), 1e-4f), u.lumaPreserve);
-
-    dst.write(float4(rgb * factor, s.a), gid);
+    dst.write(float4(rgb, s.a), gid);
 }

@@ -350,11 +350,11 @@ final class CatalogCommandTests: XCTestCase {
         let developmentID = try XCTUnwrap(stored.id)
 
         let output = try temp.run(["dev", "set", String(developmentID),
-                                   "tone.exposure=-0.5", "bwMix.enabled=false"])
+                                   "tone.exposure=-0.5", "treatment=color"])
 
         let updated = try XCTUnwrap(library.development(id: developmentID)).edit
         XCTAssertEqual(updated.tone.exposure, -0.5)
-        XCTAssertFalse(updated.bwMix.enabled)
+        XCTAssertEqual(updated.treatment, .color)
         XCTAssertEqual(updated.clarity, 21, "untouched fields survive")
         XCTAssertTrue(output.stdout.contains("updated development \(developmentID)"), output.stdout)
     }

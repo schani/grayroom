@@ -88,7 +88,7 @@ out of v1), targets:
 decode(+WB) → [linear RGB rgba16Float]
   → tone (exposure, contrast, highlights, shadows, whites, blacks; per-pixel params)
   → clarity (fast local Laplacian on log-luminance; per-pixel amount)
-  → B&W mix (8 hue bands, saturation-weighted so neutrals are unaffected) → [gray]
+  → mix: by treatment, the B&W mixer (8 hue bands) → [gray], or a colour style
   → two-tone toning (shadows/highlights hue+sat, balance) → [RGB again]
   → output transform (linear → sRGB/display), histogram tap, clipping flags
 ```

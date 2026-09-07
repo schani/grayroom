@@ -39,15 +39,13 @@ final class EditStateSetTests: XCTestCase {
     }
 
     func testBooleanSpellings() throws {
+        var on = EditState()
+        on.hdr = true
         for spelling in ["false", "FALSE", "no", "No"] {
-            XCTAssertFalse(try EditState().applying(settings: ["bwMix.enabled=\(spelling)"])
-                .bwMix.enabled, spelling)
+            XCTAssertFalse(try on.applying(settings: ["hdr=\(spelling)"]).hdr, spelling)
         }
         for spelling in ["true", "TRUE", "yes", "Yes"] {
-            var off = EditState()
-            off.bwMix.enabled = false
-            XCTAssertTrue(try off.applying(settings: ["bwMix.enabled=\(spelling)"])
-                .bwMix.enabled, spelling)
+            XCTAssertTrue(try EditState().applying(settings: ["hdr=\(spelling)"]).hdr, spelling)
         }
     }
 
@@ -64,9 +62,9 @@ final class EditStateSetTests: XCTestCase {
     }
 
     /// A value of the wrong type is rejected at decode rather than quietly
-    /// dropped: `bwMix.enabled=maybe` is a mistake, not a `false`.
+    /// dropped: `hdr=maybe` is a mistake, not a `false`.
     func testAValueOfTheWrongTypeIsRejected() {
-        XCTAssertThrowsError(try EditState().applying(settings: ["bwMix.enabled=maybe"]))
+        XCTAssertThrowsError(try EditState().applying(settings: ["hdr=maybe"]))
         XCTAssertThrowsError(try EditState().applying(settings: ["tone.exposure=quite a lot"]))
     }
 
@@ -183,17 +181,23 @@ final class EditStateSetTests: XCTestCase {
     func testEveryScalarKeyPathAccepts() throws {
         let scalars = EditState.settableKeyPaths.subtracting(["masks"])
         XCTAssertGreaterThan(scalars.count, 20, "the schema should have plenty of fields")
+        // The enum-valued fields take a case name; everything else a number or
+        // a boolean.
+        let enums = ["treatment": "color", "style": "vividSlide"]
 
         for key in scalars {
             let isBool = key == "hdr" || key.hasSuffix("enabled")
-            let value = isBool ? "true" : "1"
+            let value = enums[key] ?? (isBool ? "true" : "1")
             let edit = try XCTUnwrap(try? EditState().applying(settings: ["\(key)=\(value)"]),
                                      "\(key) is advertised as settable but was rejected")
             // The value really moved: re-encoding puts it back where it came from.
             let json = try JSONSerialization.jsonObject(with: try edit.jsonData())
-            let stored = try XCTUnwrap(leaf(key, in: json) as? NSNumber,
-                                       "\(key) did not come back as a number")
-            XCTAssertEqual(stored.doubleValue, 1, key)
+            let stored = try XCTUnwrap(leaf(key, in: json), "\(key) did not come back")
+            if let expected = enums[key] {
+                XCTAssertEqual(stored as? String, expected, key)
+            } else {
+                XCTAssertEqual((stored as? NSNumber)?.doubleValue, 1, key)
+            }
         }
     }
 

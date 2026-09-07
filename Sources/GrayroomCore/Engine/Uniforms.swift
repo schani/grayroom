@@ -37,6 +37,32 @@ struct ToningUniforms {
     var lumaPreserve: Float
 }
 
+/// Mirrors `StyleUniforms` in `Style.metal`. The curve block, the chroma block,
+/// the band-weighting constants and the split-tone block, in that order.
+struct StyleUniforms {
+    var contrast: Float
+    var blacks: Float
+    var shoulder: Float
+    var saturation: Float
+    var vibrance: Float
+    var density: Float
+    var vibranceChroma: Float
+    var hkGain: Float
+    var densityReach: Float
+    var densityChroma: Float
+    var bandLuminanceEV: Float
+    var satExponent: Float
+    var satKnee: Float
+    var shadowHue: Float
+    var shadowSat: Float
+    var highlightHue: Float
+    var highlightSat: Float
+    var balance: Float
+    var strength: Float
+    var crossoverHalfWidth: Float
+    var lumaPreserve: Float
+}
+
 /// Mirrors `ClarityUniforms` in `Clarity.metal`. Scalar-only, 4-byte aligned
 /// throughout, so the Swift and MSL layouts agree.
 struct ClarityUniforms {
