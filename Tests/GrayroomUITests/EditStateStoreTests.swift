@@ -177,6 +177,45 @@ final class EditStateStoreTests: XCTestCase {
         XCTAssertTrue(store.canRedo)
     }
 
+    // MARK: - Treatment and style
+
+    func testToggleTreatmentIsOneUndoStep() {
+        let store = makeStore()
+        XCTAssertEqual(store.edit.treatment, .blackAndWhite)
+        store.toggleTreatment()
+        XCTAssertEqual(store.edit.treatment, .color)
+        XCTAssertTrue(store.canUndo)
+
+        store.undo()
+        XCTAssertEqual(store.edit.treatment, .blackAndWhite)
+        store.redo()
+        XCTAssertEqual(store.edit.treatment, .color)
+    }
+
+    func testToggleTreatmentRepaints() {
+        let store = makeStore()
+        var seen: [RenderInvalidation] = []
+        store.onChange = { seen.append($0) }
+        store.toggleTreatment()
+        XCTAssertEqual(seen, [.pipeline])
+    }
+
+    func testSetStyleIsOneUndoStep() {
+        let store = makeStore()
+        store.setStyle(.chrome)
+        XCTAssertEqual(store.edit.style, .chrome)
+        XCTAssertTrue(store.canUndo)
+        store.undo()
+        XCTAssertEqual(store.edit.style, .neutral)
+        XCTAssertFalse(store.canUndo)
+    }
+
+    func testSetStyleToTheCurrentStyleRegistersNothing() {
+        let store = makeStore()
+        store.setStyle(.neutral)
+        XCTAssertFalse(store.canUndo)
+    }
+
     // MARK: - White balance
 
     func testAsShotIsShownWhenTheEditIsNil() {

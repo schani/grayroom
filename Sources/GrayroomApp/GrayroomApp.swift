@@ -204,6 +204,11 @@ struct GrayroomApp: App {
                     Divider()
                     Button("None") { model.setColorLabel(.unlabeled) }
                 }
+                Divider()
+                Toggle("Convert to Black & White", isOn: Binding(
+                    get: { model.store.edit.treatment == .blackAndWhite },
+                    set: { _ in model.toggleTreatment() }))
+                    .keyboardShortcut("v", modifiers: [])
             }
             // Not "View": SwiftUI already installs a View menu (Enter Full
             // Screen) and a second one with the same name is unaddressable.
@@ -220,10 +225,10 @@ struct GrayroomApp: App {
                 // tool: the same key again returns to the hand.
                 Button("Brush Tool") { model.tool = model.tool == .brush ? .pan : .brush }
                     .keyboardShortcut("b", modifiers: [])
-                Button("Targeted Adjustment Tool") {
-                    model.tool = model.tool == .targeted ? .pan : .targeted
-                }
-                .keyboardShortcut("t", modifiers: [])
+                Button("Targeted Adjustment Tool") { model.toggleTargetedTool() }
+                    .keyboardShortcut("t", modifiers: [])
+                Button("White Balance Selector") { model.toggleWhiteBalanceTool() }
+                    .keyboardShortcut("w", modifiers: [])
                 Button("New Mask") { model.store.addMask(); model.tool = .brush }
             }
         }

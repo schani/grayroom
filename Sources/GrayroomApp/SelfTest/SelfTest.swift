@@ -9,7 +9,7 @@ import Metal
 import Observation
 import UniformTypeIdentifiers
 
-/// `GRAYROOM_SELFTEST=paint|undo|import|library|library2|storage swift run GrayroomApp <file.DNG>`
+/// `GRAYROOM_SELFTEST=paint|undo|wb|import|library|library2|storage swift run GrayroomApp <file.DNG>`
 ///
 /// Whole-app checks, each in its own process: `paint` (a stroke drawn with real
 /// mouse events), `undo` (Cmd-Z / Cmd-Shift-Z pushed through the real menu-bar
@@ -38,6 +38,26 @@ enum SelfTest {
         /// Repro (d): Cmd-Z / Cmd-Shift-Z pushed through the real menu-bar key
         /// equivalent path, which is where the undo bug actually lived.
         case undo
+        /// The colour treatment: Lightroom's `V` as a real keystroke through
+        /// the menu-bar key-equivalent path, the Style rows clicked, and the
+        /// canvas's own texture read back to prove the pipeline followed the
+        /// sidebar. Against a throwaway home:
+        ///
+        /// ```
+        /// CFFIXED_USER_HOME=$(mktemp -d) GRAYROOM_SELFTEST=treatment \
+        ///     swift run GrayroomApp <copy-of-file.DNG>
+        /// ```
+        case treatment
+        /// The white balance selector: Lightroom's `W` and Escape as real
+        /// keystrokes, a real click on the canvas, and the canvas's own texture
+        /// read back to prove the area that was clicked came out neutral.
+        /// Against a throwaway home:
+        ///
+        /// ```
+        /// CFFIXED_USER_HOME=$(mktemp -d) GRAYROOM_SELFTEST=wb \
+        ///     swift run GrayroomApp <copy-of-file.DNG>
+        /// ```
+        case whiteBalance = "wb"
         /// The import window: the File › Import… item as AppKit sees it, the
         /// second `Window` scene actually opening, thumbnails arriving in the
         /// grid, and the selection commands moving the ring and the checkboxes.
@@ -840,6 +860,8 @@ enum SelfTest {
             switch mode {
             case .paint, nil: run(canvas: canvas, model: model)
             case .undo: runUndo(canvas: canvas, model: model)
+            case .treatment: runTreatment(canvas: canvas, model: model)
+            case .whiteBalance: runWhiteBalance(canvas: canvas, model: model)
             case .importWindow, .library, .library2, .originalStorageSetup: break
             }
         }
@@ -872,7 +894,8 @@ enum SelfTest {
 
     static func settle(_ model: AppModel, then body: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            if model.isRendering || model.isDecoding, Date() < deadline {
+            if model.isRendering || model.isDecoding || model.isPickingWhiteBalance,
+               Date() < deadline {
                 settle(model, then: body)
             } else {
                 body()

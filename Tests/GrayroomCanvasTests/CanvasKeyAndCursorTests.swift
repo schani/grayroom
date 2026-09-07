@@ -142,7 +142,7 @@ final class CanvasKeyAndCursorTests: XCTestCase {
     }
 
     func testTheToolsAreNamedForTheUI() {
-        XCTAssertEqual(CanvasTool.allCases.map(\.label), ["Pan", "Brush", "Targeted"])
+        XCTAssertEqual(CanvasTool.allCases.map(\.label), ["Pan", "Brush", "Targeted", "White Balance"])
         XCTAssertEqual(CanvasTool(rawValue: "brush"), .brush)
     }
 

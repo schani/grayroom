@@ -80,6 +80,30 @@ Because white balance is applied at decode time on **both** paths, `DecodeKey`
 still has to include temp/tint: changing them invalidates the decode cache, not
 just the pipeline.
 
+## White balance selector
+
+`WhiteBalancePicker.pick` answers "what temp/tint make this point neutral", and
+splits along the same seam.
+
+For a **RAW**, `CIRAWFilter` answers it itself: `neutralLocation` (in the
+oriented output image, whose origin Core Image puts at the bottom left) makes
+the decoder solve for the white balance that neutralises a point, and
+`neutralTemperature` / `neutralTint` read the answer back in slider units.
+
+For a **rendered image** the sample's own chromaticity is converted to a
+temperature and tint by Robertson's isotemperature lines —
+`CorrelatedColorTemperature`, the table and arithmetic of Adobe's
+`dng_temperature::Set_xy_coord`. Tint is stated relative to D65's own value
+(6504 K, +9.8: D65 sits above the Planckian locus), so an already-neutral sample
+asks for no correction. `CITemperatureAndTint`'s adaptation is not the model
+that inverts, so a residual cast above 1 % is measured off a second decode and
+added back in mirek/tint space, twice at most.
+
+Either way the sample is the 5×5 mean at the point off a 512 px decode, and a
+sample with any channel at or above 0.98 is refused: a clipped channel no longer
+says what colour the area was, which is what Lightroom's "click on a less bright
+neutral area" means.
+
 ## Pipeline order
 
 ```
@@ -92,11 +116,15 @@ Each stage is a type in `Stages/` with an `encode(cb, source, destination, …)`
 that reads and writes `rgba16Float` (`clarity` is many passes internally, but it
 has the same signature and allocates its own scratch). `Pipeline.passes(for:)`
 lists the passes an edit needs, in order, leaving out any stage that would be
-the identity: `clarity` when neither the slider nor any mask asks for it, `mix`
-when `bwMix.enabled == false` (colour passthrough, a debugging aid), `toning`
-when both saturations are zero. `render` runs that list ping-ponging between two
-working textures, then the fixed output transform. `mix` is the slot the B&W
-mixer occupies; everything ahead of it is ratio-preserving.
+the identity: `clarity` when neither the slider nor any mask asks for it,
+`toning` when both saturations are zero. `render` runs that list ping-ponging
+between two working textures, then the fixed output transform. Everything ahead
+of `mix` is ratio-preserving.
+
+`mix` is the slot `EditState.treatment` fills: the B&W mixer under
+`.blackAndWhite`, the colour style under `.color`. The neutral style is the
+pipeline's own rendition, so it runs no pass at all and colour reaches `toning`
+untouched.
 `Pipeline.render(upTo:)` can stop at any stage boundary, which is what the
 golden tests use to inspect linear intermediates.
 
@@ -211,7 +239,7 @@ flat.
 
 Rather than re-enabling Apple's opaque boost, the rendition is an explicit,
 inspectable curve in the tone stage — part of the fixed pipeline, not an
-`EditState` field, so `bwMix.enabled=false` passthrough still shows it:
+`EditState` field, so the neutral colour treatment still shows it:
 
 ```
 baseline(x) = x − 1.0 + 2.0 · smootherstep(−6.0, +0.8, x)          [EV]
@@ -1048,6 +1076,65 @@ flow/density model; the clip threshold, capture sharpening, 8-bit dither and
 canvas colour management. Each is written up in its own section above.
 **`DEVIATIONS.md` in the repo root is the living record** of where every audit
 item across all four files stands.
+
+## Colour styles
+
+`treatment = .color` puts a **style** in the `mix` slot instead of the B&W
+mixer. Ten of them, plus `neutral`, which runs no pass — it is the pipeline's
+own rendition. `research/color-styles.md` holds each look's reference and the
+measurements the tables were tuned against; the tables are in
+`Stages/ColorStyle.swift`, one line per block.
+
+Four blocks, in the order `styleKernel` runs them:
+
+1. **Bands.** Hue and saturation are measured on the gamma-encoded colour
+   exactly as `bwMixKernel` does, so the eight bands are the mixer's bands, and
+   they are measured before anything else because a band is a statement about
+   the colour that arrived. Band luminance is the mixer's gain law with the
+   colour kept, `2^(bandLuminanceEV · amount/100 · w(sat))`,
+   `bandLuminanceEV = 1.5`; `w(0) = 0` keeps neutrals untouched.
+2. **Chroma, in OKLab.** Band hue rotates the (a, b) chroma vector by the
+   band's degrees; positive is toward the next band (red → orange → yellow …).
+   Chroma is then scaled by band saturation × global saturation × vibrance,
+   vibrance weighted `1/(1 + (C/0.08)²)` so it lifts faint colour and leaves
+   saturated colour alone. Lightness follows: an HK-neutral term
+   `(1 + 0.1·C)/(1 + 0.1·C′)` keeps perceived brightness where it was as chroma
+   moves, and **density** darkens saturated colour,
+   `L ·= 1 − 0.35 · density/100 · min(C′/0.25, 1)` — Fujifilm's Color Chrome
+   Effect in closed form, and most of what reads as rich rather than loud.
+   Back in linear RGB, a negative channel means the colour left the gamut;
+   chroma is then shrunk toward the neutral axis at constant lightness and hue
+   until it is back (eight bisection steps), instead of clipping a channel and
+   turning the hue.
+3. **The curve, per channel.** Contrast is a slope: `e′ = p · (e/p)^s` on the
+   gamma-encoded value, `p = 0.18^(1/2.2)`, `s = 1.6^(contrast/100)`, so
+   contrast +100 is a mid-tone slope of 1.6 and mid grey stays put. What the
+   power sends past white the **shoulder** brings back,
+   `k + (1 − k)(1 − exp(−(e − k)/(1 − k)))` above the knee
+   `k = 1 − 0.5 · shoulder/100`; shoulder 0 is a hard clamp. **Blacks** come
+   last: lift to 0.12 at +100, crush 0.06 at −100. Per channel rather than a
+   luminance ratio because a per-channel slope multiplies chroma by itself and
+   a per-channel shoulder walks highlights to white, the filmic path to white
+   the tone stage cannot produce. SDR range only; headroom above SDR white
+   passes through additively.
+4. **Split tone**, `grSplitTone` from `Common.metal`, the toning stage's block
+   driven from the preset. `toning` still runs after the style.
+
+Why this shape: measured against the cameras' own JPEGs on the test RAWs, the
+neutral rendition already matches them in mean chroma and in luminance spread,
+and a contrast made by mixing toward a smoothstep cannot change luminance
+spread at all — an endpoint-fixed curve has a mean slope of exactly 1 — so
+every style read as a chroma-only change. The tables are tuned to ratios
+against neutral averaged over five daylight RAWs: Vivid Slide and Teal and
+Orange near 1.4× chroma and 1.25× luminance spread, Chrome 1.25× and 1.27×,
+the negatives near 1× both, Soft Cinema 0.77× and 0.89×, Bleach Bypass 0.36×
+and 1.37×. Cameras' vivid modes sit at 1.2–1.3× a standard rendering's chroma
+and anything past 1.3× is generally judged excessive, so Vivid Slide is
+deliberately just over that line.
+
+Constants live once per language: `ColorStyleCurve` and `ColorStyleChroma` in
+Swift, `kStyle*` in `Style.metal`; `ColorStyleTests` pins each block's GPU
+result to its CPU mirror.
 
 ## Output modes
 

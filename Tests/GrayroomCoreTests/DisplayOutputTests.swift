@@ -12,7 +12,7 @@ final class DisplayOutputTests: XCTestCase {
 
     private func hdrEdit(_ on: Bool) -> EditState {
         var e = EditState()
-        e.bwMix.enabled = false          // neutral patches, no mixer in the way
+        e.treatment = .color             // neutral patches, no mixer in the way
         e.hdr = on
         return e
     }

@@ -35,11 +35,19 @@ struct Sidebar: View {
                 HistogramView(model: model.histogram,
                               sdrWhiteMarker: model.sdrWhiteMarker)
                 Divider()
+                TreatmentPanel(model: model)
+                if model.store.edit.treatment == .color {
+                    Divider()
+                    StylePanel(model: model)
+                }
+                Divider()
                 WhiteBalancePanel(model: model)
                 Divider()
                 TonePanel(model: model)
-                Divider()
-                BWMixPanel(model: model)
+                if model.store.edit.treatment == .blackAndWhite {
+                    Divider()
+                    BWMixPanel(model: model)
+                }
                 Divider()
                 ToningPanel(model: model)
                 Divider()
@@ -56,6 +64,79 @@ struct Sidebar: View {
     }
 }
 
+// MARK: - Treatment and style
+
+private struct TreatmentPanel: View {
+    let model: AppModel
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("Treatment")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Picker("", selection: treatment) {
+                Text("Color").tag(EditState.Treatment.color)
+                Text("Black & White").tag(EditState.Treatment.blackAndWhite)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .controlProbe("treatment")
+        }
+    }
+
+    private var treatment: Binding<EditState.Treatment> {
+        Binding(get: { model.store.edit.treatment },
+                set: { model.setTreatment($0) })
+    }
+}
+
+/// The ten fixed looks, plus Neutral. A list and not a menu, the way
+/// Lightroom's profile browser is: picking one moves no slider.
+private struct StylePanel: View {
+    let model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            PanelHeader(title: "Style")
+            ForEach(EditState.ColorStyle.allCases, id: \.self) { style in
+                StyleRow(model: model, style: style)
+            }
+        }
+    }
+}
+
+private struct StyleRow: View {
+    let model: AppModel
+    let style: EditState.ColorStyle
+
+    private var isSelected: Bool { model.store.edit.style == style }
+
+    var body: some View {
+        Button {
+            model.setStyle(style)
+        } label: {
+            HStack(spacing: 4) {
+                Text(style.displayName)
+                    .font(.system(size: 11))
+                Spacer(minLength: 4)
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+            }
+            .padding(.horizontal, 4)
+            .frame(height: 22)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(isSelected ? Color.accentColor.opacity(0.25) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+        .controlProbe("style-\(style.rawValue)")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+}
+
 // MARK: - White balance
 
 private struct WhiteBalancePanel: View {
@@ -64,9 +145,20 @@ private struct WhiteBalancePanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             PanelHeader(title: "White Balance", trailing: AnyView(
-                Button("As Shot") { model.store.resetWhiteBalanceToAsShot() }
-                    .controlSize(.mini)
-                    .disabled(model.store.isAsShotWhiteBalance)
+                HStack(spacing: 6) {
+                    Button {
+                        model.toggleWhiteBalanceTool()
+                    } label: {
+                        Image(systemName: "eyedropper")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(model.tool == .whiteBalance ? Color.accentColor : Color.secondary)
+                    .controlProbe("wb-picker")
+                    .help("White Balance Selector (W)")
+                    Button("As Shot") { model.store.resetWhiteBalanceToAsShot() }
+                        .controlSize(.mini)
+                        .disabled(model.store.isAsShotWhiteBalance)
+                }
             ))
             if model.store.isAsShotWhiteBalance {
                 Text("As shot — changing either value re-decodes the RAW")
@@ -177,20 +269,7 @@ private struct BWMixPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            PanelHeader(title: "B&W Mix", trailing: AnyView(
-                Toggle("B&W", isOn: Binding(
-                    get: { model.store.edit.bwMix.enabled },
-                    set: { v in model.store.perform(v ? "Enable B&W" : "Disable B&W") {
-                        $0.bwMix.enabled = v
-                    } }))
-                    .toggleStyle(.checkbox)
-                    .controlSize(.mini)
-            ))
-            if !model.store.edit.bwMix.enabled {
-                Text("Colour passthrough — the mixer and the targeted tool do nothing")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-            }
+            PanelHeader(title: "B&W Mix")
             ForEach(Array(BWMixBands.names.enumerated()), id: \.offset) { index, name in
                 HStack(spacing: 6) {
                     Circle()
@@ -203,6 +282,7 @@ private struct BWMixPanel: View {
                 }
             }
         }
+        .controlProbe("bw-mix")
     }
 }
 

@@ -178,6 +178,9 @@ final class AppModel {
         }
     }
     var eraserActive = false { didSet { canvas?.eraserActive = eraserActive } }
+    /// A white balance pick is decoding off the main thread; the self-test's
+    /// settle waits for it like a render.
+    private(set) var isPickingWhiteBalance = false
     var showBeforeAfter = false { didSet { pushTextureToCanvas() } }
     var showMaskOverlay = false { didSet { requestRender(force: true) } }
     private(set) var zoomPercent: Double = 100
@@ -1660,6 +1663,51 @@ final class AppModel {
         return BrushSizing.diameterPixels(size: store.brush.size, imageSize: reference)
     }
 
+    // MARK: - Treatment
+
+    /// Lightroom's V.
+    func toggleTreatment() {
+        setTreatment(store.edit.treatment == .blackAndWhite ? .color : .blackAndWhite)
+    }
+
+    /// The targeted tool drives the B&W mix, so colour drops it.
+    func setTreatment(_ treatment: EditState.Treatment) {
+        guard mode == .develop, treatment != store.edit.treatment else { return }
+        store.perform("Treatment") { $0.treatment = treatment }
+        if treatment == .color, tool == .targeted { tool = .pan }
+    }
+
+    func setStyle(_ style: EditState.ColorStyle) {
+        guard mode == .develop else { return }
+        store.setStyle(style)
+    }
+
+    /// Lightroom's T. The tool drives the B&W mix, so the colour treatment
+    /// refuses it rather than selecting a tool that could not move anything.
+    func toggleTargetedTool() {
+        guard store.edit.treatment == .blackAndWhite else {
+            statusMessage = "The targeted tool adjusts the B&W mix"
+            return
+        }
+        tool = (tool == .targeted) ? .pan : .targeted
+    }
+
+    // MARK: - White balance selector
+
+    /// Lightroom's W. There is no edit behind the Library's loupe, so the tool
+    /// is a Develop one.
+    func toggleWhiteBalanceTool() {
+        guard mode == .develop else { return }
+        tool = tool == .whiteBalance ? .pan : .whiteBalance
+    }
+
+    /// Escape, which only means something for a tool that is waiting for a
+    /// click.
+    func dismissTool() {
+        guard tool == .whiteBalance else { return }
+        tool = .pan
+    }
+
     // MARK: - Zoom commands
 
     func zoomToFit() { activeCanvas?.zoomToFit() }
@@ -1815,6 +1863,8 @@ extension AppModel: CanvasInputHandler {
     }
 
     func canvasBeginTargeted(atNormalized p: CGPoint) {
+        // Undo can put the treatment back to colour while the tool is selected.
+        guard store.edit.treatment == .blackAndWhite else { return }
         guard let service, let decoded else { return }
         store.beginGesture()
         targeted = TargetedSession(baseline: store.edit.bwMix.sliderValues, hue: nil)
@@ -1840,6 +1890,35 @@ extension AppModel: CanvasInputHandler {
             }
             self.targeted = session
             self.applyTargeted()
+        }
+    }
+
+    /// One click sets the white balance and puts the tool away, as Lightroom's
+    /// does. A clipped sample sets neither and keeps the tool armed: the area
+    /// says nothing about the illuminant, so there is nothing to apply.
+    func canvasPickWhiteBalance(atNormalized p: CGPoint) {
+        guard mode == .develop, let service, let url = imageURL else { return }
+        isPickingWhiteBalance = true
+        service.pickWhiteBalance(url: url, edit: store.edit, normalized: p) { [weak self] result in
+            guard let self else { return }
+            self.isPickingWhiteBalance = false
+            let pick: WhiteBalancePick
+            switch result {
+            case .success(let value): pick = value
+            case .failure(let error):
+                self.statusMessage = "White balance: \(error.localizedDescription)"
+                return
+            }
+            guard !pick.isClipped else {
+                self.statusMessage = "The clicked area is too bright to set the white balance. "
+                    + "Please click on a less bright neutral area"
+                return
+            }
+            self.store.perform("White Balance") { $0.whiteBalance = pick.whiteBalance }
+            self.statusMessage = String(format: "White balance %.0f K, tint %+.0f",
+                                        pick.whiteBalance.temperature ?? 0,
+                                        pick.whiteBalance.tint ?? 0)
+            self.tool = .pan
         }
     }
 
@@ -1882,7 +1961,7 @@ extension AppModel: CanvasInputHandler {
         case .toggleBrush:
             tool = (tool == .brush) ? .pan : .brush
         case .toggleTargeted:
-            tool = (tool == .targeted) ? .pan : .targeted
+            toggleTargetedTool()
         case .sizeStep(let n):
             updateBrush { $0.size = BrushSizing.adjustedSize($0.size, steps: n) }
             statusMessage = String(format: "Brush %.0f px", brushDiameterPixels)

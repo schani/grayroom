@@ -52,6 +52,7 @@ final class EditStateFingerprintTests: XCTestCase {
             ("clarity", { $0.clarity = 20 }),
             ("bw mix", { $0.bwMix.red = 30 }),
             ("toning", { $0.toning.highlightSaturation = 25 }),
+            ("style", { $0.style = .chrome }),
             ("hdr", { $0.hdr = true }),
             ("white balance", { $0.whiteBalance = EditState.WhiteBalance(temperature: 4000) }),
         ]

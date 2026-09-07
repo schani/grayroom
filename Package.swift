@@ -24,6 +24,7 @@ let package = Package(
                 .copy("Shaders/Clarity.metal"),
                 .copy("Shaders/Mask.metal"),
                 .copy("Shaders/Toning.metal"),
+                .copy("Shaders/Style.metal"),
                 .copy("Shaders/Output.metal"),
                 .copy("Shaders/Histogram.metal"),
                 .copy("Shaders/Downsample.metal"),

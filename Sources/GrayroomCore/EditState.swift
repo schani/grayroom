@@ -12,7 +12,13 @@ public struct EditState: Codable, Equatable, Sendable {
     public var version: Int
     public var whiteBalance: WhiteBalance
     public var tone: Tone
+    /// Lightroom's Treatment. It chooses what the pipeline's `mix` slot runs:
+    /// the B&W mixer, or the colour style.
+    public var treatment: Treatment
     public var bwMix: BWMix
+    /// The colour rendition, only rendered under `.color`. `.neutral` is the
+    /// pipeline's own rendition — no style pass runs at all.
+    public var style: ColorStyle
     /// Global clarity amount (0…100). Clarity is positive-only: there is no
     /// smoothing/glow operator, so negative values have no meaning and are
     /// clamped away (see `init(from:)` and `ClarityMapping.parameters(for:)`).
@@ -40,7 +46,9 @@ public struct EditState: Codable, Equatable, Sendable {
         version: Int = EditState.currentVersion,
         whiteBalance: WhiteBalance = WhiteBalance(),
         tone: Tone = Tone(),
+        treatment: Treatment = .blackAndWhite,
         bwMix: BWMix = BWMix(),
+        style: ColorStyle = .neutral,
         clarity: Double = 0,
         toning: Toning = Toning(),
         masks: [Mask] = [],
@@ -49,7 +57,9 @@ public struct EditState: Codable, Equatable, Sendable {
         self.version = version
         self.whiteBalance = whiteBalance
         self.tone = tone
+        self.treatment = treatment
         self.bwMix = bwMix
+        self.style = style
         self.clarity = clarity
         self.toning = toning
         self.masks = masks
@@ -57,7 +67,7 @@ public struct EditState: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case version, whiteBalance, tone, bwMix, clarity, toning, masks, hdr
+        case version, whiteBalance, tone, treatment, bwMix, style, clarity, toning, masks, hdr
     }
 
     public init(from decoder: Decoder) throws {
@@ -65,7 +75,13 @@ public struct EditState: Codable, Equatable, Sendable {
         version = try c.decodeIfPresent(Int.self, forKey: .version) ?? EditState.currentVersion
         whiteBalance = try c.decodeIfPresent(WhiteBalance.self, forKey: .whiteBalance) ?? WhiteBalance()
         tone = try c.decodeIfPresent(Tone.self, forKey: .tone) ?? Tone()
+        // An unknown spelling falls back to the default rather than failing,
+        // exactly like a missing key.
+        treatment = Treatment(rawValue: try c.decodeIfPresent(String.self, forKey: .treatment) ?? "")
+            ?? .blackAndWhite
         bwMix = try c.decodeIfPresent(BWMix.self, forKey: .bwMix) ?? BWMix()
+        style = ColorStyle(rawValue: try c.decodeIfPresent(String.self, forKey: .style) ?? "")
+            ?? .neutral
         // Lenient, not strict: an edit stored before clarity became
         // positive-only (and `--set clarity=-50`) loads with the value clamped
         // into 0…100 rather than failing.
@@ -95,6 +111,35 @@ public struct EditState: Codable, Equatable, Sendable {
     }
 
     // MARK: - Nested types
+
+    /// Lightroom's Treatment.
+    public enum Treatment: String, Codable, CaseIterable, Sendable {
+        case blackAndWhite, color
+    }
+
+    /// The ten fixed colour styles, plus `neutral`. Only rendered under
+    /// `Treatment.color`; `neutral` is the pipeline's own rendition, with no
+    /// style pass. The parameter tables are in `Stages/ColorStyle.swift`.
+    public enum ColorStyle: String, Codable, CaseIterable, Sendable {
+        case neutral, vividSlide, chrome, mutedChrome, portraitNegative, pastelNegative,
+             nostalgicNegative, retroNegative, softCinema, tealAndOrange, bleachBypass
+
+        public var displayName: String {
+            switch self {
+            case .neutral: return "Neutral"
+            case .vividSlide: return "Vivid Slide"
+            case .chrome: return "Chrome"
+            case .mutedChrome: return "Muted Chrome"
+            case .portraitNegative: return "Portrait Negative"
+            case .pastelNegative: return "Pastel Negative"
+            case .nostalgicNegative: return "Nostalgic Negative"
+            case .retroNegative: return "Retro Negative"
+            case .softCinema: return "Soft Cinema"
+            case .tealAndOrange: return "Teal and Orange"
+            case .bleachBypass: return "Bleach Bypass"
+            }
+        }
+    }
 
     /// `nil` means "use the camera as-shot value".
     public struct WhiteBalance: Codable, Equatable, Sendable {
@@ -186,13 +231,10 @@ public struct EditState: Codable, Equatable, Sendable {
         public var blue: Double
         public var purple: Double
         public var magenta: Double
-        /// `false` renders a colour passthrough (debugging aid).
-        public var enabled: Bool
 
         public init(
             red: Double = 0, orange: Double = 0, yellow: Double = 0, green: Double = 0,
-            aqua: Double = 0, blue: Double = 0, purple: Double = 0, magenta: Double = 0,
-            enabled: Bool = true
+            aqua: Double = 0, blue: Double = 0, purple: Double = 0, magenta: Double = 0
         ) {
             self.red = red
             self.orange = orange
@@ -202,11 +244,10 @@ public struct EditState: Codable, Equatable, Sendable {
             self.blue = blue
             self.purple = purple
             self.magenta = magenta
-            self.enabled = enabled
         }
 
         private enum CodingKeys: String, CodingKey {
-            case red, orange, yellow, green, aqua, blue, purple, magenta, enabled
+            case red, orange, yellow, green, aqua, blue, purple, magenta
         }
 
         public init(from decoder: Decoder) throws {
@@ -219,7 +260,6 @@ public struct EditState: Codable, Equatable, Sendable {
             blue = try c.decodeIfPresent(Double.self, forKey: .blue) ?? 0
             purple = try c.decodeIfPresent(Double.self, forKey: .purple) ?? 0
             magenta = try c.decodeIfPresent(Double.self, forKey: .magenta) ?? 0
-            enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         }
 
         /// Sliders in Lightroom hue-band order (red … magenta), clamped.

@@ -133,7 +133,7 @@ struct EditOptions: ParsableArguments {
     var developmentOrdinal: Int?
 
     @Option(name: .customLong("set"),
-            help: ArgumentHelp("Override an edit value, e.g. tone.exposure=1.0 or bwMix.enabled=false.",
+            help: ArgumentHelp("Override an edit value, e.g. tone.exposure=1.0 or treatment=color.",
                                discussion: "Values are clamped to their documented ranges, "
                                    + "not rejected: clarity is 0…100 (positive only), so "
                                    + "clarity=-50 loads as 0. Per-mask clarity deltas "

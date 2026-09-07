@@ -106,6 +106,17 @@ public final class EditStateStore {
         endGesture(named: name)
     }
 
+    /// Lightroom's V.
+    public func toggleTreatment() {
+        perform("Treatment") {
+            $0.treatment = $0.treatment == .blackAndWhite ? .color : .blackAndWhite
+        }
+    }
+
+    public func setStyle(_ style: EditState.ColorStyle) {
+        perform("Style") { $0.style = style }
+    }
+
     /// Wholesale replacement (opening a file, loading a stored edit, undo/redo).
     ///
     /// `name == nil` means "this state came *from* storage": the undo stack is

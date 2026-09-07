@@ -189,6 +189,37 @@ final class CanvasBrushAndTargetedTests: XCTestCase {
         XCTAssertEqual(h.handler.targetedEndCount, 0)
     }
 
+    // MARK: - White balance selector
+
+    /// One click, on the clicked pixel — and a drag under the same tool adds
+    /// nothing, because the eyedropper is done the moment it fires.
+    func testWhiteBalancePicksTheClickedPixelAndIgnoresTheDrag() {
+        h.canvas.zoomToActualSize()
+        let t = h.canvas.transform
+        h.canvas.tool = .whiteBalance
+        h.send(.leftMouseDown, at: h.windowPoint(rightOf: 260, below: 190))
+        h.send(.leftMouseUp, at: h.windowPoint(rightOf: 260, below: 190))
+
+        XCTAssertEqual(h.handler.whiteBalancePicks.count, 1)
+        let want = h.expectedNormalized(rightOf: 260, below: 190, zoom: t.zoom,
+                                        center: t.center, imageSize: image)
+        XCTAssertClose(h.handler.whiteBalancePicks[0].x, want.x, 1e-6)
+        XCTAssertClose(h.handler.whiteBalancePicks[0].y, want.y, 1e-6)
+
+        h.handler.reset()
+        h.drag(through: [(400, 300), (350, 250), (300, 200)])
+        XCTAssertEqual(h.handler.whiteBalancePicks.count, 1,
+                       "only the mouse-down picks; the drag and the release add nothing")
+        XCTAssertEqual(h.handler.begins.count, 0)
+        XCTAssertEqual(h.handler.targetedBegins.count, 0)
+        XCTAssertEqual(h.canvas.transform, t, "the eyedropper must not pan")
+    }
+
+    func testWhiteBalanceUsesACrosshair() {
+        h.canvas.tool = .whiteBalance
+        XCTAssertEqual(h.canvas.toolCursor, NSCursor.crosshair)
+    }
+
     // MARK: - Targeted adjustment
 
     /// The gesture begins on the pixel that was clicked — that is the colour the

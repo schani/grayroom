@@ -20,10 +20,36 @@ final class PipelinePassesTests: XCTestCase {
         XCTAssertEqual(try stages(EditState()), [.tone, .mix])
     }
 
-    func testMixDisabledLeavesToneAlone() throws {
+    /// The neutral style is the pipeline's own rendition, so the colour
+    /// treatment runs nothing in the mix slot.
+    func testTheNeutralStyleRunsNoMixPass() throws {
         var edit = EditState()
-        edit.bwMix.enabled = false
+        edit.treatment = .color
         XCTAssertEqual(try stages(edit), [.tone])
+    }
+
+    func testAColourStyleFillsTheMixSlot() throws {
+        var edit = EditState()
+        edit.treatment = .color
+        edit.style = .chrome
+        XCTAssertEqual(try stages(edit), [.tone, .mix])
+    }
+
+    /// `style` is only rendered under the colour treatment: a B&W edit that
+    /// carries one renders exactly as it would with `.neutral`, pixel for pixel.
+    func testTheStyleIsInertUnderTheBlackAndWhiteTreatment() throws {
+        let (ctx, pipe) = try TestGPU.require()
+        var styled = EditState()
+        styled.style = .chrome
+        XCTAssertEqual(try stages(styled), [.tone, .mix])
+
+        let input = try ctx.makePatchTexture([(0.18, 0.18, 0.18), (0.40, 0.02, 0.02),
+                                              (0.02, 0.02, 0.40), (0.90, 0.90, 0.90)])
+        let a = try TextureReadback.read(
+            pipe.render(input: input, edit: EditState(), upTo: .output).texture)
+        let b = try TextureReadback.read(
+            pipe.render(input: input, edit: styled, upTo: .output).texture)
+        XCTAssertEqual(a.pixels, b.pixels)
     }
 
     func testClarityAddsItsPassBeforeTheMixer() throws {
@@ -44,7 +70,7 @@ final class PipelinePassesTests: XCTestCase {
 
     func testEverythingButTheMixer() throws {
         var edit = EditState()
-        edit.bwMix.enabled = false
+        edit.treatment = .color
         edit.clarity = 30
         edit.toning.shadowSaturation = 40
         let planned = try stages(edit)

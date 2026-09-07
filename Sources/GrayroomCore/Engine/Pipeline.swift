@@ -7,7 +7,8 @@ import Metal
 ///     -> masks      (rasterise strokes -> per-pixel parameter maps) [no masks: skipped]
 ///     -> tone       (exposure + 5 tone controls + local deltas, ratio-preserving)
 ///     -> clarity    (fast local Laplacian on log2 luminance, per-pixel amount) [skipped at 0]
-///     -> mix        (8 hue bands -> gray)          [skipped when disabled]
+///     -> mix        (B&W mixer, or the colour style, by treatment)
+///                                                  [colour + neutral: skipped]
 ///     -> toning     (split tone, luminance-neutral) [skipped when identity]
 ///     -> output     (file: linear -> sRGB, clamped 0…1;
 ///                    display: linear, clamped 0…W)
@@ -17,8 +18,8 @@ import Metal
 /// actually needs, and `render` runs that list.
 ///
 /// Everything ahead of `mix` is colour-agnostic — it scales all three channels
-/// alike, preserving their ratios — and `mix` is the slot the B&W mixer
-/// occupies.
+/// alike, preserving their ratios — and `mix` is the slot `EditState.treatment`
+/// fills: the B&W mixer, or the colour style.
 ///
 /// With zero active masks nothing about the encoding changes: the tone kernel's
 /// `hasLocal` flag is 0 and the clarity stage gets its 1x1 global amount
@@ -39,6 +40,7 @@ public final class Pipeline {
     private let toneStage: ToneStage
     private let clarityStage: ClarityStage
     private let bwMixStage: BWMixStage
+    private let styleStage: StyleStage
     private let toningStage: ToningStage
     private let outputStage: OutputStage
     let maskStage: MaskStage
@@ -78,14 +80,15 @@ public final class Pipeline {
         toneStage = try ToneStage(context: context)
         clarityStage = try ClarityStage(context: context)
         bwMixStage = try BWMixStage(context: context)
+        styleStage = try StyleStage(context: context)
         toningStage = try ToningStage(context: context)
         outputStage = try OutputStage(context: context)
         maskStage = try MaskStage(context: context)
     }
 
-    /// Stage boundaries, in pipeline order; `mix` is the slot the B&W mixer
-    /// occupies. Useful for golden tests that need to inspect an intermediate
-    /// (still linear) result.
+    /// Stage boundaries, in pipeline order; `mix` is the slot the B&W mixer or
+    /// the colour style occupies. Useful for golden tests that need to inspect
+    /// an intermediate (still linear) result.
     public enum Stage: Int, CaseIterable, Sendable {
         case tone, clarity, mix, toning, output
     }
@@ -158,10 +161,20 @@ public final class Pipeline {
         }
 
         // The mixer slot, where the colour-agnostic part of the pipeline ends.
-        if edit.bwMix.enabled {
+        // The neutral style is the pipeline's own rendition, so it runs nothing.
+        switch edit.treatment {
+        case .blackAndWhite:
             passes.append(Pass(stage: .mix) { cb, src, dst in
                 try self.bwMixStage.encode(cb, source: src, destination: dst, mix: edit.bwMix)
             })
+        case .color:
+            if edit.style != .neutral {
+                let parameters = ColorStyleParameters.parameters(for: edit.style)
+                passes.append(Pass(stage: .mix) { cb, src, dst in
+                    try self.styleStage.encode(cb, source: src, destination: dst,
+                                               parameters: parameters)
+                })
+            }
         }
 
         if !edit.toning.isIdentity {
@@ -356,6 +369,19 @@ public final class Pipeline {
         guard let cb = context.commandQueue.makeCommandBuffer() else { throw MetalError.encoderFailed }
         let dst = try context.makeWorkingTexture(width: input.width, height: input.height)
         try toneStage.encode(cb, source: input, destination: dst, tone: tone, params: params)
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let err = cb.error { throw err }
+        return dst
+    }
+
+    /// Test hook: the style stage alone, from hand-built parameters rather than
+    /// one of the presets.
+    func renderStyleOnly(input: MTLTexture,
+                         parameters: ColorStyleParameters) throws -> MTLTexture {
+        guard let cb = context.commandQueue.makeCommandBuffer() else { throw MetalError.encoderFailed }
+        let dst = try context.makeWorkingTexture(width: input.width, height: input.height)
+        try styleStage.encode(cb, source: input, destination: dst, parameters: parameters)
         cb.commit()
         cb.waitUntilCompleted()
         if let err = cb.error { throw err }

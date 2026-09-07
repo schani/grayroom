@@ -21,6 +21,7 @@ final class RecordingHandler: CanvasInputHandler {
     var targetedBegins: [CGPoint] = []
     var targetedDrags: [Double] = []
     var targetedEndCount = 0
+    var whiteBalancePicks: [CGPoint] = []
     var transforms: [CanvasTransform] = []
     var keyCommands: [CanvasKeyCommand] = []
     var beforeAfterHeld: [Bool] = []
@@ -37,6 +38,7 @@ final class RecordingHandler: CanvasInputHandler {
     func canvasBeginTargeted(atNormalized p: CGPoint) { targetedBegins.append(p) }
     func canvasDragTargeted(dragPixels: Double) { targetedDrags.append(dragPixels) }
     func canvasEndTargeted() { targetedEndCount += 1 }
+    func canvasPickWhiteBalance(atNormalized p: CGPoint) { whiteBalancePicks.append(p) }
     func canvasKeyCommand(_ command: CanvasKeyCommand) { keyCommands.append(command) }
     func canvasBeforeAfterHeld(_ held: Bool) { beforeAfterHeld.append(held) }
 
@@ -44,6 +46,7 @@ final class RecordingHandler: CanvasInputHandler {
         begins.removeAll(); extends.removeAll(); extendPressures.removeAll()
         endCount = 0
         targetedBegins.removeAll(); targetedDrags.removeAll(); targetedEndCount = 0
+        whiteBalancePicks.removeAll()
         transforms.removeAll(); keyCommands.removeAll(); beforeAfterHeld.removeAll()
     }
 }

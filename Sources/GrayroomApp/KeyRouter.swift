@@ -200,11 +200,15 @@ final class KeyRouter {
         case "7": model.toggleColorLabel(.yellow)
         case "8": model.toggleColorLabel(.green)
         case "9": model.toggleColorLabel(.blue)
+        case "v": model.toggleTreatment()
         // The canvas's own commands, routed here so they keep working when the
         // sidebar — not the canvas — has the keyboard. `\` is above, with the
         // key-up it needs.
         case "b": model.canvasKeyCommand(.toggleBrush)
         case "t": model.canvasKeyCommand(.toggleTargeted)
+        case "w": model.toggleWhiteBalanceTool()
+        // Lightroom's other way out of the eyedropper.
+        case "\u{1b}": model.dismissTool()
         // Lightroom's `e`: back to the Library, in the loupe, on this photo.
         // The brush's eraser is Option-drag (and the sidebar's own toggle),
         // which is where Lightroom keeps it too.

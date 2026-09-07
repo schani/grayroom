@@ -29,14 +29,12 @@ extension SelfTest {
         model.tool = .brush
     }
 
-    /// Paints a diagonal across the image's top-left quadrant with synthesized
-    /// mouse events and returns the normalized points it aimed at.
-    @discardableResult
-    static func paintStroke(canvas: CanvasNSView, window: NSWindow,
-                                    model: AppModel) -> [CGPoint] {
+    /// Normalised image point -> window point, derived from the window layout
+    /// alone and never from `CanvasTransform` — that is the transform under
+    /// test.
+    static func windowPoint(canvas: CanvasNSView, window: NSWindow, model: AppModel,
+                            normalized n: CGPoint) -> CGPoint {
         let imageSize = model.previewSize
-
-        // --- Ground truth, computed from the window layout only -------------
         // Where the fitted image sits inside the canvas, in device pixels:
         let scale = window.backingScaleFactor
         let viewW = canvas.bounds.width * scale
@@ -44,25 +42,29 @@ extension SelfTest {
         let zoom = min(min(viewW / imageSize.width, viewH / imageSize.height), 1)
         let drawnW = imageSize.width * zoom
         let drawnH = imageSize.height * zoom
-        let originX = (viewW - drawnW) / 2
-        let originY = (viewH - drawnH) / 2
+        let deviceX = (viewW - drawnW) / 2 + n.x * drawnW   // from the canvas's left
+        let deviceY = (viewH - drawnH) / 2 + n.y * drawnH   // *below* the canvas's top
         // The canvas rect in the window's y-**up** base coordinates:
         let rect = canvas.convert(canvas.bounds, to: nil)
+        return CGPoint(x: rect.minX + deviceX / scale, y: rect.maxY - deviceY / scale)
+    }
 
-        /// Normalised image point -> window point, without touching
-        /// `CanvasTransform`.
+    /// Paints a diagonal across the image's top-left quadrant with synthesized
+    /// mouse events and returns the normalized points it aimed at.
+    @discardableResult
+    static func paintStroke(canvas: CanvasNSView, window: NSWindow,
+                                    model: AppModel) -> [CGPoint] {
         func windowPoint(normalized n: CGPoint) -> CGPoint {
-            let deviceX = originX + n.x * drawnW          // from the canvas's left
-            let deviceY = originY + n.y * drawnH          // *below* the canvas's top
-            return CGPoint(x: rect.minX + deviceX / scale,
-                           y: rect.maxY - deviceY / scale)
+            self.windowPoint(canvas: canvas, window: window, model: model, normalized: n)
         }
 
         // A diagonal across the image's TOP-LEFT quadrant.
         let targets: [CGPoint] = stride(from: 0.20, through: 0.36, by: 0.02)
             .map { CGPoint(x: $0, y: $0) }
-        log(String(format: "self-test: preview %.0fx%.0f, canvas %.0fx%.0f device px, zoom %.4f",
-                   imageSize.width, imageSize.height, viewW, viewH, zoom))
+        let scale = window.backingScaleFactor
+        log(String(format: "self-test: preview %.0fx%.0f, canvas %.0fx%.0f device px",
+                   model.previewSize.width, model.previewSize.height,
+                   canvas.bounds.width * scale, canvas.bounds.height * scale))
         log("self-test: intended normalized points = "
             + targets.map { String(format: "(%.3f,%.3f)", $0.x, $0.y) }.joined(separator: " "))
 

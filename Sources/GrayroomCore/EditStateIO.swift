@@ -110,7 +110,7 @@ extension EditState {
     }
 
     /// Applies `key=value` overrides where `key` is a dotted JSON path
-    /// (`tone.exposure`, `bwMix.enabled`, `clarity`, …).
+    /// (`tone.exposure`, `treatment`, `clarity`, …).
     ///
     /// Array elements are addressed with a bracket subscript:
     /// `masks[0].adjustments.exposure=1.5`. The mask must already exist —
