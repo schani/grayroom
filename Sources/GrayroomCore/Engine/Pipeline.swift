@@ -7,11 +7,18 @@ import Metal
 ///     -> masks      (rasterise strokes -> per-pixel parameter maps) [no masks: skipped]
 ///     -> tone       (exposure + 5 tone controls + local deltas, ratio-preserving)
 ///     -> clarity    (fast local Laplacian on log2 luminance, per-pixel amount) [skipped at 0]
-///     -> bwMix      (8 hue bands -> gray)          [skipped when disabled]
+///     -> mix        (8 hue bands -> gray)          [skipped when disabled]
 ///     -> toning     (split tone, luminance-neutral) [skipped when identity]
 ///     -> output     (file: linear -> sRGB, clamped 0…1;
 ///                    display: linear, clamped 0…W)
 ///     -> histogram tap (on the linear texture the output stage reads)
+///
+/// Each stage is a type in `Stages/`; `passes(for:)` lists the ones an edit
+/// actually needs, and `render` runs that list.
+///
+/// Everything ahead of `mix` is colour-agnostic — it scales all three channels
+/// alike, preserving their ratios — and `mix` is the slot the B&W mixer
+/// occupies.
 ///
 /// With zero active masks nothing about the encoding changes: the tone kernel's
 /// `hasLocal` flag is 0 and the clarity stage gets its 1x1 global amount
@@ -28,13 +35,12 @@ public final class Pipeline {
 
     public let context: MetalContext
 
-    private let tonePipeline: MTLComputePipelineState
-    private let bwMixPipeline: MTLComputePipelineState
-    private let toningPipeline: MTLComputePipelineState
-    private let outputPipeline: MTLComputePipelineState
-    private let displayOutputPipeline: MTLComputePipelineState
     private let histogramPipeline: MTLComputePipelineState
+    private let toneStage: ToneStage
     private let clarityStage: ClarityStage
+    private let bwMixStage: BWMixStage
+    private let toningStage: ToningStage
+    private let outputStage: OutputStage
     let maskStage: MaskStage
 
     /// Rasterisation depends only on the strokes and the resolution, never on
@@ -68,20 +74,20 @@ public final class Pipeline {
 
     public init(context: MetalContext) throws {
         self.context = context
-        tonePipeline = try context.computePipeline("toneKernel")
-        bwMixPipeline = try context.computePipeline("bwMixKernel")
-        toningPipeline = try context.computePipeline("toningKernel")
-        outputPipeline = try context.computePipeline("outputKernel")
-        displayOutputPipeline = try context.computePipeline("displayOutputKernel")
         histogramPipeline = try context.computePipeline("histogramKernel")
+        toneStage = try ToneStage(context: context)
         clarityStage = try ClarityStage(context: context)
+        bwMixStage = try BWMixStage(context: context)
+        toningStage = try ToningStage(context: context)
+        outputStage = try OutputStage(context: context)
         maskStage = try MaskStage(context: context)
     }
 
-    /// Stage boundaries, in pipeline order. Useful for golden tests that need to
-    /// inspect an intermediate (still linear) result.
+    /// Stage boundaries, in pipeline order; `mix` is the slot the B&W mixer
+    /// occupies. Useful for golden tests that need to inspect an intermediate
+    /// (still linear) result.
     public enum Stage: Int, CaseIterable, Sendable {
-        case tone, clarity, bwMix, toning, output
+        case tone, clarity, mix, toning, output
     }
 
     /// What the `output` stage produces.
@@ -93,6 +99,79 @@ public final class Pipeline {
         /// undithered, for an extended-linear-sRGB float16 drawable. `W` is
         /// `EditState.displayWhite`.
         case display
+    }
+
+    /// One image pass: reads `source`, writes `destination`, same size,
+    /// rgba16Float.
+    struct Pass {
+        let stage: Stage
+        let encode: (_ cb: MTLCommandBuffer,
+                     _ source: MTLTexture,
+                     _ destination: MTLTexture) throws -> Void
+    }
+
+    /// The adjustment passes this edit needs, in pipeline order. A stage that
+    /// would be the identity is left out, so the default edit is tone and mix
+    /// only. `output` is not here: it is fixed, and its mode comes from the
+    /// render call rather than the edit.
+    func passes(for edit: EditState, maps: MaskStage.Maps?,
+                width: Int, height: Int) -> [Pass] {
+        let masks = edit.activeMasks
+        var passes: [Pass] = []
+
+        // Local deltas are applied analytically on top of the global LUT's
+        // output; see Tone.metal and ToneCurve.applyToneDelta. The shoulder
+        // aims at the edit's ceiling whatever the output mode is — `hdr` is part
+        // of the rendition, so a file export of an HDR edit is that rendition
+        // clipped, not a different picture.
+        let hasLocalTone = maps != nil && masks.contains { $0.adjustments.affectsTone }
+        let toneParams = hasLocalTone ? maps!.paramsA : nil
+        passes.append(Pass(stage: .tone) { cb, src, dst in
+            try self.toneStage.encode(cb, source: src, destination: dst, tone: edit.tone,
+                                      params: toneParams, displayWhite: edit.displayWhite)
+        })
+
+        if edit.clarityActive {
+            let globalClarity = min(max(edit.clarity, 0), 100)
+            let localClarity = maps != nil && masks.contains { $0.adjustments.clarity != 0 }
+            if localClarity {
+                // One pyramid for the whole frame, always at the full-scale
+                // lift; the amount map scales it per pixel. A region whose
+                // deltas push the effective clarity below 0 gets amount 0.
+                let peak = MaskRasterizer.clarityRange(global: globalClarity, masks: masks).hi
+                if peak > 0 {
+                    let paramsB = maps!.paramsB
+                    passes.append(Pass(stage: .clarity) { cb, src, dst in
+                        let amount = try self.maskStage.encodeClarityAmount(
+                            cb, paramsB: paramsB, globalClarity: globalClarity,
+                            width: width, height: height)
+                        try self.clarityStage.encode(cb, source: src, destination: dst,
+                                                     clarity: peak, amountTexture: amount)
+                    })
+                }
+            } else {
+                passes.append(Pass(stage: .clarity) { cb, src, dst in
+                    try self.clarityStage.encode(cb, source: src, destination: dst,
+                                                 clarity: globalClarity)
+                })
+            }
+        }
+
+        // The mixer slot, where the colour-agnostic part of the pipeline ends.
+        if edit.bwMix.enabled {
+            passes.append(Pass(stage: .mix) { cb, src, dst in
+                try self.bwMixStage.encode(cb, source: src, destination: dst, mix: edit.bwMix)
+            })
+        }
+
+        if !edit.toning.isIdentity {
+            passes.append(Pass(stage: .toning) { cb, src, dst in
+                try self.toningStage.encode(cb, source: src, destination: dst,
+                                            toning: edit.toning)
+            })
+        }
+
+        return passes
     }
 
     public struct Result {
@@ -118,13 +197,9 @@ public final class Pipeline {
                        computeHistogram: Bool = false,
                        generateDisplayMipmaps: Bool = false) throws -> Result {
         let w = input.width, h = input.height
-        // The tone curve's shoulder aims at the edit's ceiling whatever the
-        // output mode is — `hdr` is part of the rendition, so a file export of
-        // an HDR edit is that rendition clipped, not a different picture.
-        let toneDisplayWhite = edit.displayWhite
         // The output clamp, and the number the histogram normalises against.
         // A file always ends at SDR white.
-        let outputCeiling = outputMode == .display ? toneDisplayWhite : 1.0
+        let outputCeiling = outputMode == .display ? edit.displayWhite : 1.0
 
         // Both working textures carry the pyramid: which of the two ends up
         // holding the result depends on how many stages ran, and a mipmapped
@@ -151,82 +226,12 @@ public final class Pipeline {
         func runs(_ stage: Stage) -> Bool { lastStage.rawValue >= stage.rawValue }
 
         // --- masks ----------------------------------------------------------
-        let masks = edit.activeMasks
-        let maps = try maskMaps(commandBuffer, masks: masks, width: w, height: h)
+        let maps = try maskMaps(commandBuffer, masks: edit.activeMasks, width: w, height: h)
 
-        // --- tone -----------------------------------------------------------
-        // Local deltas are applied analytically on top of the global LUT's
-        // output; see Tone.metal and ToneCurve.applyToneDelta.
-        let hasLocalTone = maps != nil && masks.contains { $0.adjustments.affectsTone }
-        try encodeTone(commandBuffer, src: src, dst: dst, tone: edit.tone,
-                       params: hasLocalTone ? maps!.paramsA : nil,
-                       displayWhite: toneDisplayWhite)
-        latest = dst
-        advance()
-
-        // --- clarity ---------------------------------------------------------
-        // Skipped entirely when nothing asks for it, so the default edit is
-        // bit-for-bit unchanged.
-        let globalClarity = min(max(edit.clarity, 0), 100)
-        let localClarity = maps != nil && masks.contains { $0.adjustments.clarity != 0 }
-        if runs(.clarity), edit.clarityActive {
-            if localClarity {
-                // One pyramid for the whole frame, always at the full-scale
-                // lift; the amount map scales it per pixel. A region whose
-                // deltas push the effective clarity below 0 gets amount 0.
-                let peak = MaskRasterizer.clarityRange(global: globalClarity, masks: masks).hi
-                if peak > 0 {
-                    let amount = try maskStage.encodeClarityAmount(
-                        commandBuffer,
-                        paramsB: maps!.paramsB,
-                        globalClarity: globalClarity,
-                        width: w, height: h)
-                    try clarityStage.encode(commandBuffer, source: src, destination: dst,
-                                            clarity: peak, amountTexture: amount)
-                    latest = dst
-                    advance()
-                }
-            } else {
-                try clarityStage.encode(commandBuffer, source: src, destination: dst,
-                                        clarity: globalClarity)
-                latest = dst
-                advance()
-            }
-        }
-
-        // --- B&W mix --------------------------------------------------------
-        if runs(.bwMix), edit.bwMix.enabled {
-            var sliders = edit.bwMix.sliders.map { Float($0) }
-            var bwU = BWMixUniforms(maxEV: Float(BWMixBands.maxEV),
-                                    satExponent: Float(BWMixBands.saturationExponent),
-                                    satKnee: Float(BWMixBands.saturationKnee))
-            try encode(commandBuffer, bwMixPipeline, w, h) { e in
-                e.setTexture(src, index: 0)
-                e.setTexture(dst, index: 1)
-                e.setBytes(&sliders, length: MemoryLayout<Float>.stride * 8, index: 0)
-                e.setBytes(&bwU, length: MemoryLayout<BWMixUniforms>.stride, index: 1)
-            }
-            latest = dst
-            advance()
-        }
-
-        // --- toning ---------------------------------------------------------
-        if runs(.toning), !edit.toning.isIdentity {
-            let t = edit.toning
-            var toningU = ToningUniforms(
-                shadowHue: Float(t.shadowHue),
-                shadowSat: Float(min(max(t.shadowSaturation, 0), 100) / 100),
-                highlightHue: Float(t.highlightHue),
-                highlightSat: Float(min(max(t.highlightSaturation, 0), 100) / 100),
-                balance: Float(min(max(t.balance, -100), 100) / 100),
-                strength: StageConstants.toningStrength,
-                crossoverHalfWidth: StageConstants.toningCrossoverHalfWidth,
-                lumaPreserve: StageConstants.toningLumaPreserve)
-            try encode(commandBuffer, toningPipeline, w, h) { e in
-                e.setTexture(src, index: 0)
-                e.setTexture(dst, index: 1)
-                e.setBytes(&toningU, length: MemoryLayout<ToningUniforms>.stride, index: 0)
-            }
+        // --- adjustments ---------------------------------------------------
+        let plan = passes(for: edit, maps: maps, width: w, height: h)
+        for pass in plan where runs(pass.stage) {
+            try pass.encode(commandBuffer, src, dst)
             latest = dst
             advance()
         }
@@ -238,20 +243,8 @@ public final class Pipeline {
         // touched after the last stage.
         let preOutput = src
         if runs(.output) {
-            switch outputMode {
-            case .file:
-                try encode(commandBuffer, outputPipeline, w, h) { e in
-                    e.setTexture(src, index: 0)
-                    e.setTexture(dst, index: 1)
-                }
-            case .display:
-                var white = Float(outputCeiling)
-                try encode(commandBuffer, displayOutputPipeline, w, h) { e in
-                    e.setTexture(src, index: 0)
-                    e.setTexture(dst, index: 1)
-                    e.setBytes(&white, length: MemoryLayout<Float>.stride, index: 0)
-                }
-            }
+            try outputStage.encode(commandBuffer, source: src, destination: dst,
+                                   mode: outputMode, ceiling: outputCeiling)
             latest = dst
             advance()
         }
@@ -266,7 +259,7 @@ public final class Pipeline {
                 options: .storageModeShared) else { throw MetalError.textureAllocationFailed }
             memset(buf.contents(), 0, buf.length)
             var white = Float(outputCeiling)
-            try encode(commandBuffer, histogramPipeline, w, h) { e in
+            try context.encodePass(commandBuffer, histogramPipeline, width: w, height: h) { e in
                 e.setTexture(preOutput, index: 0)
                 e.setBuffer(buf, offset: 0, index: 0)
                 e.setBytes(&white, length: MemoryLayout<Float>.stride, index: 1)
@@ -356,53 +349,16 @@ public final class Pipeline {
         return texture
     }
 
-    // MARK: - Tone
-
-    private func encodeTone(_ cb: MTLCommandBuffer,
-                            src: MTLTexture,
-                            dst: MTLTexture,
-                            tone: EditState.Tone,
-                            params: MTLTexture?,
-                            displayWhite: Double = 1.0) throws {
-        let lut = ToneCurve.makeLUT(for: tone, displayWhite: displayWhite)
-        let lutTexture = try context.makeLUTTexture(lut.values)
-        // A texture is always bound (a 1x1 dummy when there are no masks) so the
-        // kernel never reads an unbound argument; `hasLocal` gates the code path.
-        let paramsTexture = try params ?? context.makeWorkingTexture(width: 1, height: 1)
-        var toneU = ToneUniforms(minEV: lut.minEV, maxEV: lut.maxEV,
-                                 gainBelow: lut.gainBelow, gainAbove: lut.gainAbove,
-                                 lutSize: UInt32(lut.size),
-                                 hasLocal: params == nil ? 0 : 1)
-        try encode(cb, tonePipeline, dst.width, dst.height) { e in
-            e.setTexture(src, index: 0)
-            e.setTexture(dst, index: 1)
-            e.setTexture(lutTexture, index: 2)
-            e.setTexture(paramsTexture, index: 3)
-            e.setBytes(&toneU, length: MemoryLayout<ToneUniforms>.stride, index: 0)
-        }
-    }
-
     /// Test hook: the tone stage alone, with an explicit per-pixel parameter map.
     func renderToneOnly(input: MTLTexture,
                         tone: EditState.Tone,
                         params: MTLTexture?) throws -> MTLTexture {
         guard let cb = context.commandQueue.makeCommandBuffer() else { throw MetalError.encoderFailed }
         let dst = try context.makeWorkingTexture(width: input.width, height: input.height)
-        try encodeTone(cb, src: input, dst: dst, tone: tone, params: params)
+        try toneStage.encode(cb, source: input, destination: dst, tone: tone, params: params)
         cb.commit()
         cb.waitUntilCompleted()
         if let err = cb.error { throw err }
         return dst
-    }
-
-    private func encode(_ cb: MTLCommandBuffer,
-                        _ state: MTLComputePipelineState,
-                        _ w: Int, _ h: Int,
-                        _ body: (MTLComputeCommandEncoder) -> Void) throws {
-        guard let e = cb.makeComputeCommandEncoder() else { throw MetalError.encoderFailed }
-        e.setComputePipelineState(state)
-        body(e)
-        context.dispatch(e, state, width: w, height: h)
-        e.endEncoding()
     }
 }

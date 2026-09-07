@@ -55,7 +55,7 @@ final class MaskStage {
                         width: Int, height: Int) throws -> MTLTexture {
         var front = try context.makeAmountTexture(width: width, height: height)
         var back = try context.makeAmountTexture(width: width, height: height)
-        try encodePass(cb, clearPipeline, width, height) { e in
+        try context.encodePass(cb, clearPipeline, width: width, height: height) { e in
             e.setTexture(front, index: 0)
         }
 
@@ -74,7 +74,7 @@ final class MaskStage {
             var u = MaskStrokeUniforms(stampCount: UInt32(packed.count),
                                        density: Float(stroke.brush.densityCeiling),
                                        erase: stroke.erase ? 1 : 0)
-            try encodePass(cb, strokePipeline, width, height) { e in
+            try context.encodePass(cb, strokePipeline, width: width, height: height) { e in
                 e.setTexture(front, index: 0)
                 e.setTexture(back, index: 1)
                 e.setBuffer(buf, offset: 0, index: 0)
@@ -91,12 +91,12 @@ final class MaskStage {
                              width: Int, height: Int) throws -> MTLTexture {
         var front = try context.makeAmountTexture(width: width, height: height)
         var back = try context.makeAmountTexture(width: width, height: height)
-        try encodePass(cb, clearPipeline, width, height) { e in
+        try context.encodePass(cb, clearPipeline, width: width, height: height) { e in
             e.setTexture(front, index: 0)
         }
         for mask in masks {
             let coverage = try encodeCoverage(cb, mask: mask, width: width, height: height)
-            try encodePass(cb, unionPipeline, width, height) { e in
+            try context.encodePass(cb, unionPipeline, width: width, height: height) { e in
                 e.setTexture(front, index: 0)
                 e.setTexture(coverage, index: 1)
                 e.setTexture(back, index: 2)
@@ -117,8 +117,10 @@ final class MaskStage {
         var backA = try context.makeWorkingTexture(width: width, height: height)
         var frontB = try context.makeAmountTexture(width: width, height: height)
         var backB = try context.makeAmountTexture(width: width, height: height)
-        try encodePass(cb, clearPipeline, width, height) { e in e.setTexture(frontA, index: 0) }
-        try encodePass(cb, clearPipeline, width, height) { e in e.setTexture(frontB, index: 0) }
+        try context.encodePass(cb, clearPipeline,
+                               width: width, height: height) { e in e.setTexture(frontA, index: 0) }
+        try context.encodePass(cb, clearPipeline,
+                               width: width, height: height) { e in e.setTexture(frontB, index: 0) }
 
         for mask in masks {
             let coverage = try encodeCoverage(cb, mask: mask, width: width, height: height)
@@ -128,7 +130,7 @@ final class MaskStage {
                                            dHighlights: Float(a.highlights),
                                            dShadows: Float(a.shadows),
                                            dClarity: Float(a.clarity))
-            try encodePass(cb, accumulatePipeline, width, height) { e in
+            try context.encodePass(cb, accumulatePipeline, width: width, height: height) { e in
                 e.setTexture(coverage, index: 0)
                 e.setTexture(frontA, index: 1)
                 e.setTexture(backA, index: 2)
@@ -144,7 +146,7 @@ final class MaskStage {
         // saturate only at the documented range edges.
         var clampU = MaskClampUniforms(exposureLimit: Float(MaskAdjustments.exposureLimit),
                                        otherLimit: Float(MaskAdjustments.otherLimit))
-        try encodePass(cb, clampPipeline, width, height) { e in
+        try context.encodePass(cb, clampPipeline, width: width, height: height) { e in
             e.setTexture(frontA, index: 0)
             e.setTexture(backA, index: 1)
             e.setTexture(frontB, index: 2)
@@ -175,7 +177,7 @@ final class MaskStage {
         let amount = try context.makeAmountTexture(width: width, height: height)
         var u = MaskClarityUniforms(globalClarity: Float(min(max(globalClarity, 0), 100)),
                                     invReference: 1.0 / 100.0)
-        try encodePass(cb, clarityAmountPipeline, width, height) { e in
+        try context.encodePass(cb, clarityAmountPipeline, width: width, height: height) { e in
             e.setTexture(paramsB, index: 0)
             e.setTexture(amount, index: 1)
             e.setBytes(&u, length: MemoryLayout<MaskClarityUniforms>.stride, index: 0)
@@ -183,16 +185,4 @@ final class MaskStage {
         return amount
     }
 
-    // MARK: - Helpers
-
-    private func encodePass(_ cb: MTLCommandBuffer,
-                            _ state: MTLComputePipelineState,
-                            _ w: Int, _ h: Int,
-                            _ body: (MTLComputeCommandEncoder) -> Void) throws {
-        guard let e = cb.makeComputeCommandEncoder() else { throw MetalError.encoderFailed }
-        e.setComputePipelineState(state)
-        body(e)
-        context.dispatch(e, state, width: w, height: h)
-        e.endEncoding()
-    }
 }
