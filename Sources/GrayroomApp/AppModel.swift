@@ -1421,7 +1421,8 @@ final class AppModel {
         // `fullSize` (from the probe) stands in until the first decode lands.
         let size = previewSize == .zero ? fullSize : previewSize
         return PreviewStrategy.draftLongEdge(fullSize: size,
-                                             clarityActive: edit.clarityActive) != nil
+                                             clarityActive: edit.clarityActive,
+                                             grainActive: !edit.grain.isIdentity) != nil
     }
 
     private func nextStep() -> PreviewRenderStep {

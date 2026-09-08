@@ -83,9 +83,9 @@ just the pipeline.
 ## Pipeline order
 
 ```
-decode(+WB)  ->  [masks]  ->  tone  ->  clarity  ->  mix  ->  toning  ->  output
-                                                                 |
-                                                                 +->  histogram
+decode(+WB) -> [masks] -> tone -> clarity -> mix -> toning -> grain -> output
+                                                                  |
+                                                                  +-> histogram
 ```
 
 Each stage is a type in `Stages/` with an `encode(cb, source, destination, …)`
@@ -99,6 +99,25 @@ working textures, then the fixed output transform. `mix` is the slot the B&W
 mixer occupies; everything ahead of it is ratio-preserving.
 `Pipeline.render(upTo:)` can stop at any stage boundary, which is what the
 golden tests use to inspect linear intermediates.
+
+`grain` is deterministic texture with a fixed broad mix of fine flecks and
+coarse clumps. Amount sets strength and Size sets particle scale relative to the
+photo width. Size 0 is approximately single-pixel texture at 11,608 px wide
+(about 100 MP); at Size 25, the base radius is about 1/6000 of the width. One
+tone-weighted noise field drives every channel;
+symmetric per-channel bounds preserve average colour and keep the result inside
+black and display white. Away from those boundaries, RGB ratios remain fixed.
+The stage adds slight detail softness above Size 25. Reduced renders integrate
+four samples and attenuate unresolved bands to suppress crawling and aliasing.
+Amount 0 skips the stage exactly. For example:
+
+```
+grayroom render photo.dng -o photo.jpg --set grain.amount=35 \
+  --set grain.size=40
+```
+
+The Lightroom behavior and approximation choices are recorded in the
+[grain research note](../../research/lightroom-grain.md).
 
 `output` has two forms, chosen by `Pipeline.render(output:)` — see *Output
 modes* — and the histogram taps the **linear** texture the output stage reads,
@@ -135,12 +154,10 @@ mouse, so an expensive edit renders **twice**: a reduced draft while the gesture
 is live, then a refine of the same edit at full resolution as soon as nothing
 newer is pending. `PreviewStrategy` (in `GrayroomUI`) is the whole policy —
 
-* `draftLongEdge(fullSize:clarityActive:)` — draft at 2560 when clarity is
-  active, or when the frame is over 30 MP (where even the clarity-free pipeline
-  is too slow to drag against); otherwise `nil`, i.e. go straight to full.
-  `clarityActive` is `EditState.clarityActive`, *the same predicate the pipeline
-  uses to decide whether to run the clarity stage at all*, so the two can never
-  disagree about which frame is the expensive one.
+* `draftLongEdge(fullSize:clarityActive:grainActive:)` — draft at 2560 when
+  clarity or grain is active, or when the frame is over 30 MP; otherwise `nil`,
+  i.e. go straight to full. The active flags use the same identity predicates
+  as the pipeline stages.
 * `nextStep(hasPendingEdit:lastRenderWasDraft:draftLongEdge:)` — a newer edit
   always beats an owed refine, so a fast drag never pays for a full-resolution
   render it would have thrown away, and a drag settles on exactly one refine.

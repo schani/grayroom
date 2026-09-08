@@ -306,6 +306,25 @@ extension Library {
         try dbPool.read { db in try Development.fetchOne(db, key: id) }
     }
 
+    /// Development #1 and the fingerprint of the exact JSON bytes it came
+    /// from. Preview rendering needs both from one read: decoding and encoding
+    /// valid legacy JSON can change its bytes without changing the edit.
+    public func previewDevelopment(for photoID: Int64) throws
+        -> (edit: EditState, fingerprint: Data)? {
+        try dbPool.read { db in
+            guard let json = try String.fetchOne(
+                db,
+                sql: """
+                    SELECT edit_json FROM developments
+                    WHERE photo_id = ? ORDER BY ordinal LIMIT 1
+                    """,
+                arguments: [photoID])
+            else { return nil }
+            let data = Data(json.utf8)
+            return (try EditState.decode(from: data), EditState.fingerprint(ofEditJSON: data))
+        }
+    }
+
     /// Appends a development. Ordinals are 1-based and dense per photo, so the first
     /// development of a photo is development #1.
     @discardableResult

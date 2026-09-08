@@ -42,6 +42,15 @@ final class PipelinePassesTests: XCTestCase {
         assertInPipelineOrder(planned)
     }
 
+    func testGrainAddsItsPassAfterToning() throws {
+        var edit = EditState()
+        edit.toning.shadowSaturation = 40
+        edit.grain.amount = 35
+        let planned = try stages(edit)
+        XCTAssertEqual(planned, [.tone, .mix, .toning, .grain])
+        assertInPipelineOrder(planned)
+    }
+
     func testEverythingButTheMixer() throws {
         var edit = EditState()
         edit.bwMix.enabled = false

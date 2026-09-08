@@ -9,6 +9,7 @@ import Metal
 ///     -> clarity    (fast local Laplacian on log2 luminance, per-pixel amount) [skipped at 0]
 ///     -> mix        (8 hue bands -> gray)          [skipped when disabled]
 ///     -> toning     (split tone, luminance-neutral) [skipped when identity]
+///     -> grain      (source-anchored photographic grain) [skipped at Amount 0]
 ///     -> output     (file: linear -> sRGB, clamped 0…1;
 ///                    display: linear, clamped 0…W)
 ///     -> histogram tap (on the linear texture the output stage reads)
@@ -31,7 +32,8 @@ public final class Pipeline {
     /// preview stale (see `EditStateIO`).
     ///
     /// 2: highlight recovery on wherever `CIRAWFilter` supports it.
-    public static let rendererVersion = 2
+    /// 7: width-relative photographic grain.
+    public static let rendererVersion = 7
 
     public let context: MetalContext
 
@@ -40,6 +42,7 @@ public final class Pipeline {
     private let clarityStage: ClarityStage
     private let bwMixStage: BWMixStage
     private let toningStage: ToningStage
+    private let grainStage: GrainStage
     private let outputStage: OutputStage
     let maskStage: MaskStage
 
@@ -79,6 +82,7 @@ public final class Pipeline {
         clarityStage = try ClarityStage(context: context)
         bwMixStage = try BWMixStage(context: context)
         toningStage = try ToningStage(context: context)
+        grainStage = try GrainStage(context: context)
         outputStage = try OutputStage(context: context)
         maskStage = try MaskStage(context: context)
     }
@@ -87,7 +91,7 @@ public final class Pipeline {
     /// occupies. Useful for golden tests that need to inspect an intermediate
     /// (still linear) result.
     public enum Stage: Int, CaseIterable, Sendable {
-        case tone, clarity, mix, toning, output
+        case tone, clarity, mix, toning, grain, output
     }
 
     /// What the `output` stage produces.
@@ -168,6 +172,14 @@ public final class Pipeline {
             passes.append(Pass(stage: .toning) { cb, src, dst in
                 try self.toningStage.encode(cb, source: src, destination: dst,
                                             toning: edit.toning)
+            })
+        }
+
+        if !edit.grain.isIdentity {
+            passes.append(Pass(stage: .grain) { cb, src, dst in
+                try self.grainStage.encode(cb, source: src, destination: dst,
+                                           grain: edit.grain,
+                                           displayWhite: edit.displayWhite)
             })
         }
 

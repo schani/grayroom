@@ -12,6 +12,8 @@ final class EditStateTests: XCTestCase {
         XCTAssertTrue(e.bwMix.enabled)
         XCTAssertEqual(e.clarity, 0)
         XCTAssertEqual(e.toning, EditState.Toning())
+        XCTAssertEqual(e.grain, EditState.Grain(amount: 0, size: 25))
+        XCTAssertTrue(e.grain.isIdentity)
         XCTAssertTrue(e.masks.isEmpty)
         XCTAssertFalse(e.hdr)
         XCTAssertEqual(e.displayWhite, 1.0)
@@ -55,6 +57,7 @@ final class EditStateTests: XCTestCase {
         e.clarity = 22
         e.toning = .init(shadowHue: 215, shadowSaturation: 12,
                          highlightHue: 45, highlightSaturation: 10, balance: 10)
+        e.grain = .init(amount: 36, size: 61)
         e.masks = [Mask(name: "sky",
                         adjustments: MaskAdjustments(exposure: -0.8, contrast: 15, clarity: 20),
                         strokes: [Stroke(brush: BrushParams(size: 0.25, feather: 60),
@@ -97,6 +100,7 @@ final class EditStateTests: XCTestCase {
         XCTAssertEqual(e.bwMix.red, -20)
         XCTAssertTrue(e.bwMix.enabled)               // missing bool -> default true
         XCTAssertEqual(e.toning.shadowHue, 200)
+        XCTAssertEqual(e.grain, EditState.Grain())
         XCTAssertNil(e.whiteBalance.temperature)     // missing object -> default
     }
 
@@ -115,9 +119,11 @@ final class EditStateTests: XCTestCase {
                   "bwMix.aqua", "bwMix.blue", "bwMix.purple", "bwMix.magenta",
                   "bwMix.enabled",
                   "toning.shadowHue", "toning.shadowSaturation",
-                  "toning.highlightHue", "toning.highlightSaturation", "toning.balance"] {
+                  "toning.highlightHue", "toning.highlightSaturation", "toning.balance",
+                  "grain.amount", "grain.size"] {
             XCTAssertTrue(keys.contains(k), "missing settable key \(k)")
         }
+        XCTAssertFalse(keys.contains("grain.roughness"))
     }
 
     func testDottedSetMerge() throws {
@@ -127,6 +133,8 @@ final class EditStateTests: XCTestCase {
             "toning.shadowHue=210",
             "bwMix.enabled=false",
             "clarity=15",
+            "grain.amount=40",
+            "grain.size=70",
             "whiteBalance.temperature=5200",
         ])
         XCTAssertEqual(e.tone.exposure, 1.0)
@@ -134,10 +142,46 @@ final class EditStateTests: XCTestCase {
         XCTAssertEqual(e.toning.shadowHue, 210)
         XCTAssertFalse(e.bwMix.enabled)
         XCTAssertEqual(e.clarity, 15)
+        XCTAssertEqual(e.grain, .init(amount: 40, size: 70))
         XCTAssertEqual(e.whiteBalance.temperature, 5200)
         // untouched fields keep their defaults
         XCTAssertEqual(e.tone.contrast, 0)
         XCTAssertEqual(e.bwMix.blue, 0)
+    }
+
+    func testGrainDecodingIsTolerantAndClampsEveryControl() throws {
+        let absent = try EditState.decode(from: Data(#"{"tone":{"exposure":1}}"#.utf8))
+        XCTAssertEqual(absent.grain, EditState.Grain())
+
+        let partial = try EditState.decode(from: Data(#"{"grain":{"amount":250}}"#.utf8))
+        XCTAssertEqual(partial.grain, .init(amount: 100, size: 25))
+
+        let below = try EditState.decode(from: Data(
+            #"{"grain":{"amount":-1,"size":-20,"roughness":-30}}"#.utf8))
+        XCTAssertEqual(below.grain, .init(amount: 0, size: 0))
+        XCTAssertTrue(below.grain.isIdentity)
+    }
+
+    func testStoredRoughnessIsIgnoredAndNeverEncoded() throws {
+        let old = try EditState.decode(from: Data(
+            #"{"grain":{"amount":40,"size":70,"roughness":0}}"#.utf8))
+        let other = try EditState.decode(from: Data(
+            #"{"grain":{"amount":40,"size":70,"roughness":100}}"#.utf8))
+
+        XCTAssertEqual(old, other)
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: old.jsonData()) as? [String: Any])
+        let grain = try XCTUnwrap(root["grain"] as? [String: Any])
+        XCTAssertEqual(Set(grain.keys), ["amount", "size"])
+    }
+
+    func testDefaultGrainIsOmittedFromCanonicalJSON() throws {
+        let text = String(decoding: try EditState().jsonData(), as: UTF8.self)
+        XCTAssertFalse(text.contains("\"grain\""))
+
+        var edit = EditState()
+        edit.grain.amount = 1
+        XCTAssertTrue(String(decoding: try edit.jsonData(), as: UTF8.self).contains("\"grain\""))
     }
 
     func testSetPreservesUnrelatedValues() throws {

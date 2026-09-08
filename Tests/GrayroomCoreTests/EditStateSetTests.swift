@@ -81,6 +81,22 @@ final class EditStateSetTests: XCTestCase {
             .masks[0].adjustments.clarity, -100)
     }
 
+    func testGrainControlsAreClampedRatherThanRejected() throws {
+        let edit = try EditState().applying(settings: [
+            "grain.amount=140", "grain.size=-4",
+        ])
+        XCTAssertEqual(edit.grain, .init(amount: 100, size: 0))
+    }
+
+    func testRoughnessIsNotSettable() {
+        assertThrows(["grain.roughness=72"]) {
+            guard case .unknownKeyPath(let key) = $0 else {
+                return XCTFail("wrong error \($0)")
+            }
+            XCTAssertEqual(key, "grain.roughness")
+        }
+    }
+
     // MARK: - Path parsing
 
     func testAnEmptyPathComponentIsRejected() {

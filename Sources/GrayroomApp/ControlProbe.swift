@@ -81,4 +81,29 @@ extension View {
                                      accessibilityValue: value) { _, _ in onClick() })
             .accessibilityHidden(true)
     }
+
+    /// The label half of Lightroom's double-click-to-reset slider behavior.
+    func doubleClickTarget(_ name: String, label: String,
+                           onDoubleClick: @escaping () -> Void) -> some View {
+        modifier(DoubleClickTarget(name: name, label: label,
+                                   onDoubleClick: onDoubleClick))
+    }
+}
+
+private struct DoubleClickTarget: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+    let name: String
+    let label: String
+    let onDoubleClick: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .allowsHitTesting(false)
+            .background(ClickCatcher(identifier: ControlProbe.identifier(name),
+                                     help: "Double-click to reset",
+                                     accessibilityLabel: label) { _, count in
+                if isEnabled && count == 2 { onDoubleClick() }
+            })
+            .accessibilityHidden(true)
+    }
 }

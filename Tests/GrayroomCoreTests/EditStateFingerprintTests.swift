@@ -14,6 +14,7 @@ final class EditStateFingerprintTests: XCTestCase {
                                    shadows: -20, whites: 5, blacks: -7)
         edit.clarity = 42
         edit.toning.shadowHue = 210
+        edit.grain = .init(amount: 30, size: 45)
         edit.masks = [
             Mask(id: UUID(uuidString: "6A1E0B0C-0000-4000-8000-000000000001")!,
                  name: "Sky",
@@ -52,6 +53,8 @@ final class EditStateFingerprintTests: XCTestCase {
             ("clarity", { $0.clarity = 20 }),
             ("bw mix", { $0.bwMix.red = 30 }),
             ("toning", { $0.toning.highlightSaturation = 25 }),
+            ("grain amount", { $0.grain.amount = 31 }),
+            ("grain size", { $0.grain.size = 46 }),
             ("hdr", { $0.hdr = true }),
             ("white balance", { $0.whiteBalance = EditState.WhiteBalance(temperature: 4000) }),
         ]
@@ -97,5 +100,65 @@ final class EditStateFingerprintTests: XCTestCase {
         let decoded = try EditState.decode(from: edit.jsonData())
         XCTAssertEqual(decoded, edit)
         XCTAssertEqual(decoded.fingerprint, edit.fingerprint)
+    }
+
+    func testStoredRoughnessDoesNotParticipateInDecodedEditFingerprint() throws {
+        let old = try EditState.decode(from: Data(
+            #"{"grain":{"amount":30,"size":45,"roughness":0}}"#.utf8))
+        let current = try EditState.decode(from: Data(
+            #"{"grain":{"amount":30,"size":45}}"#.utf8))
+
+        XCTAssertEqual(old, current)
+        XCTAssertEqual(old.fingerprint, current.fingerprint)
+    }
+
+    func testAddingDefaultGrainDoesNotMoveLegacyCanonicalFingerprint() throws {
+        // Captured from the synthesized pre-grain encoder. A fixture, rather
+        // than today's encoder generating its own expected value, catches any
+        // unrelated field accidentally lost by the compatibility encoder.
+        let canonical = Data("""
+        {
+          "bwMix" : {
+            "aqua" : 0,
+            "blue" : 0,
+            "enabled" : true,
+            "green" : 0,
+            "magenta" : 0,
+            "orange" : 0,
+            "purple" : 0,
+            "red" : 0,
+            "yellow" : 0
+          },
+          "clarity" : 0,
+          "hdr" : false,
+          "masks" : [
+
+          ],
+          "tone" : {
+            "blacks" : 0,
+            "contrast" : 0,
+            "exposure" : 0,
+            "highlights" : 0,
+            "shadows" : 0,
+            "whites" : 0
+          },
+          "toning" : {
+            "balance" : 0,
+            "highlightHue" : 0,
+            "highlightSaturation" : 0,
+            "shadowHue" : 0,
+            "shadowSaturation" : 0
+          },
+          "version" : 1,
+          "whiteBalance" : {
+
+          }
+        }
+        """.utf8)
+        XCTAssertEqual(try EditState().jsonData(), canonical)
+
+        let decoded = try EditState.decode(from: canonical)
+        XCTAssertEqual(try decoded.jsonData(), canonical)
+        XCTAssertEqual(decoded.fingerprint, EditState.fingerprint(ofEditJSON: canonical))
     }
 }

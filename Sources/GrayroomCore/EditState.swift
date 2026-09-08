@@ -21,6 +21,7 @@ public struct EditState: Codable, Equatable, Sendable {
     /// `clamp(global + Σ Δ, 0, 100)`.
     public var clarity: Double
     public var toning: Toning
+    public var grain: Grain
     /// Brush-painted local adjustments (M3). Schema version stays 1: `masks` was
     /// already part of it, so a stored edit with `"masks": []` still decodes.
     public var masks: [Mask]
@@ -43,6 +44,7 @@ public struct EditState: Codable, Equatable, Sendable {
         bwMix: BWMix = BWMix(),
         clarity: Double = 0,
         toning: Toning = Toning(),
+        grain: Grain = Grain(),
         masks: [Mask] = [],
         hdr: Bool = false
     ) {
@@ -52,12 +54,13 @@ public struct EditState: Codable, Equatable, Sendable {
         self.bwMix = bwMix
         self.clarity = clarity
         self.toning = toning
+        self.grain = grain
         self.masks = masks
         self.hdr = hdr
     }
 
     private enum CodingKeys: String, CodingKey {
-        case version, whiteBalance, tone, bwMix, clarity, toning, masks, hdr
+        case version, whiteBalance, tone, bwMix, clarity, toning, grain, masks, hdr
     }
 
     public init(from decoder: Decoder) throws {
@@ -71,10 +74,25 @@ public struct EditState: Codable, Equatable, Sendable {
         // into 0…100 rather than failing.
         clarity = min(max(try c.decodeIfPresent(Double.self, forKey: .clarity) ?? 0, 0), 100)
         toning = try c.decodeIfPresent(Toning.self, forKey: .toning) ?? Toning()
+        grain = try c.decodeIfPresent(Grain.self, forKey: .grain) ?? Grain()
         masks = try c.decodeIfPresent([Mask].self, forKey: .masks) ?? []
         // Absent means SDR, so an edit stored without the key loads as exactly
         // the render it described.
         hdr = try c.decodeIfPresent(Bool.self, forKey: .hdr) ?? false
+    }
+
+    /// Omit default grain to preserve stored preview fingerprints.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(version, forKey: .version)
+        try c.encode(whiteBalance, forKey: .whiteBalance)
+        try c.encode(tone, forKey: .tone)
+        try c.encode(bwMix, forKey: .bwMix)
+        try c.encode(clarity, forKey: .clarity)
+        try c.encode(toning, forKey: .toning)
+        if grain != Grain() { try c.encode(grain, forKey: .grain) }
+        try c.encode(masks, forKey: .masks)
+        try c.encode(hdr, forKey: .hdr)
     }
 
     /// The display ceiling this edit renders toward, in linear units relative to
@@ -268,6 +286,32 @@ public struct EditState: Codable, Equatable, Sendable {
 
         public var isIdentity: Bool {
             shadowSaturation <= 0 && highlightSaturation <= 0
+        }
+    }
+
+    public struct Grain: Codable, Equatable, Sendable {
+        /// Strength and particle size, each 0…100.
+        public var amount: Double
+        public var size: Double
+
+        public init(amount: Double = 0, size: Double = 25) {
+            self.amount = amount
+            self.size = size
+        }
+
+        private enum CodingKeys: String, CodingKey { case amount, size }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            amount = min(max(try c.decodeIfPresent(Double.self, forKey: .amount) ?? 0, 0), 100)
+            size = min(max(try c.decodeIfPresent(Double.self, forKey: .size) ?? 25, 0), 100)
+        }
+
+        public var isIdentity: Bool { amount <= 0 }
+
+        public var clamped: Grain {
+            Grain(amount: min(max(amount, 0), 100),
+                  size: min(max(size, 0), 100))
         }
     }
 

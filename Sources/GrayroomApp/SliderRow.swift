@@ -13,21 +13,19 @@ struct SliderRow: View {
     /// Optional non-linear mapping (the temperature slider is logarithmic).
     var scale: SliderScale = .linear
     var trackGradient: LinearGradient?
+    var probeName: String?
     let onBegin: () -> Void
     let onEnd: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 4) {
-                Text(title)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .onTapGesture(count: 2) {
-                        onBegin()
-                        value = defaultValue
-                        onEnd()
-                    }
-                    .help("Double-click to reset")
+                if let probeName {
+                    label.doubleClickTarget("\(probeName)-reset", label: "Reset \(title)",
+                                            onDoubleClick: reset)
+                } else {
+                    label.onTapGesture(count: 2, perform: reset)
+                }
                 Spacer(minLength: 4)
                 Text(String(format: format, value))
                     .font(.system(size: 11, design: .monospaced))
@@ -44,8 +42,24 @@ struct SliderRow: View {
                     if editing { onBegin() } else { onEnd() }
                 }
                 .controlSize(.small)
+                .background {
+                    if let probeName { ControlProbe(name: probeName) }
+                }
             }
         }
+    }
+
+    private var label: some View {
+        Text(title)
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .help("Double-click to reset")
+    }
+
+    private func reset() {
+        onBegin()
+        value = defaultValue
+        onEnd()
     }
 
     private var scaledBinding: Binding<Double> {

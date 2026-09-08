@@ -16,10 +16,10 @@ public enum PreviewRenderStep: Equatable, Sendable {
 ///
 /// The app decodes at full resolution — the canvas above 100 % shows the file's
 /// own pixels, not a magnified proxy — but the full pipeline at 24 MP costs
-/// ~26 ms without clarity and ~120 ms with it, and 120 ms is well past the point
-/// where a slider drag stops feeling attached to the mouse. So an expensive edit
-/// renders twice: a reduced **draft** that keeps the drag responsive, then, as
-/// soon as the drag pauses, a **refine** of the same edit at full resolution.
+/// ~40 ms with grain and ~120 ms with clarity, both past the point where a
+/// slider drag stops feeling attached to the mouse. So an expensive edit renders
+/// twice: a reduced **draft** that keeps the drag responsive, then, as soon as
+/// the drag pauses, a **refine** of the same edit at full resolution.
 ///
 /// The refine is what the histogram, the mask overlay and the eye finally see;
 /// the draft only ever exists between two frames of a gesture.
@@ -34,14 +34,15 @@ public enum PreviewStrategy {
     /// The long edge a draft of `fullSize` should render at, or `nil` when the
     /// edit is cheap enough to go straight to full resolution.
     ///
-    /// `clarityActive` is `EditState.clarityActive` — the same predicate the
-    /// pipeline uses to decide whether to run the clarity stage at all.
-    public static func draftLongEdge(fullSize: CGSize, clarityActive: Bool) -> Int? {
+    /// The active flags match the predicates that make the pipeline run its
+    /// two stages too expensive for a direct camera-resolution drag.
+    public static func draftLongEdge(fullSize: CGSize, clarityActive: Bool,
+                                     grainActive: Bool = false) -> Int? {
         let w = Int(fullSize.width.rounded()), h = Int(fullSize.height.rounded())
         guard w > 0, h > 0 else { return nil }
         // Nothing to reduce: the frame is already at or below the draft edge.
         guard max(w, h) > draftLongEdge else { return nil }
-        guard clarityActive || w * h > directRenderPixelLimit else { return nil }
+        guard clarityActive || grainActive || w * h > directRenderPixelLimit else { return nil }
         return draftLongEdge
     }
 

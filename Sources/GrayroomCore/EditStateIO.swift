@@ -90,6 +90,9 @@ extension EditState {
     public static var settableKeyPaths: Set<String> {
         var template = EditState()
         template.whiteBalance = WhiteBalance(temperature: 5500, tint: 0)
+        // Default grain is omitted from JSON for old fingerprint stability, so
+        // make it non-default while deriving the writable schema.
+        template.grain.amount = 1
         guard let data = try? template.jsonData(),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return [] }

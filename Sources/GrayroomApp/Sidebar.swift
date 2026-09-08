@@ -50,6 +50,8 @@ struct Sidebar: View {
                     Divider()
                     ToningPanel(model: model)
                     Divider()
+                    EffectsPanel(model: model)
+                    Divider()
                     MasksPanel(model: model)
                         .controlProbe("develop-adjustments-end")
                     if model.tool == .brush {
@@ -62,6 +64,32 @@ struct Sidebar: View {
         }
         .frame(width: 320)
         .background(.background)
+    }
+}
+
+// MARK: - Effects
+
+private struct EffectsPanel: View {
+    let model: AppModel
+
+    private var detailsAreEnabled: Bool {
+        !model.store.edit.grain.isIdentity
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            PanelHeader(title: "Effects")
+            Text("Grain")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            SliderRow(title: "Amount", value: model.binding(\.grain.amount),
+                      range: 0...100, probeName: "grain-amount",
+                      onBegin: model.beginEdit, onEnd: { model.endEdit("Grain Amount") })
+            SliderRow(title: "Size", value: model.binding(\.grain.size),
+                      range: 0...100, defaultValue: 25, probeName: "grain-size",
+                      onBegin: model.beginEdit, onEnd: { model.endEdit("Grain Size") })
+                .disabled(!detailsAreEnabled)
+        }
     }
 }
 

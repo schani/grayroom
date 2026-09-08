@@ -95,6 +95,28 @@ final class RenderCommandTests: XCTestCase {
         XCTAssertGreaterThan(try meanCode(bright), try meanCode(dark) + 10)
     }
 
+    func testGrainSettingsRenderAndSaveThroughTheCLI() throws {
+        let plain = out("plain.png")
+        let grained = out("grained.png")
+        let saved = out("grain-edit.json")
+        try temp.run(["render", input.path, "-o", plain.path])
+        try temp.run(["render", input.path, "-o", grained.path,
+                      "--set", "grain.amount=70",
+                      "--set", "grain.size=45",
+                      "--save-edit", saved.path])
+
+        XCTAssertNotEqual(try grayPixels(plain, width: 64, height: 48),
+                          try grayPixels(grained, width: 64, height: 48))
+        XCTAssertEqual(try EditState.load(from: saved).grain,
+                       .init(amount: 70, size: 45))
+    }
+
+    func testGrainRoughnessIsRejected() {
+        temp.assertFails(["render", input.path, "-o", out("roughness.png").path,
+                          "--set", "grain.roughness=80"],
+                         contains: "unknown edit key 'grain.roughness'")
+    }
+
     func testHistogramIsPrintedOnlyWhenAsked() throws {
         let quiet = try temp.run(["render", input.path, "-o", out("a.png").path])
         XCTAssertFalse(quiet.stderr.contains("pixels="), quiet.stderr)

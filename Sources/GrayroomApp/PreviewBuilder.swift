@@ -44,10 +44,11 @@ enum PreviewKind: Equatable {
 /// not what the camera's embedded JPEG says. So a preview is one of two things —
 /// the embedded preview for a photo with no development, this app's pipeline run
 /// over development #1 for a photo with one — and the row remembers which,
-/// together with the `EditState.fingerprint` it was rendered from. Saving an
-/// edit moves that fingerprint, the stored preview stops matching, and the cell
-/// rebuilds. Deleting the development moves it back to `nil` and the cell falls
-/// back to the embedded preview, by the same rule and with no code of its own.
+/// together with the fingerprint of the stored edit JSON it was rendered from.
+/// Saving an edit moves that fingerprint, the stored preview stops matching,
+/// and the cell rebuilds. Deleting the development moves it back to `nil` and
+/// the cell falls back to the embedded preview, by the same rule and with no
+/// code of its own.
 ///
 /// # Why three levels
 ///
@@ -100,8 +101,8 @@ final class PreviewBuilder {
     /// Where the "Building previews" row comes from. Replaced by `AppModel` with
     /// the app's own; the default keeps this class usable on its own.
     var tasks = TaskCenter()
-    /// The developments to render from. Without it every photo falls back to its
-    /// embedded preview.
+    /// The developments and their stored fingerprints. Without it every photo
+    /// falls back to its embedded preview.
     var library: Library?
     var originals: OriginalStorage?
     /// Where the JPEGs live. Without it every preview is rebuilt every launch.
@@ -275,9 +276,9 @@ final class PreviewBuilder {
                 let stored = image.flatMap { PreviewBuilder.store($0, for: request, in: store) }
                 DispatchQueue.main.async { self.deliver(stored, for: request, remember: true) }
             case .rendered:
-                let edit = (try? library?.developments(for: id))??.first?.edit
+                let development = library.flatMap { try? $0.previewDevelopment(for: id) }
                 DispatchQueue.main.async {
-                    self.startRender(request, url: url, edit: edit)
+                    self.startRender(request, url: url, development: development)
                 }
             }
         }
@@ -285,19 +286,22 @@ final class PreviewBuilder {
 
     /// The second half of a rendered preview: the pipeline run, then the encode
     /// and the store write back on the worker.
-    private func startRender(_ request: Request, url: URL, edit: EditState?) {
-        guard let render, let edit, !renderFailed.contains(request.id) else {
+    private func startRender(_ request: Request, url: URL,
+                             development: (edit: EditState, fingerprint: Data)?) {
+        guard let render, let development, !renderFailed.contains(request.id) else {
             fallBackToEmbedded(request, url: url)
             return
         }
-        // What was actually read, which is what the row must say it is: the
-        // development may have moved since the catalog snapshot was taken.
-        let rendered = Request(id: request.id, hash: request.hash,
-                               originalName: request.originalName,
-                               kind: .rendered(edit.fingerprint))
+        // The development may have moved since the catalog snapshot. Finish a
+        // genuinely newer queued request, but drain a stale request that has no
+        // replacement instead of rendering and requeueing it forever.
+        guard request.kind == .rendered(development.fingerprint) else {
+            deliver(nil, for: request, remember: false)
+            return
+        }
         let store = previews
         SelfTest.note("preview \(request.id): rendering development #1")
-        render(url, edit) { [weak self] image in
+        render(url, development.edit) { [weak self] image in
             guard let self else { return }
             guard let image else {
                 self.renderFailed.insert(request.id)
@@ -305,8 +309,8 @@ final class PreviewBuilder {
                 return
             }
             self.queue.async {
-                let stored = PreviewBuilder.store(image, for: rendered, in: store)
-                DispatchQueue.main.async { self.deliver(stored, for: rendered, remember: true) }
+                let stored = PreviewBuilder.store(image, for: request, in: store)
+                DispatchQueue.main.async { self.deliver(stored, for: request, remember: true) }
             }
         }
     }

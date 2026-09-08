@@ -37,6 +37,15 @@ struct ToningUniforms {
     var lumaPreserve: Float
 }
 
+struct GrainUniforms {
+    var amplitude: Float
+    var baseRadius: Float
+    var pixelFootprint: Float
+    var displayWhite: Float
+    var blurRadius: Float
+    var blurBlend: Float
+}
+
 /// Mirrors `ClarityUniforms` in `Clarity.metal`. Scalar-only, 4-byte aligned
 /// throughout, so the Swift and MSL layouts agree.
 struct ClarityUniforms {

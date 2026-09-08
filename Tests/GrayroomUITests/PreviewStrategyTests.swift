@@ -20,6 +20,17 @@ final class PreviewStrategyTests: XCTestCase {
                        PreviewStrategy.draftLongEdge)
     }
 
+    func testGrainMakesACameraSizedFrameDraft() {
+        XCTAssertEqual(PreviewStrategy.draftLongEdge(fullSize: mp24, clarityActive: false,
+                                                     grainActive: true),
+                       PreviewStrategy.draftLongEdge)
+    }
+
+    func testZeroGrainDoesNotChangeTheExistingPolicy() {
+        XCTAssertNil(PreviewStrategy.draftLongEdge(fullSize: mp24, clarityActive: false,
+                                                   grainActive: false))
+    }
+
     /// Above the pixel limit even a clarity-free pipeline is too slow to drag
     /// against, so the draft is not conditional on clarity there.
     func testAVeryLargeFrameDraftsEvenWithoutClarity() {
@@ -33,6 +44,8 @@ final class PreviewStrategyTests: XCTestCase {
     /// drafting it would cost a whole extra render for an identical picture.
     func testASmallFrameNeverDrafts() {
         XCTAssertNil(PreviewStrategy.draftLongEdge(fullSize: small, clarityActive: true))
+        XCTAssertNil(PreviewStrategy.draftLongEdge(fullSize: small, clarityActive: false,
+                                                   grainActive: true))
         let exact = CGSize(width: PreviewStrategy.draftLongEdge, height: 1707)
         XCTAssertNil(PreviewStrategy.draftLongEdge(fullSize: exact, clarityActive: true))
     }

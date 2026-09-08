@@ -37,7 +37,7 @@ public final class MetalContext {
 
     /// `Common.metal` is prepended to every stage source; the whole thing is
     /// compiled as one translation unit.
-    static let shaderFiles = ["Common", "Tone", "BWMix", "Clarity", "Mask", "Toning",
+    static let shaderFiles = ["Common", "Tone", "BWMix", "Clarity", "Mask", "Toning", "Grain",
                               "Output", "Histogram", "Downsample"]
 
     private var pipelineCache: [String: MTLComputePipelineState] = [:]

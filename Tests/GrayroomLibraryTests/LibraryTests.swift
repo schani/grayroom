@@ -330,6 +330,28 @@ final class LibraryTests: XCTestCase {
                        try XCTUnwrap(library.developments(for: photoID).first).edit.fingerprint)
     }
 
+    func testPreviewDevelopmentCarriesTheStoredJSONFingerprint() throws {
+        let photoID = try makePhoto("a.raw")
+        let created = try library.addDevelopment(photoID: photoID, edit: EditState())
+        let compactJSON = Data(
+            #"{"style":"softColor","treatment":"color","bwMix":{"red":0}}"#.utf8)
+        try library.dbPool.write { db in
+            try db.execute(sql: "UPDATE developments SET edit_json = ? WHERE id = ?",
+                           arguments: [String(decoding: compactJSON, as: UTF8.self), created.id])
+        }
+
+        let development = try XCTUnwrap(library.previewDevelopment(for: photoID))
+        let catalogFingerprint = try XCTUnwrap(
+            library.catalogSnapshot().summaries[photoID]?.developmentFingerprint)
+        XCTAssertEqual(development.edit, EditState())
+        XCTAssertEqual(development.fingerprint, catalogFingerprint)
+        XCTAssertEqual(development.fingerprint,
+                       EditState.fingerprint(ofEditJSON: compactJSON))
+        XCTAssertNotEqual(development.fingerprint, development.edit.fingerprint,
+                          "valid legacy JSON can decode to the same edit without having "
+                              + "the canonical bytes used by EditState.fingerprint")
+    }
+
     // MARK: - Color label
 
     func testColorLabelRawValues() {

@@ -9,7 +9,7 @@ import Metal
 import Observation
 import UniformTypeIdentifiers
 
-/// `GRAYROOM_SELFTEST=paint|undo|import|library|library2|storage swift run GrayroomApp <file.DNG>`
+/// `GRAYROOM_SELFTEST=paint|undo|grain|previews|import|library|library2|storage swift run GrayroomApp <file>`
 ///
 /// Whole-app checks, each in its own process: `paint` (a stroke drawn with real
 /// mouse events), `undo` (Cmd-Z / Cmd-Shift-Z pushed through the real menu-bar
@@ -38,6 +38,11 @@ enum SelfTest {
         /// Repro (d): Cmd-Z / Cmd-Shift-Z pushed through the real menu-bar key
         /// equivalent path, which is where the undo bug actually lived.
         case undo
+        /// The Grain controls, rendered result, undo/reset and library persistence.
+        /// Run with `CFFIXED_USER_HOME` pointed at a throwaway directory.
+        case grain
+        /// Preview queue handling for legacy edit JSON and stale catalog requests.
+        case previews
         /// The import window: the File › Import… item as AppKit sees it, the
         /// second `Window` scene actually opening, thumbnails arriving in the
         /// grid, and the selection commands moving the ring and the checkboxes.
@@ -187,6 +192,10 @@ enum SelfTest {
         }
         if mode == .originalStorageSetup {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { runOriginalStorageSetup() }
+            return
+        }
+        if mode == .previews {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { runPreviews() }
             return
         }
         // Same reason: the library test starts from an empty library and no
@@ -646,21 +655,23 @@ enum SelfTest {
     /// The `ControlProbe` itself is invisible to hit testing, so the click
     /// lands on whatever SwiftUI drew on top of it.
     @discardableResult
-    static func clickProbe(named name: String) -> Bool {
+    static func clickProbe(named name: String, clickCount: Int = 1) -> Bool {
         guard let probe = probeView(name), let window = probe.window else {
             log("self-test: nothing named '\(name)' to click")
             return false
         }
         let point = probe.convert(CGPoint(x: probe.bounds.midX, y: probe.bounds.midY), to: nil)
-        clickCounter += 1
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            guard let event = NSEvent.mouseEvent(
-                with: type, location: point, modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: window.windowNumber, context: nil,
-                eventNumber: clickCounter, clickCount: 1, pressure: 1)
-            else { return false }
-            window.sendEvent(event)
+        for count in 1...max(clickCount, 1) {
+            clickCounter += 1
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                guard let event = NSEvent.mouseEvent(
+                    with: type, location: point, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber, context: nil,
+                    eventNumber: clickCounter, clickCount: count, pressure: 1)
+                else { return false }
+                window.sendEvent(event)
+            }
         }
         let hit = searchRoot(of: window)?.hitTest(point)
         log("self-test: clicked '\(name)' at \(point) in '\(window.title)' "
@@ -840,7 +851,8 @@ enum SelfTest {
             switch mode {
             case .paint, nil: run(canvas: canvas, model: model)
             case .undo: runUndo(canvas: canvas, model: model)
-            case .importWindow, .library, .library2, .originalStorageSetup: break
+            case .grain: runGrain(canvas: canvas, model: model)
+            case .previews, .importWindow, .library, .library2, .originalStorageSetup: break
             }
         }
     }
