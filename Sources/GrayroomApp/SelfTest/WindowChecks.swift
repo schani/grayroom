@@ -201,6 +201,8 @@ extension SelfTest {
         // that changed its height the whole window below the title bar would
         // shift by a couple of points on every `g`/`d`.
         var activitySlotInLibrary: NSRect = .zero
+        var histogramFrame = NSRect.zero
+        var whiteBalanceFrame = NSRect.zero
 
         let steps: [() -> Void] = [
             {
@@ -240,6 +242,40 @@ extension SelfTest {
             {
                 check(app.mode == .develop, "d switched to Develop (got \(app.mode.rawValue))")
                 check(findCanvas() != nil, "…and the canvas is in the window")
+                histogramFrame = controlFrame(named: "develop-histogram") ?? .zero
+                whiteBalanceFrame = controlFrame(named: "develop-white-balance") ?? .zero
+                check(histogramFrame != .zero, "the Develop histogram is drawn")
+                check(whiteBalanceFrame != .zero, "the adjustment panels are drawn")
+                if let whiteBalance = probeView("develop-white-balance"),
+                   let scroll = whiteBalance.enclosingScrollView,
+                   let document = scroll.documentView {
+                    let bottom = max(0, document.bounds.height - scroll.contentView.bounds.height)
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: bottom))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                } else {
+                    check(false, "the adjustments are in a scroll view")
+                }
+            },
+            {
+                let scrolledHistogram = controlFrame(named: "develop-histogram") ?? .zero
+                let scrolledWhiteBalance = controlFrame(named: "develop-white-balance") ?? .zero
+                check(scrolledHistogram == histogramFrame,
+                      "the histogram stayed fixed while the adjustments scrolled "
+                          + "(\(scrolledHistogram) vs \(histogramFrame))")
+                check(scrolledWhiteBalance != whiteBalanceFrame,
+                      "the adjustment panels moved "
+                          + "(\(scrolledWhiteBalance) vs \(whiteBalanceFrame))")
+                if let end = controlFrame(named: "develop-adjustments-end"),
+                   let scroll = probeView("develop-adjustments-end")?.enclosingScrollView {
+                    let viewport = scroll.window.map {
+                        $0.convertToScreen(scroll.convert(scroll.bounds, to: nil))
+                    } ?? .zero
+                    check(viewport.intersects(end),
+                          "the last adjustment panel is reachable at the bottom")
+                } else {
+                    check(false, "the last adjustment panel is in the scroll view")
+                }
+                writeScreenshot(of: window, named: "selftest-develop-sticky-histogram.png")
                 // The status bar swaps its ends over — and does not move.
                 check(controlFrame(named: "library-count") == nil,
                       "the grid's photo count left the status bar with the grid")

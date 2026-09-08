@@ -30,26 +30,35 @@ struct Sidebar: View {
     let model: AppModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(spacing: 10) {
                 HistogramView(model: model.histogram,
                               sdrWhiteMarker: model.sdrWhiteMarker)
+                    .controlProbe("develop-histogram")
                 Divider()
-                WhiteBalancePanel(model: model)
-                Divider()
-                TonePanel(model: model)
-                Divider()
-                BWMixPanel(model: model)
-                Divider()
-                ToningPanel(model: model)
-                Divider()
-                MasksPanel(model: model)
-                if model.tool == .brush {
-                    Divider()
-                    BrushPanel(model: model)
-                }
             }
-            .padding(10)
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    WhiteBalancePanel(model: model)
+                        .controlProbe("develop-white-balance")
+                    Divider()
+                    TonePanel(model: model)
+                    Divider()
+                    BWMixPanel(model: model)
+                    Divider()
+                    ToningPanel(model: model)
+                    Divider()
+                    MasksPanel(model: model)
+                        .controlProbe("develop-adjustments-end")
+                    if model.tool == .brush {
+                        Divider()
+                        BrushPanel(model: model)
+                    }
+                }
+                .padding(10)
+            }
         }
         .frame(width: 320)
         .background(.background)
